@@ -264,6 +264,60 @@ func TestEmptyFCMCreatesDistinctRows(t *testing.T) {
 	}
 }
 
+func TestEnrollTrimsFCMTokenWhitespace(t *testing.T) {
+	db := openDevicesTestDB(t)
+
+	id1, _, _, err := EnrollDevice(db, "Pad", "  fcm-padded  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := db.QueryRow(`SELECT fcm_token FROM devices WHERE id = ?`, id1).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "fcm-padded" {
+		t.Fatalf("fcm_token stored = %q, want trimmed", stored)
+	}
+	// Re-pair with a differently padded variant rotates the same row.
+	id2, _, _, err := EnrollDevice(db, "Pad", "\tfcm-padded\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != id1 {
+		t.Fatal("padded fcm_token variants must match the same row")
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM devices`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v, want 1 row", n, err)
+	}
+}
+
+func TestAuthenticateLegacyNullCreatedAt(t *testing.T) {
+	db := openDevicesTestDB(t)
+	if err := ensureDevicesUpdatedAtColumn(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-pairing-migration shape: valid token hash but NULL created_at.
+	const raw = "legacy-bearer-token-for-null-created-at"
+	if _, err := db.Exec(
+		`INSERT INTO devices (id, name, token_hash, secret_key, created_at, updated_at, revoked_at, fcm_token)
+		 VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)`,
+		"d-legacy", "Legacy", sha256Hex(raw),
+		[]byte("0123456789abcdef0123456789abcdef"), ""); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("GET", "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	dev, err := AuthenticateDevice(db, req)
+	if err != nil {
+		t.Fatalf("legacy NULL created_at row must authenticate: %v", err)
+	}
+	if dev.ID != "d-legacy" {
+		t.Fatalf("dev.ID = %q, want d-legacy", dev.ID)
+	}
+}
+
 func TestFindSiblingDeviceIDs(t *testing.T) {
 	db := openDevicesTestDB(t)
 
@@ -349,7 +403,7 @@ func TestPruneEnrollTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pruned, err := PruneEnrollTokens(db, utcNow())
+	pruned, err := pruneEnrollTokens(db, utcNow())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +420,7 @@ func TestPruneEnrollTokens(t *testing.T) {
 	}
 
 	// Steady state: the live unused token is kept, nothing pruned.
-	if n, err := PruneEnrollTokens(db, utcNow()); err != nil || n != 0 {
+	if n, err := pruneEnrollTokens(db, utcNow()); err != nil || n != 0 {
 		t.Fatalf("steady-state prune: n=%d err=%v", n, err)
 	}
 }

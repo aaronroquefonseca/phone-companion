@@ -72,8 +72,9 @@ type Device struct {
 }
 
 // DeviceInfo is the admin-facing registry row. Secret-free by construction.
-// UpdatedAt is the last re-pair rotation ("" when never rotated); it is
-// omitempty so older readers ignore it.
+// UpdatedAt stamps the last re-pair rotation (fresh inserts stamp now);
+// it is "" only for rows predating the updated_at migration that have
+// never been re-paired. omitempty so older readers ignore it.
 type DeviceInfo struct {
 	ID        string `json:"device_id"`
 	Name      string `json:"device_name"`
@@ -176,13 +177,14 @@ func ensureDevicesUpdatedAtColumn(db *sql.DB) error {
 	return err
 }
 
-// PruneEnrollTokens deletes expired and already-used enroll-token rows and
+// pruneEnrollTokens deletes expired and already-used enroll-token rows and
 // reports how many rows were removed. IssueEnrollToken calls it on every
 // issue (every-Nth pruning with N=1): the table is tiny — at most
 // maxOutstandingEnrollTokens live rows plus transient expired/used ones — so
 // one small DELETE per issue costs less than a background ticker goroutine
 // that could leak past shutdown (same no-ticker rationale as widgets.go).
-func PruneEnrollTokens(db *sql.DB, now time.Time) (int64, error) {
+// Unexported: no callers outside this package.
+func pruneEnrollTokens(db *sql.DB, now time.Time) (int64, error) {
 	res, err := db.Exec(`DELETE FROM enroll_tokens WHERE expires_at <= ? OR used != 0`, formatTime(now))
 	if err != nil {
 		return 0, err
@@ -205,7 +207,7 @@ func IssueEnrollToken(db *sql.DB, ttl time.Duration) (rawToken string, expiresAt
 	now := utcNow()
 	expiresAt = now.Add(ttl)
 
-	if _, err := PruneEnrollTokens(db, now); err != nil {
+	if _, err := pruneEnrollTokens(db, now); err != nil {
 		return "", time.Time{}, err
 	}
 	if _, err := db.Exec(
@@ -373,7 +375,8 @@ func ListDevices(db *sql.DB) ([]DeviceInfo, error) {
 // stays an explicit operator action. Only live rows (revoked_at IS NULL)
 // are returned; revoked rows need no action.
 func FindSiblingDeviceIDs(db *sql.DB, deviceName, exceptID string) ([]string, error) {
-	name := strings.TrimSpace(deviceName)
+	// Same normalization as EnrollDevice so lookups match stored names.
+	name := truncateNameBytes(strings.TrimSpace(deviceName), maxDeviceNameBytes)
 	if name == "" {
 		return []string{}, nil
 	}
@@ -455,7 +458,10 @@ func AuthenticateDevice(db *sql.DB, r *http.Request) (*Device, error) {
 	}
 	want := sha256Hex(raw)
 	var d Device
-	var created string
+	// created_at is NULL for rows predating the P0 pairing migration;
+	// NullString keeps those rows authenticating instead of hard-failing
+	// the Scan (mirrors ListDevices).
+	var created sql.NullString
 	err := db.QueryRow(
 		`SELECT id, name, created_at FROM devices WHERE token_hash = ? AND revoked_at IS NULL`,
 		want).Scan(&d.ID, &d.Name, &created)
@@ -465,8 +471,10 @@ func AuthenticateDevice(db *sql.DB, r *http.Request) (*Device, error) {
 		}
 		return nil, err
 	}
-	if t, err := time.Parse(time.RFC3339, created); err == nil {
-		d.CreatedAt = t
+	if created.Valid {
+		if t, err := time.Parse(time.RFC3339, created.String); err == nil {
+			d.CreatedAt = t
+		}
 	}
 	return &d, nil
 }
