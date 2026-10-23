@@ -76,8 +76,8 @@ func manyIDs(n int) []string {
 	return out
 }
 
-// openTestDB returns an in-memory DB with base + notify schemas applied.
-func openTestDB(t *testing.T) *sql.DB {
+// openNotifyTestDB returns an in-memory DB with base + notify schemas applied.
+func openNotifyTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -105,7 +105,7 @@ func postNotify(t *testing.T, db *sql.DB, body string) *httptest.ResponseRecorde
 }
 
 func TestHandleNotifyHappyPaths(t *testing.T) {
-	db := openTestDB(t)
+	db := openNotifyTestDB(t)
 	for _, body := range []string{
 		`{"target":{"all":true},"title":"Hi","body":"Yo"}`,
 		`{"target":{"device_ids":["dev-1"]},"kind":"alert","title":"Hi","body":"Yo"}`,
@@ -126,7 +126,7 @@ func TestHandleNotifyHappyPaths(t *testing.T) {
 }
 
 func TestHandleNotifyRejects(t *testing.T) {
-	db := openTestDB(t)
+	db := openNotifyTestDB(t)
 	many, _ := json.Marshal(map[string]any{
 		"target": map[string]any{"device_ids": manyIDs(notify.MaxDeviceIDs + 1)},
 		"title":  "t", "body": "b",

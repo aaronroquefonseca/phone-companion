@@ -20,6 +20,10 @@ import (
 // escape hatch NOTIFY_UNAUTHENTICATED=1 is set (dev/CI/verification only —
 // P9 real session auth must land before/with any real FCM send, and this
 // flag must never be set in production).
+//
+// Note: the flag is read once at route registration, not per request, so
+// toggling it requires a restart. This keeps the hot path branch-free and
+// makes the gate's state visible in one place.
 func requireAdminNotifyStub(next http.Handler) http.HandlerFunc {
 	open := os.Getenv("NOTIFY_UNAUTHENTICATED") == "1"
 	return func(w http.ResponseWriter, r *http.Request) {

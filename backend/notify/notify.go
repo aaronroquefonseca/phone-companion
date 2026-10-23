@@ -215,7 +215,7 @@ type LogSender struct{}
 
 // Send implements Sender.
 func (LogSender) Send(_ context.Context, device Device, msg Message) error {
-	log.Printf("notify: kind=%s priority=%s channel=%s device=%s title=%q body=%q actions=%d",
+	log.Printf("notify: kind=%q priority=%s channel=%q device=%q title=%q body=%q actions=%d",
 		msg.Kind, msg.Priority, msg.Channel, device.ID, msg.Title, msg.Body, len(msg.Actions))
 	return nil
 }
