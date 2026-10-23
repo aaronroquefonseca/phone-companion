@@ -9,10 +9,9 @@ import com.phonecompanion.app.widgets.SecretWidget
 import com.phonecompanion.app.widgets.StatusWidget
 import com.phonecompanion.app.widgets.TextWidget
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.supervisorScope
 
 /**
  * Shared generic polling plumbing (widgets PR / P7).
@@ -42,16 +41,18 @@ object WidgetPoller {
     /**
      * Push cached state to each per-type widget. No fully-generic renderer.
      *
-     * One child per type under its own [SupervisorJob] so a failing type
-     * cannot cancel its siblings; one try/catch per instance id so a broken
-     * instance cannot fail its type batch. Cancellation is always rethrown.
+     * [supervisorScope] with one child per type: a failing type cannot cancel
+     * its siblings, while parent cancellation still propagates to every child
+     * (no detached jobs, nothing keeps running after the caller is gone).
+     * One try/catch per instance id so a broken instance cannot fail its type
+     * batch. Cancellation is always rethrown.
      */
-    suspend fun updateAllWidgets(context: Context) = coroutineScope {
+    suspend fun updateAllWidgets(context: Context) = supervisorScope {
         listOf(
-            async(SupervisorJob()) { updateAll(context, TextWidget()) },
-            async(SupervisorJob()) { updateAll(context, SecretWidget()) },
-            async(SupervisorJob()) { updateAll(context, ListWidget()) },
-            async(SupervisorJob()) { updateAll(context, StatusWidget()) },
+            async { updateAll(context, TextWidget()) },
+            async { updateAll(context, SecretWidget()) },
+            async { updateAll(context, ListWidget()) },
+            async { updateAll(context, StatusWidget()) },
         ).awaitAll()
     }
 
