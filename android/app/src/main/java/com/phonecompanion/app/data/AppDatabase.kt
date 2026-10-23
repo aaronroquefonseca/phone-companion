@@ -29,8 +29,13 @@ interface DeviceDao {
     // No queries at v1: pairing state is owned by SecureStorage.
 }
 
-@Database(entities = [DeviceEntity::class, WidgetCacheEntity::class], version = 2, exportSchema = false)
+@Database(
+    entities = [DeviceEntity::class, WidgetCacheEntity::class, WidgetBindingEntity::class],
+    version = 3,
+    exportSchema = false,
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun deviceDao(): DeviceDao
     abstract fun widgetCacheDao(): WidgetCacheDao
+    abstract fun widgetBindingDao(): WidgetBindingDao
 }

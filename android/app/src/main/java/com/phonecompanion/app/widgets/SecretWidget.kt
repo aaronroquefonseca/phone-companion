@@ -34,7 +34,7 @@ import kotlinx.coroutines.CancellationException
  *
  * Never-paired (no credentials at all) is not a decrypt failure and says so
  * plainly with pairing guidance; every other empty state renders the single
- * masked line. Per-instance content: same [WidgetInstancePicker] row
+ * masked line. Per-instance content: same [WidgetBindingResolver] row
  * selection as the other widgets, with the title bounded by
  * [WidgetPayloadParser.sanitizeTitle]; resolution stays fail-closed
  * ([resolveVisibleSecret] null → [SecretWidget.MASKED]). Database access
@@ -53,10 +53,17 @@ class SecretWidget : GlanceAppWidget() {
             neverPaired = !storage.isPaired
             val db = DatabaseHolder.get(context)
             val rows = db.widgetCacheDao().getByType("secret")
-            val row = WidgetInstancePicker.pick(
-                rows,
-                WidgetInstancePicker.boundIndex(context, SecretWidget::class.java, id),
-            )
+            // No logging on this path, ever: the no-oracle policy renders
+            // every failure as the single masked state, on screen and in
+            // logs. A miss/empty table yields null (default first row).
+            val widgetId = try {
+                db.widgetBindingDao().get(PROVIDER, glanceKey(id))?.widgetId
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            val row = WidgetBindingResolver.resolve(rows, widgetId)
             title = row?.let { WidgetPayloadParser.sanitizeTitle(it.title) } ?: title
             visible = if (neverPaired) null else resolveVisibleSecret(
                 storage.deviceId,
@@ -95,6 +102,9 @@ class SecretWidget : GlanceAppWidget() {
         private const val FALLBACK_LABEL = "Secret"
         private const val TITLE_MAX_CHARS = 80
         private const val BODY_MAX_CHARS = 240
+
+        /** Stable provider key for the `widget_binding` table. */
+        val PROVIDER: String = SecretWidget::class.java.name
 
         /** Single masked line; mentions masking, never distinguishes failure modes. */
         const val MASKED = WidgetFallbackCopy.SECRET_MASKED

@@ -25,13 +25,19 @@ object WidgetJson {
     }
 
     /**
-     * Serializes a widgets-poll payload map for the cache. Throws on
-     * serialization failure (never stores a fallback): the poll path keeps
-     * the last cache on error instead of clobbering it with "{}".
+     * Serializes a widgets-poll payload map for the cache.
+     *
+     * A null payload (the wire format allows a missing `payload`) is a
+     * programmer error at the call site: caching it as `"{}"` poisons the
+     * row — `getAll()` looks populated while every per-type parse yields
+     * null and the widget falls back with no log or UI signal. Throw so
+     * the poll path keeps the last good cache instead of clobbering it
+     * with an unparseable row. Serialization failure of a non-null map
+     * throws the Moshi exception for the same reason.
      */
     fun toJson(payload: Map<String, Any?>?): String {
-        if (payload == null) return "{}"
-        return mapAdapter.toJson(payload) ?: "{}"
+        requireNotNull(payload) { "refusing to cache a null payload as \"{}\"" }
+        return mapAdapter.toJson(payload) ?: error("payload serialization returned null")
     }
 
     /** Raw payload object, or null when [payloadJson] is blank/malformed. */

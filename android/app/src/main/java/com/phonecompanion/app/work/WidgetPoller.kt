@@ -16,6 +16,8 @@ import com.phonecompanion.app.widgets.ListWidget
 import com.phonecompanion.app.widgets.SecretWidget
 import com.phonecompanion.app.widgets.StatusWidget
 import com.phonecompanion.app.widgets.TextWidget
+import com.phonecompanion.app.widgets.WidgetBindingResolver
+import com.phonecompanion.app.widgets.glanceKey
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -162,9 +164,18 @@ object WidgetPoller {
                 // empty list issues no statements (verified semantics), but
                 // guard explicitly so a future DAO change cannot turn
                 // "server sent zero widgets" into "cached widgets vanished".
-                if (widgets.isEmpty()) return 0
-                DatabaseHolder.get(app).widgetCacheDao().upsertAll(widgets.map { toCacheEntity(it) })
-                return widgets.size
+                // Envelopes with a null payload are dropped before the DAO
+                // for the same reason: caching one as "{}" poisons the row
+                // (per-type parses yield null while getAll looks populated,
+                // i.e. the all-fallback symptom). Dropped envelopes keep
+                // their last cached row; counts only, never ids/titles.
+                val batch = toCacheEntities(widgets)
+                if (batch.dropped > 0) {
+                    Log.d(TAG, "widget poll drop-null-payload dropped=${batch.dropped} kept=${batch.kept.size}")
+                }
+                if (batch.kept.isEmpty()) return 0
+                DatabaseHolder.get(app).widgetCacheDao().upsertAll(batch.kept)
+                return batch.kept.size
             }
 
             override suspend fun clearCache() {
@@ -370,32 +381,65 @@ object WidgetPoller {
     )
 
     /**
+     * One poll batch split for the DAO: envelopes with a null payload are
+     * dropped (never cached as `"{}"` poison — see [WidgetJson.toJson]),
+     * everything else maps via [toCacheEntity]. Pure and JVM-testable; the
+     * Android [PollCollaborators.saveWidgets] upserts [CacheBatch.kept] and
+     * logs [CacheBatch.dropped] (count only, never ids/titles/bodies).
+     */
+    internal data class CacheBatch(
+        val kept: List<WidgetCacheEntity>,
+        val dropped: Int,
+    )
+
+    internal fun toCacheEntities(widgets: List<WidgetEnvelope>): CacheBatch {
+        val kept = ArrayList<WidgetCacheEntity>(widgets.size)
+        var dropped = 0
+        for (envelope in widgets) {
+            if (envelope.payload == null) {
+                dropped++
+                continue
+            }
+            kept.add(toCacheEntity(envelope))
+        }
+        return CacheBatch(kept, dropped)
+    }
+
+    /**
      * Push cached state to each per-type widget. No fully-generic renderer.
      *
      * [supervisorScope] with one child per type: a failing type cannot cancel
      * its siblings, while parent cancellation still propagates to every child
      * (no detached jobs, nothing keeps running after the caller is gone).
      * One try/catch per instance id so a broken instance cannot fail its type
-     * batch. Cancellation is always rethrown.
+     * batch. Cancellation is always rethrown. Failures log the exception
+     * class at debug (shape only — never ids, titles, bodies, or keys): the
+     * previous zero-log swallows left stuck-fallback states undiagnosable.
      */
     suspend fun updateAllWidgets(context: Context) = supervisorScope {
         listOf(
-            async { updateAll(context, TextWidget()) },
-            async { updateAll(context, SecretWidget()) },
-            async { updateAll(context, ListWidget()) },
-            async { updateAll(context, StatusWidget()) },
+            async { updateAll(context, TextWidget(), TextWidget.PROVIDER) },
+            async { updateAll(context, SecretWidget(), SecretWidget.PROVIDER) },
+            async { updateAll(context, ListWidget(), ListWidget.PROVIDER) },
+            async { updateAll(context, StatusWidget(), StatusWidget.PROVIDER) },
         ).awaitAll()
     }
 
-    private suspend inline fun <reified T : GlanceAppWidget> updateAll(context: Context, widget: T) {
+    private suspend inline fun <reified T : GlanceAppWidget> updateAll(
+        context: Context,
+        widget: T,
+        provider: String,
+    ) {
         val manager = GlanceAppWidgetManager(context)
         val ids = try {
             manager.getGlanceIds(T::class.java)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            Log.d(TAG, "widget push lookup-failed provider=${T::class.java.simpleName} error=${e.javaClass.simpleName}")
             return
         }
+        pruneStaleBindings(context, provider, ids.mapTo(HashSet(ids.size)) { glanceKey(it) })
         for (id in ids) {
             try {
                 widget.update(context, id)
@@ -403,7 +447,53 @@ object WidgetPoller {
                 throw e
             } catch (e: Exception) {
                 // One broken instance must not fail its siblings.
+                Log.d(TAG, "widget push update-failed provider=${T::class.java.simpleName} error=${e.javaClass.simpleName}")
             }
+        }
+    }
+
+    /**
+     * Drops bindings whose home-screen instance is gone. Runs inside the
+     * [updateAllWidgets] enumeration, where the bound set is already in
+     * hand; best-effort and silent on storage failure (the next push
+     * retries). Cancellation is always rethrown.
+     */
+    internal suspend fun pruneStaleBindings(
+        context: Context,
+        provider: String,
+        boundKeys: Set<String>,
+    ) {
+        val dao = try {
+            DatabaseHolder.get(context).widgetBindingDao()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.d(TAG, "widget bindings prune-skipped error=${e.javaClass.simpleName}")
+            return
+        }
+        val stored = try {
+            dao.getForProvider(provider)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.d(TAG, "widget bindings prune-skipped error=${e.javaClass.simpleName}")
+            return
+        }
+        val stale = WidgetBindingResolver.staleBindings(boundKeys, stored)
+        for (binding in stale) {
+            try {
+                dao.delete(binding.providerClass, binding.glanceKey)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d(TAG, "widget bindings prune-skipped error=${e.javaClass.simpleName}")
+                return
+            }
+        }
+        // Count only (never keys/ids): distinguishes "nothing to prune"
+        // from real churn in field reports of stale selections.
+        if (stale.isNotEmpty()) {
+            Log.d(TAG, "widget bindings pruned count=${stale.size}")
         }
     }
 }

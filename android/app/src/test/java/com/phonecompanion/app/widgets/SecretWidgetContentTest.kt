@@ -9,7 +9,7 @@ import org.junit.Test
 /**
  * Fix batch B: per-instance [SecretWidget] content.
  *
- * Row selection is the shared [WidgetInstancePicker.pick] (same as the
+ * Row selection is the shared [WidgetBindingResolver.resolve] (same as the
  * other widgets); titles are bounded by
  * [WidgetPayloadParser.sanitizeTitle]. Resolution is fail-closed (null,
  * which the widget renders as [SecretWidget.MASKED]).
@@ -41,20 +41,21 @@ class SecretWidgetContentTest {
     )
 
     @Test
-    fun `bound instance gets its own row via shared picker`() {
+    fun `bound instance gets its own row via shared resolver`() {
         val rows = listOf(row("a"), row("b"), row("c"))
-        assertEquals("b", WidgetInstancePicker.pick(rows, 1)?.id)
+        assertEquals("b", WidgetBindingResolver.resolve(rows, "b")?.id)
     }
 
     @Test
     fun `unbound instance falls back to first row`() {
         val rows = listOf(row("a"), row("b"))
-        assertEquals("a", WidgetInstancePicker.pick(rows, -1)?.id)
+        assertEquals("a", WidgetBindingResolver.resolve(rows, null)?.id)
     }
 
     @Test
     fun `empty cache selects nothing`() {
-        assertNull(WidgetInstancePicker.pick(emptyList(), 0))
+        assertNull(WidgetBindingResolver.resolve(emptyList(), null))
+        assertNull(WidgetBindingResolver.resolve(emptyList(), "a"))
     }
 
     @Test
