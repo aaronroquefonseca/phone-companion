@@ -48,7 +48,7 @@
             </intent-filter>
         </service>
 
-        <!-- Glance widget receiver. TODO (widgets PR): per-type widgets. -->
+        <!-- Glance widget receivers. Per-type widgets (P7); shared poll feeds them. -->
         <receiver
             android:name=".widgets.HelloWidgetReceiver"
             android:exported="false">
@@ -58,6 +58,46 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/hello_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widgets.TextWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/text_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widgets.SecretWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/secret_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widgets.ListWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/list_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widgets.StatusWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/status_widget_info" />
         </receiver>
     </application>
 </manifest>
