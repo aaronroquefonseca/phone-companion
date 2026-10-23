@@ -45,6 +45,7 @@ type dashboardPageData struct {
 func HandleDashboard(store Store, widgets WidgetLister, csrf *CSRFProtection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
+			w.Header().Set("Cache-Control", "no-store")
 			http.NotFound(w, r)
 			return
 		}
