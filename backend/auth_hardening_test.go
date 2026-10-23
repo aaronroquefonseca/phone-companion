@@ -122,3 +122,26 @@ func TestCheckFCMCredentialsFile(t *testing.T) {
 		t.Errorf("0644 rejection should name 0600, got %q", err)
 	}
 }
+
+// The no-store pin lives inside the mux constructors (not only at
+// ListenAndServe), so even the test routers serve enroll secrets
+// uncacheable. This pins it against future rewiring.
+func TestTestRouterEnrollNoStore(t *testing.T) {
+	mux, _, _, _ := setupPairingMux(t)
+	// Missing token → 400, but the pin must hold on every status path.
+	w := doReq(t, mux, "POST", "/api/v1/enroll", `{"device_name":"x"}`, "application/json", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("enroll missing token: got %d, want 400", w.Code)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("test-router enroll Cache-Control %q, want no-store", cc)
+	}
+	// Same for the issuance endpoint (operator-gated; 401 without session).
+	w = doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("enroll-tokens anon: got %d, want 401", w.Code)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("test-router enroll-tokens Cache-Control %q, want no-store", cc)
+	}
+}

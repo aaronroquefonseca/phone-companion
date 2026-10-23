@@ -65,12 +65,17 @@ func main() {
 		log.Printf("WARNING: EXTERNAL_BASE_URL unset — pairing QR falls back to request Host (dev-only)")
 	}
 
-	mux := NewMux(db, sender, sessionStore, csrf)
-	webui.RegisterRoutes(mux, sessionStore, webui.Credentials{
+	base := newBaseMux(DefaultWidgetRegistry(), sessionStore, csrf)
+	// Same notify wiring as NewMux (kept inline: webui.RegisterRoutes below
+	// needs the bare *http.ServeMux, while ListenAndServe takes the
+	// no-store-wrapped handler).
+	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, handleNotify(db, sender)))
+	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,
 		PasswordHash: cfg.AdminPasswordHash,
 		Password:     cfg.AdminPassword,
 	}, csrf)
+	mux := withAuthNoStore(base)
 
 	// P3 widgets: SIGHUP-triggered reload of $WIDGET_DIR (plus best-effort
 	// mtime recheck per request; see widgets.go).
@@ -78,7 +83,9 @@ func main() {
 
 	addr := ":" + cfg.Port
 	log.Printf("phone-companion backend listening on %s (widgets: %s)", addr, cfg.WidgetDir)
-	if err := http.ListenAndServe(addr, withAuthNoStore(mux)); err != nil {
+	// No-store pinning lives inside NewMux (withAuthNoStore), so every
+	// router — production and test — carries it. Do not wrap again here.
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
 }

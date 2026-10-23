@@ -24,7 +24,7 @@ import (
 
 const pairTestSecret = "test-secret-0123456789abcdef-test"
 
-func setupPairingMux(t *testing.T) (*http.ServeMux, *SessionStore, *webui.CSRFProtection, *http.Cookie) {
+func setupPairingMux(t *testing.T) (http.Handler, *SessionStore, *webui.CSRFProtection, *http.Cookie) {
 	t.Helper()
 	db := openDevicesTestDB(t)
 	oldDB := deviceDB
@@ -60,7 +60,7 @@ func setupPairingMux(t *testing.T) (*http.ServeMux, *SessionStore, *webui.CSRFPr
 	return mux, sessions, csrf, cookie
 }
 
-func doReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+func doReq(t *testing.T, mux http.Handler, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader
 	if body == "" {

@@ -21,21 +21,34 @@ import (
 // webui.RequireAdmin, 401 without one; device Bearer tokens are rejected
 // with 403 before auth runs — see notify_auth.go). POST /api/v1/enroll
 // stays on enroll-token auth and never touches sessions.
-func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
-	mux := NewMuxWithWidgets(DefaultWidgetRegistry(), sessions, csrf)
+//
+// The returned handler already includes the auth no-store pin
+// (withAuthNoStore): credential-bearing paths are uncacheable on every
+// router built here, including the test routers — main.go must NOT add a
+// second layer.
+func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) http.Handler {
+	mux := newBaseMux(DefaultWidgetRegistry(), sessions, csrf)
 	// Implemented (notifications P9): POST /api/v1/notify is operator-only
 	// (WebUI session). 202 {"notification_id","accepted"}: accepted counts
 	// successful per-device sends; accepted:0 still returns 202 and means
 	// no devices matched (unknown device_ids, or an empty registry) — not
 	// an error. See handleNotify.
 	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, handleNotify(db, sender)))
-	return mux
+	return withAuthNoStore(mux)
 }
 
 // NewMuxWithWidgets builds the HTTP router backed by a specific registry
 // (used by tests to inject a temp-dir registry). A nil sessions store
 // fails closed (denyAllSessions) so widget tests need no auth fixtures.
-func NewMuxWithWidgets(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
+// Like NewMux, the returned handler carries the auth no-store pin.
+func NewMuxWithWidgets(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CSRFProtection) http.Handler {
+	return withAuthNoStore(newBaseMux(reg, sessions, csrf))
+}
+
+// newBaseMux assembles the bare *http.ServeMux so the exported constructors
+// (and same-package tests needing extra routes, e.g. the e2e harness) can
+// wrap it with withAuthNoStore exactly once.
+func newBaseMux(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)

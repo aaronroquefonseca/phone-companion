@@ -15,7 +15,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 <h1>Phone Companion</h1>
 {{if .SignedIn}}
 <p>Signed in as {{.Username}}.</p>
-<form method="post" action="/logout"><button type="submit">Sign out</button></form>
+<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Sign out</button></form>
 {{else}}
 {{if .Error}}<p role="alert">Invalid username or password.</p>{{end}}
 <form method="post" action="/login">
@@ -32,6 +32,10 @@ type loginData struct {
 	Error    bool
 	SignedIn bool
 	Username string
+	// CSRFToken is the session-bound token for the signed-in logout form.
+	// Empty when there is no session (or the protector is fail-closed);
+	// the form then posts without a token and logout fails closed with 403.
+	CSRFToken string
 }
 
 // maxLoginFieldLen caps username/password bytes BEFORE bcrypt (see
@@ -47,6 +51,12 @@ func (h *handler) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 	if h.store.ValidateSession(r) {
 		data.SignedIn = true
 		data.Username = h.creds.Username
+		// Mint the logout token for the signed-in form (pair.go pattern).
+		// TokenForRequest is nil-safe: a nil/fail-closed protector yields
+		// "", and the logout POST then fails closed with 403.
+		if tok, ok := h.csrf.TokenForRequest(r); ok {
+			data.CSRFToken = tok
+		}
 	}
 	_ = loginPage.Execute(w, data)
 }

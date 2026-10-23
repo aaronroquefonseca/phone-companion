@@ -20,6 +20,12 @@ import (
 const (
 	maxLoginsPerWindow = 10
 	loginWindow        = time.Minute
+	// maxLoginLimiterIPs caps distinct client IPs tracked. Without a cap a
+	// pre-auth spray (one attempt per spoofed/source IP) grows the map
+	// without bound — a worse surface than the enroll limiter it mirrors.
+	// Past the cap, insert sweeps expired entries, drops empties, then
+	// evicts the least-recently-active bucket, all under loginMu.
+	maxLoginLimiterIPs = 1024
 )
 
 var loginMu sync.Mutex
@@ -35,6 +41,12 @@ func allowLogin(w http.ResponseWriter, r *http.Request) bool {
 	ip := loginClientIP(r)
 	now := loginNow()
 	loginMu.Lock()
+	if _, ok := loginByIP[ip]; !ok && len(loginByIP) >= maxLoginLimiterIPs {
+		sweepLoginBucketsLocked(now)
+		if len(loginByIP) >= maxLoginLimiterIPs {
+			evictOldestLoginBucketLocked()
+		}
+	}
 	stamps := loginByIP[ip]
 	kept := stamps[:0]
 	for _, t := range stamps {
@@ -53,9 +65,56 @@ func allowLogin(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "rate_limited", http.StatusTooManyRequests)
 		return false
 	}
+	if len(kept) == 0 {
+		// Fully-expired bucket: drop the empty shell instead of retaining
+		// it, so idle IPs never pin map slots between windows. The append
+		// below recreates the entry.
+		delete(loginByIP, ip)
+	}
 	loginByIP[ip] = append(kept, now)
 	loginMu.Unlock()
 	return true
+}
+
+// sweepLoginBucketsLocked prunes expired attempts from every bucket and
+// drops buckets left empty. Call with loginMu held.
+func sweepLoginBucketsLocked(now time.Time) {
+	for ip, stamps := range loginByIP {
+		kept := stamps[:0]
+		for _, t := range stamps {
+			if now.Sub(t) < loginWindow {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(loginByIP, ip)
+		} else {
+			loginByIP[ip] = kept
+		}
+	}
+}
+
+// evictOldestLoginBucketLocked drops the least-recently-active bucket. Stamps
+// are appended in arrival order (loginNow is monotonic in production), so
+// the last stamp is the newest. Call with loginMu held, only at cap.
+func evictOldestLoginBucketLocked() {
+	var (
+		victim     string
+		victimLast time.Time
+		found      bool
+	)
+	for ip, stamps := range loginByIP {
+		if len(stamps) == 0 {
+			delete(loginByIP, ip)
+			return
+		}
+		if last := stamps[len(stamps)-1]; !found || last.Before(victimLast) {
+			victim, victimLast, found = ip, last, true
+		}
+	}
+	if found {
+		delete(loginByIP, victim)
+	}
 }
 
 func loginClientIP(r *http.Request) string {

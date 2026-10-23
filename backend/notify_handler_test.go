@@ -164,7 +164,7 @@ func TestHandleNotifyRejects(t *testing.T) {
 	}
 }
 
-func openAuthedMux(t *testing.T, db *sql.DB) (*http.ServeMux, *SessionStore) {
+func openAuthedMux(t *testing.T, db *sql.DB) (http.Handler, *SessionStore) {
 	t.Helper()
 	store, err := NewSessionStore(db, strings.Repeat("s", 32))
 	if err != nil {
@@ -188,7 +188,7 @@ func loginCookie(t *testing.T, store *SessionStore) *http.Cookie {
 	return nil
 }
 
-func postNotifyMux(mux *http.ServeMux, body string, cookie *http.Cookie, authHeader string) *httptest.ResponseRecorder {
+func postNotifyMux(mux http.Handler, body string, cookie *http.Cookie, authHeader string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/notify", strings.NewReader(body))
 	// Forward-compatible with the operator API write guard (parallel auth
 	// batch): legitimate operator clients send X-Requested-With. The

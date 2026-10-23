@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -231,6 +232,123 @@ func cookieRequest(cookie *http.Cookie) *http.Request {
 	req := httptest.NewRequest("POST", "/logout", nil)
 	req.AddCookie(cookie)
 	return req
+}
+
+// The signed-in login page must render the logout form WITH a session-bound
+// CSRF token: without it every browser logout 403s (regression B1 —
+// hand-constructed tokens in unit tests masked the missing form field).
+// This test drives the exact browser flow: read the token out of the
+// rendered form, submit it, expect 303 + destroyed session.
+func TestLoginPageLogoutFormCarriesCSRF(t *testing.T) {
+	resetLoginLimiter()
+	h, store := testHandler()
+	lw := httptest.NewRecorder()
+	if err := h.store.CreateSession(lw, httptest.NewRequest("POST", "/login", nil)); err != nil {
+		t.Fatal(err)
+	}
+	var cookie *http.Cookie
+	for _, c := range lw.Result().Cookies() {
+		cookie = c
+	}
+	if cookie == nil {
+		t.Fatal("no session cookie minted")
+	}
+
+	getReq := httptest.NewRequest("GET", "/login", nil)
+	getReq.AddCookie(cookie)
+	get := httptest.NewRecorder()
+	h.handleLoginGet(get, getReq)
+	if get.Code != http.StatusOK {
+		t.Fatalf("signed-in login page: got %d, want 200", get.Code)
+	}
+	page := get.Body.String()
+	const marker = `name="csrf_token" value="`
+	i := strings.Index(page, marker)
+	if i < 0 {
+		t.Fatalf("signed-in page has no csrf_token logout field (browser logout would always 403):\n%s", page)
+	}
+	rest := page[i+len(marker):]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		t.Fatal("unterminated csrf_token value in logout form")
+	}
+	tok := rest[:j]
+	if tok == "" {
+		t.Fatal("empty CSRF token in logout form")
+	}
+
+	form := url.Values{"csrf_token": {tok}}.Encode()
+	req := httptest.NewRequest("POST", "/logout", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.handleLogoutPost(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("browser-form logout: got %d, want 303", w.Code)
+	}
+	if store.valid {
+		t.Error("browser-form logout: expected session destroyed")
+	}
+}
+
+// A pre-auth spray (one attempt per source IP) must not grow the limiter
+// map without bound: past maxLoginLimiterIPs the insert path sweeps and
+// evicts, and every single attempt still gets its honest verdict.
+func TestLoginLimiterSprayBounded(t *testing.T) {
+	resetLoginLimiter()
+	h, _ := testHandler()
+	for i := 0; i < maxLoginLimiterIPs+100; i++ {
+		req := loginReq("admin", "nope")
+		req.RemoteAddr = fmt.Sprintf("10.9.%d.%d:1234", i/256, i%256)
+		w := httptest.NewRecorder()
+		h.handleLoginPost(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("spray %d: got %d, want 401", i, w.Code)
+		}
+	}
+	loginMu.Lock()
+	n := len(loginByIP)
+	loginMu.Unlock()
+	if n > maxLoginLimiterIPs {
+		t.Errorf("limiter tracked %d IPs, want <= %d", n, maxLoginLimiterIPs)
+	}
+}
+
+// Fully-expired buckets are dropped, not retained as empty shells: after
+// the window passes the same IP logs in cleanly and the map holds exactly
+// one bucket.
+func TestLoginLimiterDropsEmptyBuckets(t *testing.T) {
+	resetLoginLimiter()
+	h, _ := testHandler()
+	now := loginNow()
+	frozen := now
+	loginNow = func() time.Time { return frozen }
+	t.Cleanup(func() { loginNow = time.Now })
+
+	req := loginReq("admin", "nope")
+	req.RemoteAddr = "10.1.2.3:1234"
+	if w := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h.handleLoginPost(w, req)
+		return w
+	}(); w.Code != http.StatusUnauthorized {
+		t.Fatalf("first attempt: got %d, want 401", w.Code)
+	}
+
+	frozen = now.Add(2 * loginWindow)
+	req2 := loginReq("admin", "nope")
+	req2.RemoteAddr = "10.1.2.3:1234"
+	w := httptest.NewRecorder()
+	h.handleLoginPost(w, req2)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("post-window attempt: got %d, want 401 (stale bucket must not linger into a false 429)", w.Code)
+	}
+	loginMu.Lock()
+	n := len(loginByIP)
+	loginMu.Unlock()
+	if n != 1 {
+		t.Errorf("limiter holds %d buckets, want exactly 1 (no empty shells)", n)
+	}
 }
 
 func TestRequireAdmin(t *testing.T) {
