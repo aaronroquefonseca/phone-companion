@@ -6,13 +6,19 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
+
+	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 )
 
-// NewMux builds the HTTP router backed by the process-wide widget registry.
-func NewMux() *http.ServeMux {
-	return NewMuxWithWidgets(DefaultWidgetRegistry())
+// NewMux builds the HTTP router.
+func NewMux(db *sql.DB, sender notify.Sender) *http.ServeMux {
+	mux := NewMuxWithWidgets(DefaultWidgetRegistry())
+	// Implemented (notifications P4): POST /api/v1/notify
+	mux.HandleFunc("POST /api/v1/notify", requireAdminNotifyStub(handleNotify(db, sender)))
+	return mux
 }
 
 // NewMuxWithWidgets builds the HTTP router backed by a specific registry
@@ -29,8 +35,6 @@ func NewMuxWithWidgets(reg *WidgetRegistry) *http.ServeMux {
 	// (additive v1 extension; envelope per docs/api-contract.md).
 	mux.HandleFunc("GET /api/v1/widgets", reg.handleWidgetsList)
 	mux.HandleFunc("GET /api/v1/widgets/{id}", reg.handleWidgetsGet)
-	// TODO (notifications PR): POST /api/v1/notify
-	mux.HandleFunc("POST /api/v1/notify", notImplemented("notify"))
 
 	return mux
 }
