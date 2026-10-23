@@ -52,19 +52,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var notifSettingsButton: Button
     private lateinit var secretRefreshNote: TextView
 
-    private var notificationDeniedBefore = false
+    private lateinit var denialTracker: NotificationDenialTracker
     private var consumedNotificationExtras = false
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) notificationDeniedBefore = true
+            denialTracker.onPermissionResult(granted)
             renderStatus()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        notificationDeniedBefore = savedInstanceState?.getBoolean(KEY_DENIED_BEFORE) ?: notificationDeniedBefore
+        denialTracker = NotificationDenialTracker(
+            readPersisted = {
+                getSharedPreferences(PREFS_NOTIF, MODE_PRIVATE)
+                    .getBoolean(KEY_DENIED_BEFORE, false)
+            },
+            writePersisted = { denied ->
+                getSharedPreferences(PREFS_NOTIF, MODE_PRIVATE).edit()
+                    .putBoolean(KEY_DENIED_BEFORE, denied)
+                    .apply()
+            },
+        )
 
         statusView = findViewById(R.id.pairStatus)
         justPairedCard = findViewById(R.id.justPairedCard)
@@ -100,7 +110,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putBoolean(KEY_DENIED_BEFORE, notificationDeniedBefore)
+        // No notification state to save: the denial flag lives in
+        // SharedPreferences (see denialTracker) and survives process death.
     }
 
     override fun onResume() {
@@ -199,7 +210,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             false
         }
-        when (NotificationPermissionPolicy.decide(paired, granted, notificationDeniedBefore, shouldRationale)) {
+        when (NotificationPermissionPolicy.decide(paired, granted, denialTracker.deniedBefore, shouldRationale)) {
             NotificationPermissionPolicy.PromptState.RATIONALE -> {
                 notifPrompt.visibility = View.VISIBLE
                 notifPromptText.text = getString(R.string.notif_rationale)
@@ -327,6 +338,7 @@ class MainActivity : AppCompatActivity() {
         /** Normalized server URL the device paired with. */
         const val EXTRA_JUST_PAIRED_SERVER = "pc_just_paired_server"
 
+        private const val PREFS_NOTIF = "pc_notif_prompts"
         private const val KEY_DENIED_BEFORE = "notif_denied_before"
     }
 }

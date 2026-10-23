@@ -1,11 +1,12 @@
 package com.phonecompanion.app.ui
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.phonecompanion.app.data.ApiClient
 import com.phonecompanion.app.data.EnrollRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,8 +31,11 @@ import kotlinx.coroutines.withContext
 class PairViewModel(
     private val repository: EnrollRepository,
     private val fcmTokenProvider: suspend () -> String? = { null },
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    injectedScope: CoroutineScope? = null,
 ) : ViewModel() {
+
+    private val scope = injectedScope ?: viewModelScope
+    private val ownsScope = injectedScope != null
 
     /** One-shot success payload: human name + server, never the raw device id. */
     data class Enrolled(val deviceName: String, val serverUrl: String)
@@ -61,7 +65,9 @@ class PairViewModel(
             val sentName = deviceName.ifBlank { EnrollRepository.DEFAULT_DEVICE_NAME }
             val mapped = messageForEnrollResult(result)
             val enrolled = (result as? EnrollRepository.Result.Success)?.let {
-                Enrolled(deviceName = sentName, serverUrl = rawBaseUrl.trim())
+                // Normalize exactly like the persisted credential so the
+                // just-paired body matches the status line verbatim.
+                Enrolled(deviceName = sentName, serverUrl = displayServerUrl(rawBaseUrl))
             }
             _state.value = UiState(
                 busy = false,
@@ -119,10 +125,19 @@ class PairViewModel(
     }
 
     override fun onCleared() {
-        scope.cancel()
+        // viewModelScope cancels itself; only an injected (test) scope
+        // needs an explicit cancel.
+        if (ownsScope) scope.cancel()
     }
 
     companion object {
+        /**
+         * Display form of the server URL, normalized exactly as
+         * [EnrollRepository] persists it (success implies the input was
+         * valid, so normalization cannot throw here).
+         */
+        fun displayServerUrl(rawBaseUrl: String): String =
+            runCatching { ApiClient.normalizeBaseUrl(rawBaseUrl) }.getOrNull() ?: rawBaseUrl.trim()
         /**
          * Maps an enroll result to a user-message key plus display args.
          * Raw backend codes never reach the args: 422 carries no code at

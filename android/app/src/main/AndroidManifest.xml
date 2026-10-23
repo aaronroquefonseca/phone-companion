@@ -40,7 +40,8 @@
              unpaired → Pair). Exported=false: explicit in-app intents only. -->
         <activity
             android:name=".ui.WidgetTapRouterActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:theme="@style/Theme.PhoneCompanion.TapRouter" />
 
         <!-- Push receiver (P9: per-kind channels, up to 3 action buttons,
              BigPictureStyle image attachments, extensible kinds registry). -->

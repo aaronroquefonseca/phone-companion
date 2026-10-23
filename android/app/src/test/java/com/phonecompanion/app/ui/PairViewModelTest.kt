@@ -16,6 +16,8 @@ import com.phonecompanion.app.data.ApiService
 import com.phonecompanion.app.data.EnrollRequest
 import com.phonecompanion.app.data.EnrollResponse
 import com.phonecompanion.app.data.EnrollmentStore
+import com.phonecompanion.app.data.FcmTokenUpdateRequest
+import com.phonecompanion.app.data.FcmTokenUpdateResponse
 import com.phonecompanion.app.data.WidgetsResponse
 
 /**
@@ -49,6 +51,9 @@ class PairViewModelTest {
             return responses[minOf(enrollCalls - 1, responses.size - 1)]
         }
 
+        override suspend fun updateFcmToken(request: FcmTokenUpdateRequest): Response<FcmTokenUpdateResponse> =
+            Response.success(FcmTokenUpdateResponse(updated = true))
+
         override suspend fun getWidgets(): Response<WidgetsResponse> =
             Response.success(WidgetsResponse())
     }
@@ -66,7 +71,7 @@ class PairViewModelTest {
         PairViewModel(
             repository = EnrollRepository(store) { _ -> api },
             fcmTokenProvider = { null },
-            scope = CoroutineScope(Dispatchers.Unconfined),
+            injectedScope = CoroutineScope(Dispatchers.Unconfined),
         )
 
     @Test
@@ -109,7 +114,8 @@ class PairViewModelTest {
         }
         val enrolled = terminal.enrolled!!
         assertEquals("My Phone", enrolled.deviceName)
-        assertEquals("https://example.com", enrolled.serverUrl)
+        // Normalized exactly like the persisted credential (trailing slash).
+        assertEquals("https://example.com/", enrolled.serverUrl)
         assertEquals("My Phone", store.deviceName)
     }
 
@@ -212,6 +218,13 @@ class PairViewModelTest {
             PairMessages.INVALID_QR_UNRECOGNIZED,
             PairViewModel.messageForInvalidQr("unrecognized QR content"),
         )
+    }
+
+    @Test
+    fun `display server url matches persisted normalization`() {
+        assertEquals("https://example.com/", PairViewModel.displayServerUrl("example.com"))
+        assertEquals("https://example.com/", PairViewModel.displayServerUrl("https://example.com"))
+        assertEquals("https://example.com/", PairViewModel.displayServerUrl("  https://example.com  "))
     }
 
     @Test
