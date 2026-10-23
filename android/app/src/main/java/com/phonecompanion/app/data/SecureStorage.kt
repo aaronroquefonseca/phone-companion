@@ -58,6 +58,15 @@ class SecureStorage private constructor(context: Context) : EnrollmentStore {
         get() = prefs.getString(KEY_FCM_TOKEN, null)
         set(value) = putOrRemove(KEY_FCM_TOKEN, value)
 
+    /**
+     * Human device name sent with the last successful enroll. Display-only:
+     * shown on the paired line and the pair-success confirmation instead of
+     * the raw device id. Null when never paired (or after [clearCredentials]).
+     */
+    var deviceName: String?
+        get() = prefs.getString(KEY_DEVICE_NAME, null)
+        private set(value) = putOrRemove(KEY_DEVICE_NAME, value)
+
     val isPaired: Boolean
         get() = !deviceId.isNullOrBlank() && !deviceToken.isNullOrBlank() &&
             !deviceKey.isNullOrBlank() && !baseUrl.isNullOrBlank()
@@ -87,6 +96,10 @@ class SecureStorage private constructor(context: Context) : EnrollmentStore {
             .commit()
     }
 
+    override fun saveDeviceName(deviceName: String) {
+        this.deviceName = deviceName.ifBlank { null }
+    }
+
     /**
      * Forgets this device entirely (explicit unpair AND post-revoke reset
      * share this path): device credentials plus the server base URL and the
@@ -103,6 +116,7 @@ class SecureStorage private constructor(context: Context) : EnrollmentStore {
             .remove(KEY_DEVICE_TOKEN)
             .remove(KEY_DEVICE_KEY)
             .remove(KEY_FCM_TOKEN)
+            .remove(KEY_DEVICE_NAME)
             .apply()
     }
 
@@ -118,6 +132,7 @@ class SecureStorage private constructor(context: Context) : EnrollmentStore {
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_DEVICE_TOKEN = "device_token"
         private const val KEY_DEVICE_KEY = "device_key"
+        private const val KEY_DEVICE_NAME = "device_name"
         private const val KEY_FCM_TOKEN = "fcm_token"
 
         @Volatile

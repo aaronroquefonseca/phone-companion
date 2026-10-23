@@ -28,6 +28,12 @@ class EnrollRepository(
         data class NetworkError(val message: String?) : Result
         data class InvalidUrl(val reason: String) : Result
         data class InvalidInput(val reason: String) : Result
+        /**
+         * HTTP 422: the server rejected the request as malformed. Carries the
+         * raw backend `error` code for logcat only — UI copy must never show
+         * it (see PairViewModel message mapping).
+         */
+        data class ValidationError(val error: String?) : Result
         data class Unexpected(val message: String?) : Result
     }
 
@@ -50,10 +56,11 @@ class EnrollRepository(
         // IllegalArgumentException for malformed input (e.g. bare "https://").
         return try {
             val service = serviceFactory(baseUrl)
+            val sentDeviceName = deviceName.ifBlank { DEFAULT_DEVICE_NAME }
             val response = service.enroll(
                 EnrollRequest(
                     enrollToken = enrollToken.trim(),
-                    deviceName = deviceName.ifBlank { DEFAULT_DEVICE_NAME },
+                    deviceName = sentDeviceName,
                     fcmToken = fcmToken,
                 ),
             )
@@ -70,6 +77,7 @@ class EnrollRepository(
                     body.deviceKey,
                 )
                 if (!persisted) return Result.Unexpected("persist-failed")
+                storage.saveDeviceName(sentDeviceName)
                 Result.Success(body.deviceId)
             } else {
                 val code = ApiClient.parseErrorCode(
@@ -78,6 +86,7 @@ class EnrollRepository(
                 when (response.code()) {
                     410 -> Result.ExpiredOrUsed(code)
                     409 -> Result.AlreadyEnrolled(code)
+                    422 -> Result.ValidationError(code)
                     else -> Result.ServerError(response.code(), code)
                 }
             }

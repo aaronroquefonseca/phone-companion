@@ -106,7 +106,7 @@ class CompanionMessagingService : FirebaseMessagingService() {
 
         val tapIntent = PendingIntent.getActivity(
             this,
-            payload.notifyId(),
+            tapRequestCode(payload.notifyId()),
             appIntent(payload, title, body, actionId = null),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -118,14 +118,17 @@ class CompanionMessagingService : FirebaseMessagingService() {
             .setPriority(payload.compatPriority())
             .setContentIntent(tapIntent)
             .setAutoCancel(true)
+            // The BigPicture upgrade below re-notifies the same id: alert
+            // only for the first (text) post, never twice for one message.
+            .setOnlyAlertOnce(true)
 
         // Action buttons (contract: max 3). Each opens the app with the
         // notification + action ids; action taps do not auto-dismiss, so
         // MainActivity cancels the notification id on open.
-        payload.actions.forEachIndexed { index, action ->
+        payload.actions.forEach { action ->
             val actionIntent = PendingIntent.getActivity(
                 this,
-                actionRequestCode(payload.notifyId(), index),
+                actionRequestCode(payload.notifyId(), action.id),
                 appIntent(payload, title, body, actionId = action.id),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
@@ -233,8 +236,37 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     companion object {
-        /** Distinct request codes per (notification, action) pair. */
-        fun actionRequestCode(notifyId: Int, index: Int): Int = notifyId * 4 + index
+        /**
+         * Stable, collision-resistant request codes (finding 26).
+         *
+         * The old `notifyId * 4 + index` scheme collided: an action index
+         * could equal another notification's tap code (and indices wrapped
+         * across notifications). Codes are now hash-mixed over distinct
+         * domains — ("tap", notifyId) vs ("action", notifyId, actionId) —
+         * so a tap never equals an action code unless the hashes themselves
+         * collide (32-bit, accepted residual risk). Stable across process
+         * restarts (String.hashCode, no atomic counter to reset), explicit
+         * intents + FLAG_IMMUTABLE are kept. Broadcast-backed actions are
+         * out of scope (content/activity intents only here).
+         */
+        fun tapRequestCode(notifyId: Int): Int = mix("tap", notifyId, null)
+
+        /** Distinct request code per (notification, action) pair. */
+        fun actionRequestCode(notifyId: Int, index: Int): Int = mix("action", notifyId, index)
+
+        /**
+         * Preferred overload: binds the stable action id (not its position),
+         * so reordered actions keep their codes.
+         */
+        fun actionRequestCode(notifyId: Int, actionId: String): Int =
+            31 * mix("action", notifyId, null) + actionId.hashCode()
+
+        private fun mix(domain: String, notifyId: Int, index: Int?): Int {
+            var h = domain.hashCode()
+            h = 31 * h + notifyId
+            h = 31 * h + (index ?: -1)
+            return h
+        }
 
         /**
          * Detached upload scope: token backfill must not hold the service

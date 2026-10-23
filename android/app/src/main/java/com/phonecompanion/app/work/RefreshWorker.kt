@@ -50,6 +50,14 @@ class RefreshWorker(
         private const val UNIQUE_MANUAL = "widget-refresh-manual"
         private const val MAX_ATTEMPTS = 3
 
+        /**
+         * Unique-work name for the manual refresh, exposed for the
+         * [com.phonecompanion.app.ui.WidgetsRefreshViewModel] observer.
+         * (Wiring it into WidgetsActivity is a follow-up: that file is
+         * owned by the parallel poll-wipe agent.)
+         */
+        fun manualWorkName(): String = UNIQUE_MANUAL
+
         private fun hourlyConstraints(): Constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .setRequiresBatteryNotLow(true)

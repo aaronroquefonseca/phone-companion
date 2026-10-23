@@ -21,4 +21,12 @@ interface EnrollmentStore {
         deviceToken: String,
         deviceKey: String,
     ): Boolean
+
+    /**
+     * Persists the human device name sent with the enroll call, for
+     * human-readable status copy (never shown as an id). Called after a
+     * successful [saveEnrollment]; default no-op so JVM fakes stay
+     * source-compatible.
+     */
+    fun saveDeviceName(deviceName: String) {}
 }
