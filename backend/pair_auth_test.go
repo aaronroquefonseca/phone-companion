@@ -136,7 +136,7 @@ func TestPairingEnrollTokenOnlyNoSession(t *testing.T) {
 	}
 
 	// Enroll WITHOUT any session cookie: token-only auth must succeed.
-	enrollBody := `{"enroll_token":` + strconv(token) + `,"device_name":"Pixel 8","fcm_token":"fcm-p8-1"}`
+	enrollBody := `{"enroll_token":` + jsonQuote(token) + `,"device_name":"Pixel 8","fcm_token":"fcm-p8-1"}`
 	w = doReq(t, mux, "POST", "/api/v1/enroll", enrollBody, "application/json", nil)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("enroll without session: got %d (%s), want 201", w.Code, w.Body.String())
@@ -171,7 +171,7 @@ func TestPairingEnrollTokenOnlyNoSession(t *testing.T) {
 	}
 }
 
-func strconv(s string) string {
+func jsonQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
@@ -185,7 +185,7 @@ func TestPairingDevicesListRevokeHappyPath(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &issued); err != nil {
 		t.Fatal(err)
 	}
-	enrollBody := `{"enroll_token":` + strconv(issued["enroll_token"]) + `,"device_name":"E2E Phone","fcm_token":"fcm-e2e-1"}`
+	enrollBody := `{"enroll_token":` + jsonQuote(issued["enroll_token"]) + `,"device_name":"E2E Phone","fcm_token":"fcm-e2e-1"}`
 	w = doReq(t, mux, "POST", "/api/v1/enroll", enrollBody, "application/json", nil)
 	var enrolled map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &enrolled); err != nil {
@@ -258,7 +258,7 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 	if err := json.Unmarshal(iw.Body.Bytes(), &issued); err != nil {
 		t.Fatal(err)
 	}
-	enrollBody := `{"enroll_token":` + strconv(issued["enroll_token"]) + `,"device_name":"WebUI Phone","fcm_token":"fcm-webui-1"}`
+	enrollBody := `{"enroll_token":` + jsonQuote(issued["enroll_token"]) + `,"device_name":"WebUI Phone","fcm_token":"fcm-webui-1"}`
 	ew := doReq(t, mux, "POST", "/api/v1/enroll", enrollBody, "application/json", nil)
 	var enrolled map[string]string
 	if err := json.Unmarshal(ew.Body.Bytes(), &enrolled); err != nil {

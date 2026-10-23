@@ -56,6 +56,10 @@ func main() {
 		Password:     cfg.AdminPassword,
 	})
 
+	// P3 widgets: SIGHUP-triggered reload of $WIDGET_DIR (plus best-effort
+	// mtime recheck per request; see widgets.go).
+	StartWidgetSIGHUPReloader(DefaultWidgetRegistry())
+
 	addr := ":" + cfg.Port
 	log.Printf("phone-companion backend listening on %s (widgets: %s)", addr, cfg.WidgetDir)
 	if err := http.ListenAndServe(addr, mux); err != nil {
