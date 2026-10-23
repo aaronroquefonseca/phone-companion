@@ -52,27 +52,49 @@ type NotifyService interface {
 var notifyPriorities = []string{"min", "low", "default", "high", "max"}
 
 var notifyFormTmpl = template.Must(template.New("notifyForm").Parse(`<h1>Send a test notification</h1>
-{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
-<form method="post" action="/webui/notify">
+{{if .Error}}<p class="error" id="notify-error" role="alert">{{.Error}}</p>{{end}}
+<form method="post" action="/webui/notify"{{if .Error}} aria-describedby="notify-error"{{end}}>
 <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-<label>Target
-<select name="target">
+<div class="field">
+<label for="notify-target">Target</label>
+<select id="notify-target" name="target"{{if .FieldErrors.Target}} aria-invalid="true" aria-describedby="notify-target-error"{{end}}>
 <option value="all"{{if eq .Target "all"}} selected{{end}}>All devices</option>
 {{range .Devices}}<option value="{{.ID}}"{{if eq $.Target .ID}} selected{{end}}>{{.Name}} ({{.ID}})</option>{{end}}
-</select></label>
-{{if not .Devices}}<p class="muted">No active devices yet — pairing one first makes targeting specific devices possible. "All devices" still works (accepted: 0 until a device pairs).</p>{{end}}
-<label>Kind <input type="text" name="kind" list="notify-kinds" value="{{.Kind}}" maxlength="64">
-<datalist id="notify-kinds"><option value="note"></option><option value="alert"></option></datalist></label>
-<p class="muted">Open vocabulary: unknown kinds render generically on the app.</p>
-<label>Title <input type="text" name="title" value="{{.Title}}" maxlength="500" required></label>
-<label>Body <textarea name="body" rows="4" maxlength="4096" required>{{.Body}}</textarea></label>
-<label>Priority
-<select name="priority">
+</select>
+{{if .FieldErrors.Target}}<p class="field-error" id="notify-target-error">{{.FieldErrors.Target}}</p>{{end}}
+{{if not .Devices}}<p class="hint">No active devices yet — pairing one first makes targeting specific devices possible. "All devices" still works (accepted: 0 until a device pairs).</p>{{end}}
+</div>
+<div class="field">
+<label for="notify-kind">Kind</label>
+<input id="notify-kind" type="text" name="kind" list="notify-kinds" value="{{.Kind}}" maxlength="64"{{if .FieldErrors.Kind}} aria-invalid="true" aria-describedby="notify-kind-error"{{end}}>
+<datalist id="notify-kinds"><option value="note"></option><option value="alert"></option></datalist>
+{{if .FieldErrors.Kind}}<p class="field-error" id="notify-kind-error">{{.FieldErrors.Kind}}</p>{{else}}<p class="hint">Open vocabulary: unknown kinds render generically on the app.</p>{{end}}
+</div>
+<div class="field">
+<label for="notify-title">Title</label>
+<input id="notify-title" type="text" name="title" value="{{.Title}}" maxlength="500" required{{if .FieldErrors.Title}} aria-invalid="true" aria-describedby="notify-title-error"{{end}}>
+{{if .FieldErrors.Title}}<p class="field-error" id="notify-title-error">{{.FieldErrors.Title}}</p>{{end}}
+</div>
+<div class="field">
+<label for="notify-body">Body</label>
+<textarea id="notify-body" name="body" rows="4" maxlength="4096" required{{if .FieldErrors.Body}} aria-invalid="true" aria-describedby="notify-body-error"{{end}}>{{.Body}}</textarea>
+{{if .FieldErrors.Body}}<p class="field-error" id="notify-body-error">{{.FieldErrors.Body}}</p>{{end}}
+</div>
+<div class="field">
+<label for="notify-priority">Priority</label>
+<select id="notify-priority" name="priority"{{if .FieldErrors.Priority}} aria-invalid="true" aria-describedby="notify-priority-error"{{end}}>
 {{range .Priorities}}<option value="{{.}}"{{if eq $.Priority .}} selected{{end}}>{{.}}</option>{{end}}
-</select></label>
-<label><input type="checkbox" name="secret" value="true"{{if .Secret}} checked{{end}}> Secret content</label>
-<p class="muted">When checked, title and body are encrypted per device instead of sent as plaintext. Each target device needs its key on file; devices without a usable key fail closed for that device.</p>
+</select>
+{{if .FieldErrors.Priority}}<p class="field-error" id="notify-priority-error">{{.FieldErrors.Priority}}</p>{{end}}
+</div>
+<div class="field">
+<label for="notify-secret">Secret content</label>
+<input id="notify-secret" type="checkbox" name="secret" value="true"{{if .Secret}} checked{{end}}>
+<p class="hint">When checked, title and body are encrypted per device instead of sent as plaintext. Each target device needs its key on file; devices without a usable key fail closed for that device.</p>
+</div>
+<div class="form-actions">
 <button type="submit">Send notification</button>
+</div>
 </form>`))
 
 var notifySentTmpl = template.Must(template.New("notifySent").Parse(`<h1>Notification sent</h1>
@@ -91,6 +113,31 @@ type notifyFormData struct {
 	Secret     bool
 	CSRFToken  string
 	Error      string
+	// FieldErrors carries per-field messages rendered under the matching
+	// control (with aria-invalid + aria-describedby). Keys: Target, Kind,
+	// Title, Body, Priority. The banner (.Error, role=alert) always stays
+	// for the overall failure; generic codes set no field entry.
+	FieldErrors map[string]string
+}
+
+// notifyFieldForCode maps a pipeline error code onto the form field it
+// belongs under. Empty means banner-only (generic/driver/internal codes
+// with no single owning control).
+func notifyFieldForCode(code string) string {
+	switch code {
+	case "empty_target", "ambiguous_target", "too_many_targets":
+		return "Target"
+	case "kind_too_long":
+		return "Kind"
+	case "missing_title", "title_too_long":
+		return "Title"
+	case "missing_body", "body_too_long":
+		return "Body"
+	case "invalid_priority":
+		return "Priority"
+	default:
+		return ""
+	}
 }
 
 // notifyErrorText maps pipeline codes to operator-facing copy. Codes are
@@ -209,11 +256,17 @@ func HandleNotifyPost(store Store, csrf *CSRFProtection, svc NotifyService) http
 		if err != nil {
 			status := http.StatusInternalServerError
 			text := "Internal error — please try again."
+			code := ""
 			if nerr, ok := err.(*NotifyError); ok {
 				if nerr.Status != 0 {
 					status = nerr.Status
 				}
-				text = notifyErrorText(nerr.Code)
+				code = nerr.Code
+				text = notifyErrorText(code)
+			}
+			var fieldErrors map[string]string
+			if field := notifyFieldForCode(code); field != "" {
+				fieldErrors = map[string]string{field: text}
 			}
 			devices, lerr := store.ListDevices(r.Context())
 			if lerr != nil {
@@ -224,16 +277,17 @@ func HandleNotifyPost(store Store, csrf *CSRFProtection, svc NotifyService) http
 				displayTarget = "all"
 			}
 			renderNotifyForm(w, status, notifyFormData{
-				Devices:    activeDevices(devices),
-				Priorities: notifyPriorities,
-				Target:     displayTarget,
-				Kind:       req.Kind,
-				Title:      req.Title,
-				Body:       req.Body,
-				Priority:   req.Priority,
-				Secret:     req.Secret,
-				CSRFToken:  layoutCSRFToken(csrf, r),
-				Error:      text,
+				Devices:     activeDevices(devices),
+				Priorities:  notifyPriorities,
+				Target:      displayTarget,
+				Kind:        req.Kind,
+				Title:       req.Title,
+				Body:        req.Body,
+				Priority:    req.Priority,
+				Secret:      req.Secret,
+				CSRFToken:   layoutCSRFToken(csrf, r),
+				Error:       text,
+				FieldErrors: fieldErrors,
 			})
 			return
 		}
