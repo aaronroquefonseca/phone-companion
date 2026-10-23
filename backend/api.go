@@ -11,26 +11,30 @@ import (
 	"net/http"
 
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
+	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
-// NewMux builds the HTTP router.
-func NewMux(db *sql.DB, sender notify.Sender) *http.ServeMux {
-	mux := NewMuxWithWidgets(DefaultWidgetRegistry())
+// NewMux builds the HTTP router. sessions gates the operator-only
+// pairing routes (see pair_wire.go); POST /api/v1/enroll stays on
+// enroll-token auth and never touches sessions.
+func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
+	mux := NewMuxWithWidgets(DefaultWidgetRegistry(), sessions, csrf)
 	// Implemented (notifications P4): POST /api/v1/notify
 	mux.HandleFunc("POST /api/v1/notify", requireAdminNotifyStub(handleNotify(db, sender)))
 	return mux
 }
 
 // NewMuxWithWidgets builds the HTTP router backed by a specific registry
-// (used by tests to inject a temp-dir registry).
-func NewMuxWithWidgets(reg *WidgetRegistry) *http.ServeMux {
+// (used by tests to inject a temp-dir registry). A nil sessions store
+// fails closed (denyAllSessions) so widget tests need no auth fixtures.
+func NewMuxWithWidgets(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
 
-	// Pairing (P2): enroll + device registry + revocation + WebUI.
+	// Pairing (P2+P8): enroll + device registry + revocation + WebUI.
 	// See devices.go / pair_wire.go / webui/.
-	RegisterPairingRoutes(mux)
+	RegisterPairingRoutes(mux, sessions, csrf)
 	// P3 widgets: poll endpoint (device Bearer auth) + single-widget fetch
 	// (additive v1 extension; envelope per docs/api-contract.md).
 	mux.HandleFunc("GET /api/v1/widgets", reg.handleWidgetsList)

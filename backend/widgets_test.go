@@ -107,7 +107,7 @@ func TestWidgetEndpoints(t *testing.T) {
 	if err := reg.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	mux := NewMuxWithWidgets(reg)
+	mux := NewMuxWithWidgets(reg, nil, nil)
 
 	// Unauthenticated → 401 with error code body.
 	req := httptest.NewRequest("GET", "/api/v1/widgets", nil)
@@ -197,7 +197,7 @@ func TestMtimeRecheck(t *testing.T) {
 	if got := reg.loadCount(); got != 1 {
 		t.Fatalf("loads after initial Load = %d, want 1", got)
 	}
-	mux := NewMuxWithWidgets(reg)
+	mux := NewMuxWithWidgets(reg, nil, nil)
 
 	if widgetTreeChanged(dir, snapshotOf(reg)) {
 		t.Fatal("widgetTreeChanged == true with no edits (would rescan every request)")
@@ -257,7 +257,7 @@ func TestInvalidDirsNoRescan(t *testing.T) {
 	if err := reg.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	mux := NewMuxWithWidgets(reg)
+	mux := NewMuxWithWidgets(reg, nil, nil)
 	for i := 0; i < 3; i++ {
 		if rec := authedGet(mux, "GET", "/api/v1/widgets", nil); rec.Code != http.StatusOK {
 			t.Fatalf("list status = %d", rec.Code)
@@ -318,7 +318,7 @@ func TestSecretTripleEquality(t *testing.T) {
 	if err := reg.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	mux := NewMuxWithWidgets(reg)
+	mux := NewMuxWithWidgets(reg, nil, nil)
 
 	var list struct {
 		Widgets []widgetEnvelope `json:"widgets"`
@@ -373,7 +373,7 @@ func TestWidgetFileLimits(t *testing.T) {
 	if err := reg.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	mux := NewMuxWithWidgets(reg)
+	mux := NewMuxWithWidgets(reg, nil, nil)
 	var list struct {
 		Widgets []widgetEnvelope `json:"widgets"`
 	}

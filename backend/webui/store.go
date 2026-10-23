@@ -4,7 +4,8 @@
 // The package takes a Store interface so it stays independent of the main
 // package's sqlite wiring; the concrete adapter lives in the main package
 // (see pair_wire.go). Admin gating is applied by the caller when mounting
-// the handlers (requireAdminPairingStub until Wave-2 P8 lands RequireAdmin).
+// the handlers (admin gating is applied by the caller via RequireAdmin in
+// package main's pair_wire.go).
 //
 // NOTE (merge resolution P1+P2): this file held the P2 pairing Store
 // interface, originally added as backend/webui/webui.go on the pairing
