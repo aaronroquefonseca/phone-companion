@@ -25,7 +25,8 @@ interface DeviceDao {
     // TODO (pairing PR): insert/find/revoke queries.
 }
 
-@Database(entities = [DeviceEntity::class], version = 1, exportSchema = false)
+@Database(entities = [DeviceEntity::class, WidgetCacheEntity::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun deviceDao(): DeviceDao
+    abstract fun widgetCacheDao(): WidgetCacheDao
 }

@@ -6,7 +6,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"strings"
 )
 
 // Config holds all backend runtime settings. Secrets must come from the
@@ -20,15 +22,14 @@ type Config struct {
 	// AdminPasswordHash is the preferred WebUI credential (e.g. bcrypt).
 	// $ADMIN_PASSWORD_HASH.
 	AdminPasswordHash string
-	// AdminPassword is a bootstrap-only fallback used to derive the hash on
-	// first run. Prefer ADMIN_PASSWORD_HASH. $ADMIN_PASSWORD.
+	// AdminPassword is a bootstrap-only fallback verified directly when
+	// ADMIN_PASSWORD_HASH is unset. Prefer ADMIN_PASSWORD_HASH.
 	//
-	// TODO (auth PR): implement hash-and-store-on-first-boot, then require
+	// TODO (future hardening): hash-and-store-on-first-boot, then require
 	// the hash afterwards.
 	AdminPassword string
 	// SessionSecret signs WebUI session cookies. $SESSION_SECRET.
-	//
-	// TODO (auth PR): enforce minimum length / fail closed when unset.
+	// Must be at least 32 bytes; enforced by Validate (fail closed).
 	SessionSecret string
 	// DBPath is the sqlite file location. $DB_PATH, default /data/phone-companion.db.
 	DBPath string
@@ -42,8 +43,22 @@ type Config struct {
 	FCMCredentials string // $FCM_CREDENTIALS_FILE (path to mounted service-account JSON)
 }
 
+// Fail-closed bounds for auth secrets. These are deliberately strict: the
+// backend refuses to boot rather than serve with guessable credentials.
+const (
+	// minSessionSecretBytes is the minimum accepted SESSION_SECRET length.
+	minSessionSecretBytes = 32
+	// minBootstrapPasswordLen is the minimum accepted ADMIN_PASSWORD length.
+	minBootstrapPasswordLen = 12
+	// minPasswordHashLen rejects empty/truncated ADMIN_PASSWORD_HASH values.
+	minPasswordHashLen = 20
+)
+
 // LoadConfig reads the environment into a Config, applying defaults.
-// Validation and fail-closed secret checks are TODOs for the auth PR.
+//
+// LoadConfig does NOT validate: callers must call Validate and refuse to
+// boot on error (fail closed). Validation lives here so every entrypoint
+// shares one policy; see main.go.
 func LoadConfig() Config {
 	return Config{
 		Port:              getenv("PORT", "8080"),
@@ -63,4 +78,41 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// Validate rejects missing or weak auth configuration. Error messages
+// describe which setting is wrong but never include secret material.
+func (c Config) Validate() error {
+	if len(c.SessionSecret) < minSessionSecretBytes {
+		return errors.New("SESSION_SECRET must be at least 32 bytes long")
+	}
+	if strings.HasPrefix(c.SessionSecret, "CHANGEME") {
+		return errors.New("SESSION_SECRET still holds a placeholder value")
+	}
+	if strings.TrimSpace(c.AdminUser) == "" {
+		return errors.New("ADMIN_USER must be set")
+	}
+	if strings.HasPrefix(c.AdminUser, "CHANGEME") {
+		return errors.New("ADMIN_USER still holds a placeholder value")
+	}
+	if c.AdminPasswordHash == "" && c.AdminPassword == "" {
+		return errors.New("set ADMIN_PASSWORD_HASH (preferred) or ADMIN_PASSWORD (bootstrap only)")
+	}
+	if c.AdminPasswordHash != "" {
+		if len(c.AdminPasswordHash) < minPasswordHashLen {
+			return errors.New("ADMIN_PASSWORD_HASH looks truncated")
+		}
+		if strings.HasPrefix(c.AdminPasswordHash, "CHANGEME") {
+			return errors.New("ADMIN_PASSWORD_HASH still holds a placeholder value")
+		}
+	}
+	if c.AdminPassword != "" {
+		if len(c.AdminPassword) < minBootstrapPasswordLen {
+			return errors.New("ADMIN_PASSWORD must be at least 12 characters long")
+		}
+		if strings.HasPrefix(c.AdminPassword, "CHANGEME") {
+			return errors.New("ADMIN_PASSWORD still holds a placeholder value")
+		}
+	}
+	return nil
 }

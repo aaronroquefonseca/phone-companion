@@ -71,8 +71,10 @@ func Migrate(db *sql.DB) error {
 	)`); err != nil {
 		return err
 	}
-	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_devices_token_hash ON devices (token_hash)`)
-	return err
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_devices_token_hash ON devices (token_hash)`); err != nil {
+		return err
+	}
+	return migrateSessions(db)
 }
 
 // ensureDeviceColumn adds a nullable TEXT column to devices if missing, so

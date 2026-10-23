@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func openTestDB(t *testing.T) *sql.DB {
+func openDevicesTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := OpenDB(t.TempDir() + "/test.db")
 	if err != nil {
@@ -50,7 +50,7 @@ func TestMigrateUpgradesP0Schema(t *testing.T) {
 }
 
 func TestEnrollHappyPathAndSingleUse(t *testing.T) {
-	db := openTestDB(t)
+	db := openDevicesTestDB(t)
 
 	raw, _, err := IssueEnrollToken(db, time.Minute)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestEnrollHappyPathAndSingleUse(t *testing.T) {
 }
 
 func TestRePairRotatesKey(t *testing.T) {
-	db := openTestDB(t)
+	db := openDevicesTestDB(t)
 	id1, tok1, key1, err := EnrollDevice(db, "Phone", "fcm-same")
 	if err != nil {
 		t.Fatal(err)
