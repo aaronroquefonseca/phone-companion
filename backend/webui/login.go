@@ -3,38 +3,32 @@ package webui
 import (
 	"html/template"
 	"net/http"
+	"strings"
 )
 
-// loginPage is the whole WebUI auth surface: sign-in form, signed-in
-// state, and failure message. No framework, no external assets.
-var loginPage = template.Must(template.New("login").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Phone Companion — Sign in</title></head>
-<body>
-<main>
-<h1>Phone Companion</h1>
+// loginBody is the sign-in surface inside the shared layout: sign-in form,
+// signed-in state, and failure message. Error text stays generic so
+// usernames cannot be enumerated.
+var loginBody = template.Must(template.New("loginBody").Parse(`<h1>Sign in</h1>
 {{if .SignedIn}}
 <p>Signed in as {{.Username}}.</p>
-<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">Sign out</button></form>
+<p><a href="/">Open the operator dashboard</a>.</p>
 {{else}}
-{{if .Error}}<p role="alert">Invalid username or password.</p>{{end}}
+{{if .Error}}<p class="error" role="alert">Invalid username or password.</p>{{end}}
 <form method="post" action="/login">
-<label>Username <input type="text" name="username" autocomplete="username" required></label><br>
-<label>Password <input type="password" name="password" autocomplete="current-password" required></label><br>
+<label>Username <input type="text" name="username" autocomplete="username" required></label>
+<label>Password <input type="password" name="password" autocomplete="current-password" required></label>
 <button type="submit">Sign in</button>
 </form>
-{{end}}
-</main>
-</body>
-</html>`))
+{{end}}`))
 
 type loginData struct {
 	Error    bool
 	SignedIn bool
 	Username string
-	// CSRFToken is the session-bound token for the signed-in logout form.
-	// Empty when there is no session (or the protector is fail-closed);
-	// the form then posts without a token and logout fails closed with 403.
+	// CSRFToken is the session-bound token for the nav logout form when
+	// signed in. Empty when there is no session (or the protector is
+	// fail-closed); the logout POST then fails closed with 403.
 	CSRFToken string
 }
 
@@ -43,22 +37,27 @@ type loginData struct {
 const maxLoginFieldLen = 256
 
 func (h *handler) handleLoginGet(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// The login page must never be cached: it reflects auth state and its
-	// form targets a credential-bearing endpoint.
-	w.Header().Set("Cache-Control", "no-store")
 	data := loginData{}
-	if h.store.ValidateSession(r) {
-		data.SignedIn = true
+	signedIn := h.store.ValidateSession(r)
+	data.SignedIn = signedIn
+	if signedIn {
 		data.Username = h.creds.Username
-		// Mint the logout token for the signed-in form (pair.go pattern).
+		// Mint the logout token for the nav form (pair.go pattern).
 		// TokenForRequest is nil-safe: a nil/fail-closed protector yields
 		// "", and the logout POST then fails closed with 403.
 		if tok, ok := h.csrf.TokenForRequest(r); ok {
 			data.CSRFToken = tok
 		}
 	}
-	_ = loginPage.Execute(w, data)
+	var body strings.Builder
+	_ = loginBody.Execute(&body, data)
+	renderLayout(w, http.StatusOK, layoutData{
+		Title:     "Sign in",
+		Active:    "login",
+		SignedIn:  signedIn,
+		CSRFToken: data.CSRFToken,
+		Body:      template.HTML(body.String()),
+	})
 }
 
 func (h *handler) handleLoginPost(w http.ResponseWriter, r *http.Request) {
@@ -84,9 +83,12 @@ func (h *handler) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.verify(username, password) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = loginPage.Execute(w, loginData{Error: true})
+		var body strings.Builder
+		_ = loginBody.Execute(&body, loginData{Error: true})
+		renderLayout(w, http.StatusUnauthorized, layoutData{
+			Title: "Sign in",
+			Body:  template.HTML(body.String()),
+		})
 		return
 	}
 	if err := h.store.CreateSession(w, r); err != nil {

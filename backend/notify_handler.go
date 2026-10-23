@@ -152,10 +152,76 @@ func writeNotifyError(w http.ResponseWriter, status int, code string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
-// handleNotify enqueues fan-out: validate, resolve targets, build the
-// per-device data payload (plaintext DataPayload, or per-device P5
-// envelopes when the request sets secret:true), send via the configured
-// Sender, record history, respond.
+// fanoutNotify is the shared fan-out core behind both POST /api/v1/notify
+// and the operator WebUI test form (POST /webui/notify): resolve targets,
+// build the per-device payload (plaintext, or per-device P5 envelopes when
+// msg.Secret is set), send, record history, prune. Callers map the result
+// onto their surface (JSON 202 vs. HTML 202 vs. error page).
+//
+// Success returns (notificationID, accepted, 202, ""). Failure returns
+// ("", 0, status, code). The zero-target case is a normal 202 with
+// accepted:0, never an error — even behind a stub driver.
+func fanoutNotify(ctx context.Context, db *sql.DB, sender notify.Sender, msg notify.Message) (notificationID string, accepted int, httpStatus int, errCode string) {
+	devices, err := resolveNotifyTargets(ctx, db, msg.Target)
+	if err != nil {
+		log.Printf("notify: resolve targets: %v", err)
+		return "", 0, http.StatusInternalServerError, "target_lookup_failed"
+	}
+	notificationID, err = newNotificationID()
+	if err != nil {
+		log.Printf("notify: new id: %v", err)
+		return "", 0, http.StatusInternalServerError, "internal"
+	}
+	if len(devices) == 0 {
+		// Genuinely zero targets is a normal 202, not an error —
+		// even behind a stub driver.
+		if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
+			log.Printf("notify: prune history: %v", pruneErr)
+		}
+		return notificationID, 0, http.StatusAccepted, ""
+	}
+	switch sender.(type) {
+	case notify.LogSender, notify.NoopSender:
+		// Stub drivers deliver nothing: reporting accepted>0 would
+		// lie to the operator, so fail closed. (Zero targets return
+		// 202 above regardless of driver.)
+		log.Printf("notify: stub driver %T cannot deliver notification=%s to %d device(s)", sender, notificationID, len(devices))
+		return "", 0, http.StatusInternalServerError, "driver_unavailable"
+	}
+	accepted = 0
+	for _, d := range devices {
+		status, errMsg := notify.StatusQueued, ""
+		payload, perr := payloadForDevice(msg, db, notificationID, d)
+		if perr != nil {
+			status, errMsg = notify.StatusFailed, perr.Error()
+			log.Printf("notify: build payload device=%s notification=%s: %v", d.ID, notificationID, perr)
+		} else if sendErr := sender.Send(ctx, d, payload); sendErr != nil {
+			status, errMsg = notify.StatusFailed, sendErr.Error()
+			log.Printf("notify: send failed device=%s notification=%s: %v", d.ID, notificationID, sendErr)
+		} else {
+			accepted++
+		}
+		if recErr := notify.RecordDelivery(ctx, db, notificationID, d.ID, msg.Kind, status, errMsg, time.Now()); recErr != nil {
+			log.Printf("notify: record delivery: %v", recErr)
+		}
+	}
+	// Bounded history (P4 follow-up): prune best-effort after fan-out. A
+	// prune failure is logged, never fails the request; fan-out stays
+	// sequential (one device after another) so a slow device cannot
+	// amplify into concurrent load.
+	if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
+		log.Printf("notify: prune history: %v", pruneErr)
+	}
+	if accepted == 0 {
+		// Real targets, nothing delivered: the driver (e.g.
+		// misconfigured FCM) is down, not merely idle.
+		return "", 0, http.StatusInternalServerError, "driver_unavailable"
+	}
+	return notificationID, accepted, http.StatusAccepted, ""
+}
+
+// handleNotify enqueues fan-out: validate, then run the shared fanoutNotify
+// core and map its result onto the JSON contract.
 //
 // Delivery semantics:
 //
@@ -202,69 +268,9 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			log.Printf("notify: debug dump kind=%q title=%q body=%q secret=%v targets=%+v",
 				msg.Kind, msg.Title, msg.Body, msg.Secret, msg.Target)
 		}
-		devices, err := resolveNotifyTargets(ctx, db, msg.Target)
-		if err != nil {
-			log.Printf("notify: resolve targets: %v", err)
-			writeNotifyError(w, http.StatusInternalServerError, "target_lookup_failed")
-			return
-		}
-		notificationID, err := newNotificationID()
-		if err != nil {
-			log.Printf("notify: new id: %v", err)
-			writeNotifyError(w, http.StatusInternalServerError, "internal")
-			return
-		}
-		if len(devices) == 0 {
-			// Genuinely zero targets is a normal 202, not an error —
-			// even behind a stub driver.
-			if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
-				log.Printf("notify: prune history: %v", pruneErr)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"notification_id": notificationID,
-				"accepted":        0,
-			})
-			return
-		}
-		switch sender.(type) {
-		case notify.LogSender, notify.NoopSender:
-			// Stub drivers deliver nothing: reporting accepted>0 would
-			// lie to the operator, so fail closed. (Zero targets return
-			// 202 above regardless of driver.)
-			log.Printf("notify: stub driver %T cannot deliver notification=%s to %d device(s)", sender, notificationID, len(devices))
-			writeNotifyError(w, http.StatusInternalServerError, "driver_unavailable")
-			return
-		}
-		accepted := 0
-		for _, d := range devices {
-			status, errMsg := notify.StatusQueued, ""
-			payload, perr := payloadForDevice(msg, db, notificationID, d)
-			if perr != nil {
-				status, errMsg = notify.StatusFailed, perr.Error()
-				log.Printf("notify: build payload device=%s notification=%s: %v", d.ID, notificationID, perr)
-			} else if sendErr := sender.Send(ctx, d, payload); sendErr != nil {
-				status, errMsg = notify.StatusFailed, sendErr.Error()
-				log.Printf("notify: send failed device=%s notification=%s: %v", d.ID, notificationID, sendErr)
-			} else {
-				accepted++
-			}
-			if recErr := notify.RecordDelivery(ctx, db, notificationID, d.ID, msg.Kind, status, errMsg, time.Now()); recErr != nil {
-				log.Printf("notify: record delivery: %v", recErr)
-			}
-		}
-		// Bounded history (P4 follow-up): prune best-effort after fan-out. A
-		// prune failure is logged, never fails the request; fan-out stays
-		// sequential (one device after another) so a slow device cannot
-		// amplify into concurrent load.
-		if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
-			log.Printf("notify: prune history: %v", pruneErr)
-		}
-		if accepted == 0 {
-			// Real targets, nothing delivered: the driver (e.g.
-			// misconfigured FCM) is down, not merely idle.
-			writeNotifyError(w, http.StatusInternalServerError, "driver_unavailable")
+		notificationID, accepted, status, code := fanoutNotify(ctx, db, sender, msg)
+		if status != http.StatusAccepted {
+			writeNotifyError(w, status, code)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

@@ -70,6 +70,7 @@ func main() {
 	// needs the bare *http.ServeMux, while ListenAndServe takes the
 	// no-store-wrapped handler).
 	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, csrf, handleNotify(db, sender)))
+	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,
 		PasswordHash: cfg.AdminPasswordHash,
