@@ -36,11 +36,28 @@ CREATE TABLE IF NOT EXISTS devices (
 // OpenDB opens the sqlite database file, creating parent state as needed.
 // The driver is pure Go (modernc.org/sqlite) so the binary stays static and
 // runs in distroless/scratch.
+//
+// Permissions: the parent dir is created 0700 and the DB file is tightened
+// to 0600 after open (pre-created 0600 when missing), because the DB holds
+// token hashes and per-device key material. Run the process with umask 077
+// so driver-created sidecar files (journal/WAL) default to owner-only too;
+// the explicit Chmod below is defense-in-depth for pre-existing files.
 func OpenDB(path string) (*sql.DB, error) {
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
+	}
+	// sql.Open is lazy (no file I/O yet), so pre-create the file with
+	// owner-only mode when absent; Chmod then tightens pre-existing files
+	// left behind by a looser umask or an earlier version.
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600); err != nil {
+		return nil, err
+	} else if err := f.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
 	}
 	// TODO (auth PR): set busy_timeout / journal_mode pragmas via DSN.
 	return sql.Open("sqlite", path)

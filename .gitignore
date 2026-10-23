@@ -21,6 +21,9 @@ venv/
 *.token
 secrets/
 
+# Filled-in compose file holds secrets — never commit (its header says so too).
+docker-compose.yml
+
 # FCM sender config (notifications PR): per-developer/machine file, fetched
 # from the Firebase console. Documented in android/README.md; never commit.
 android/app/google-services.json

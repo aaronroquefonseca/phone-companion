@@ -76,7 +76,7 @@ docker compose logs backend
 
 The image carries empty `/data` + `/widgets`; compose mounts the sqlite
 volume (`phone-companion-data:/data`) and the widget dir
-(`./backend/widgets:/widgets:ro`) over them.
+(`./backend/widgets:/widgets:ro`) over them. Health: `GET /healthz` (no in-image HEALTHCHECK — distroless has no shell, so probe externally).
 
 ## Widgets (`WIDGET_DIR`)
 
