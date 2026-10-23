@@ -8,7 +8,9 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
+	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
@@ -26,9 +28,21 @@ func main() {
 	if err := Migrate(db); err != nil {
 		log.Fatalf("migrate database: %v", err)
 	}
+	if err := notify.Migrate(db); err != nil {
+		log.Fatalf("migrate notifications: %v", err)
+	}
+
+	// Notifications (P4): fail fast on unknown NOTIFY_DRIVER so a typo can
+	// never silently become a black hole.
+	sender, err := notify.SenderFromEnv(os.Getenv("NOTIFY_DRIVER"), cfg.FCMProjectID, cfg.FCMCredentials)
+	if err != nil {
+		log.Fatalf("notify driver: %v", err)
+	}
+	log.Printf("notify driver: %T", sender)
+
 	SetDeviceDB(db)
 
-	mux := NewMux()
+	mux := NewMux(db, sender)
 	webui.RegisterRoutes(mux, NewSessionStore(db, cfg.SessionSecret), webui.Credentials{
 		Username:     cfg.AdminUser,
 		PasswordHash: cfg.AdminPasswordHash,
