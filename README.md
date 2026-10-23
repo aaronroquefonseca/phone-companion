@@ -97,10 +97,13 @@ see the pairing QR and device list.
 #    device_id + device_token + device_key exactly once; the app stores
 #    them in encrypted storage. Tokens are single-use, 15 min expiry.
 
-# 6. Send a test notification (operator session required). curl does not
+# 6. Send a test notification (operator session required + write-guard
+#    proof: X-Requested-With or a session-bound CSRF token, same as
+#    enroll-tokens). curl does not
 #    resend the Secure-flagged cookie over plain HTTP, so pass it explicitly:
 COOKIE=$(grep pc_session jar.txt | awk '{print $NF}')
 curl -H "Cookie: pc_session=$COOKIE" -H 'Content-Type: application/json' \
+  -H 'X-Requested-With: XMLHttpRequest' \
   -d '{"target":{"all":true},"kind":"note","title":"Hello","body":"First test"}' \
   http://127.0.0.1:8080/api/v1/notify
 # -> {"notification_id":"...","accepted":N} (202; accepted:0 with no
@@ -184,6 +187,6 @@ the backend refuses to boot on weak/missing secrets.
 
 Verified in this PR's environment: `docker build ./backend`, full
 compose quickstart (`up -d --build`, `/healthz`, bcrypt-hash login →
-`303`, session-cookie `POST /api/v1/notify` → `202`), `go vet` + `go test`
-clean. NOT run here: Android build (no SDK in this environment) and the
+`303`, session-cookie + `X-Requested-With` `POST /api/v1/notify` → `202`),
+`go vet` + `go test` clean. NOT run here: Android build (no SDK in this environment) and the
 Caddy/nginx snippets above (standard proxy config, adjust paths/hosts).

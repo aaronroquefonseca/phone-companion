@@ -1,8 +1,7 @@
 package com.phonecompanion.app.widgets
 
-import androidx.glance.GlanceId
-import androidx.glance.appwidget.AppWidgetId
 import com.phonecompanion.app.data.WidgetCacheEntity
+import com.phonecompanion.app.data.WidgetPayloadParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -10,9 +9,10 @@ import org.junit.Test
 /**
  * Fix batch B: per-instance [SecretWidget] content.
  *
- * The widget shows the cached row matching its Glance instance, falling
- * back to the first cached secret; resolution is fail-closed (null, which
- * the widget renders as [SecretWidget.MASKED]).
+ * Row selection is the shared [WidgetInstancePicker.pick] (same as the
+ * other widgets); titles are bounded by
+ * [WidgetPayloadParser.sanitizeTitle]. Resolution is fail-closed (null,
+ * which the widget renders as [SecretWidget.MASKED]).
  */
 class SecretWidgetContentTest {
 
@@ -41,33 +41,30 @@ class SecretWidgetContentTest {
     )
 
     @Test
-    fun `glanceKey unwraps app widget ids`() {
-        assertEquals("42", glanceKey(AppWidgetId(42)))
-    }
-
-    @Test
-    fun `glanceKey falls back to id string`() {
-        val id = object : GlanceId {
-            override fun toString(): String = "custom-id"
-        }
-        assertEquals("custom-id", glanceKey(id))
-    }
-
-    @Test
-    fun `exact id match wins over first row`() {
+    fun `bound instance gets its own row via shared picker`() {
         val rows = listOf(row("a"), row("b"), row("c"))
-        assertEquals("b", selectRowForGlance(rows, "b")?.id)
+        assertEquals("b", WidgetInstancePicker.pick(rows, 1)?.id)
     }
 
     @Test
-    fun `no match falls back to first row`() {
+    fun `unbound instance falls back to first row`() {
         val rows = listOf(row("a"), row("b"))
-        assertEquals("a", selectRowForGlance(rows, "zzz")?.id)
+        assertEquals("a", WidgetInstancePicker.pick(rows, -1)?.id)
     }
 
     @Test
     fun `empty cache selects nothing`() {
-        assertNull(selectRowForGlance(emptyList(), "any"))
+        assertNull(WidgetInstancePicker.pick(emptyList(), 0))
+    }
+
+    @Test
+    fun `title is sanitized like the other widgets`() {
+        val long = "t".repeat(WidgetPayloadParser.TITLE_MAX + 50)
+        assertEquals(
+            WidgetPayloadParser.TITLE_MAX,
+            WidgetPayloadParser.sanitizeTitle(long).length,
+        )
+        assertEquals("short", WidgetPayloadParser.sanitizeTitle("short"))
     }
 
     @Test

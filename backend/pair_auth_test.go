@@ -246,15 +246,15 @@ func TestPairingDevicesListRevokeHappyPath(t *testing.T) {
 
 	// Revoke → 204; already-revoked re-revoke stays 204 (idempotent);
 	// unknown ID → 404 device_not_found.
-	w = doReq(t, mux, "DELETE", "/api/v1/devices/"+id, "", "", cookie)
+	w = doOperatorWriteReq(t, mux, "DELETE", "/api/v1/devices/"+id, "", "", cookie)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("revoke: got %d (%s), want 204", w.Code, w.Body.String())
 	}
-	w = doReq(t, mux, "DELETE", "/api/v1/devices/"+id, "", "", cookie)
+	w = doOperatorWriteReq(t, mux, "DELETE", "/api/v1/devices/"+id, "", "", cookie)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("re-revoke idempotent: got %d, want 204", w.Code)
 	}
-	w = doReq(t, mux, "DELETE", "/api/v1/devices/does-not-exist", "", "", cookie)
+	w = doOperatorWriteReq(t, mux, "DELETE", "/api/v1/devices/does-not-exist", "", "", cookie)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("unknown revoke: got %d, want 404", w.Code)
 	}
@@ -611,6 +611,36 @@ func TestPairingEnrollTokensRequiresWriteGuard(t *testing.T) {
 	w = doReq(t, mux, "POST", "/api/v1/enroll", enrollBody, "application/json", nil)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("phone enroll without guard: got %d (%s), want 201", w.Code, w.Body.String())
+	}
+}
+
+// DELETE /api/v1/devices and POST /api/v1/notify share the enroll-tokens
+// write guard (X-Requested-With or session-bound CSRF token); phone enroll
+// stays exempt (covered above).
+func TestOperatorWriteGuardDeleteAndNotify(t *testing.T) {
+	mux, _, _, cookie := setupPairingMux(t)
+
+	// DELETE without proof → 403 (fail closed); with header → 404 (guard
+	// passed, unknown id reached).
+	w := doReq(t, mux, "DELETE", "/api/v1/devices/does-not-exist", "", "", cookie)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("delete without guard: got %d (%s), want 403", w.Code, w.Body.String())
+	}
+	w = doOperatorWriteReq(t, mux, "DELETE", "/api/v1/devices/does-not-exist", "", "", cookie)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("delete with guard: got %d (%s), want 404", w.Code, w.Body.String())
+	}
+
+	// Notify without proof → 403; auth still runs first (anon → 401).
+	w = doReq(t, mux, "POST", "/api/v1/notify",
+		`{"target":{"all":true},"title":"Hi","body":"Yo"}`, "application/json", cookie)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("notify without guard: got %d (%s), want 403", w.Code, w.Body.String())
+	}
+	w = doReq(t, mux, "POST", "/api/v1/notify",
+		`{"target":{"all":true},"title":"Hi","body":"Yo"}`, "application/json", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("notify anon without guard: got %d, want 401", w.Code)
 	}
 }
 

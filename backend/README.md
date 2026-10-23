@@ -36,10 +36,10 @@ model: `docs/threat-model.md`.
 | `POST /api/v1/enroll` | enroll token only (phone) | `201 {device_id, device_token, device_key}` shown once |
 | `POST /api/v1/enroll-tokens` | admin session | Issues token via API; shares the 30/min issuance bucket (see below) |
 | `GET /api/v1/devices` | admin session | Device registry |
-| `DELETE /api/v1/devices/{id}` | admin session | Revoke; idempotent; unknown id → `404 device_not_found` |
+| `DELETE /api/v1/devices/{id}` | admin session + write-guard proof (missing `X-Requested-With`/CSRF → `403`) | Revoke; idempotent; unknown id → `404 device_not_found` |
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
-| `POST /api/v1/notify` | admin session (`401` without; device Bearer → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
 
 Issuance rate limit (shared bucket): `POST /api/v1/enroll-tokens` and
 `GET /webui/pair` share 30 token mints per `RemoteAddr` per minute

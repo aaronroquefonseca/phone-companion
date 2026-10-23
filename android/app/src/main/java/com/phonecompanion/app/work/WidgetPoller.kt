@@ -8,13 +8,11 @@ import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.data.WidgetEnvelope
+import com.phonecompanion.app.data.WidgetJson
 import com.phonecompanion.app.widgets.ListWidget
 import com.phonecompanion.app.widgets.SecretWidget
 import com.phonecompanion.app.widgets.StatusWidget
 import com.phonecompanion.app.widgets.TextWidget
-import com.squareup.moshi.JsonAdapter
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.Types
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -37,12 +35,12 @@ import kotlinx.coroutines.supervisorScope
  */
 object WidgetPoller {
 
-    private val moshi: Moshi = Moshi.Builder().build()
-
-    private val mapAdapter: JsonAdapter<Any> =
-        moshi.adapter(
-            Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java),
-        )
+    /**
+     * Serializes a widgets-poll payload map for the cache. Throws on
+     * serialization failure so [pollOnce] keeps the last cache instead of
+     * upserting a fallback.
+     */
+    internal fun payloadToJson(payload: Map<String, Any?>?): String = WidgetJson.toJson(payload)
 
     suspend fun refresh(context: Context) {
         if (pollOnce(context)) {
@@ -114,12 +112,6 @@ object WidgetPoller {
         payloadJson = payloadToJson(envelope.payload),
         secretRef = envelope.secretRef,
     )
-
-    /** Serializes a widgets-poll payload map for the cache. Never null. */
-    internal fun payloadToJson(payload: Map<String, Any?>?): String {
-        if (payload == null) return "{}"
-        return mapAdapter.toJson(payload) ?: "{}"
-    }
 
     /**
      * Push cached state to each per-type widget. No fully-generic renderer.

@@ -42,6 +42,10 @@ class CompanionMessagingService : FirebaseMessagingService() {
             // crash (OOM and framework errors included).
             try {
                 val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                // Text-first fallback still needs its channel on API 26+:
+                // posting to a missing channel drops the notification, so
+                // ensure the GENERAL fallback channel before notify.
+                ensureGeneralChannel(manager)
                 manager.notify(
                     (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
                     NotificationCompat.Builder(this, NotificationPayload.GENERAL_CHANNEL_ID)
@@ -163,6 +167,24 @@ class CompanionMessagingService : FirebaseMessagingService() {
         manager.createNotificationChannel(
             NotificationChannel(payload.channelId(), payload.channelName(), payload.importance()),
         )
+    }
+
+    /**
+     * Ensures the GENERAL fallback channel for the last-resort blank post.
+     * Best-effort: never throws (the fallback notify below must not fail).
+     */
+    private fun ensureGeneralChannel(manager: NotificationManager) {
+        try {
+            if (manager.getNotificationChannel(NotificationPayload.GENERAL_CHANNEL_ID) != null) return
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    NotificationPayload.GENERAL_CHANNEL_ID,
+                    "General notifications",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ),
+            )
+        } catch (_: Throwable) {
+        }
     }
 
     /**

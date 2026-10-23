@@ -6,6 +6,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -43,8 +44,26 @@ CREATE TABLE IF NOT EXISTS devices (
 // so driver-created sidecar files (journal/WAL) default to owner-only too;
 // the explicit Chmod below is defense-in-depth for pre-existing files.
 func OpenDB(path string) (*sql.DB, error) {
-	if dir := filepath.Dir(path); dir != "" {
+	if dir := filepath.Dir(path); dir != "" && dir != "." && dir != string(filepath.Separator) {
+		// Refuse symlinked parent dirs fail-closed: MkdirAll/Chmod follow
+		// links, so managing through one would retarget outside the state
+		// dir. Lstat (not Stat) sees the link itself.
+		if fi, err := os.Lstat(dir); err != nil {
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+		} else if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("refusing to open database in symlinked dir %q", dir)
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		// Tighten pre-existing dirs left behind by a looser umask or an
+		// earlier version (MkdirAll is a no-op when the dir exists). "."
+		// and the filesystem root are never managed: opening a bare
+		// filename must not chmod the process cwd, and "/" is never a
+		// state dir.
+		if err := os.Chmod(dir, 0o700); err != nil {
 			return nil, err
 		}
 	}

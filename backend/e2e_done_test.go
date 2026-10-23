@@ -193,7 +193,7 @@ func TestE2EDoneCriteria(t *testing.T) {
 	// Log/NoopSender fail closed in the handler now): rows still land in
 	// notification_history.
 	base.Handle("POST /api/v1/notify",
-		notifyAdminChain(sessions, handleNotify(db, &captureSender{})))
+		notifyAdminChain(sessions, csrf, handleNotify(db, &captureSender{})))
 	webui.RegisterRoutes(base, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",
@@ -313,7 +313,7 @@ func TestE2EDoneCriteria(t *testing.T) {
 	}
 
 	// --- Revoke dev-B via the API: immediate effect, then it gets nothing.
-	w = doReq(t, mux, "DELETE", "/api/v1/devices/"+idB, "", "", cookie)
+	w = doOperatorWriteReq(t, mux, "DELETE", "/api/v1/devices/"+idB, "", "", cookie)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("revoke dev-B: got %d (%s), want 204", w.Code, w.Body.String())
 	}

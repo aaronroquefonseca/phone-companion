@@ -29,10 +29,13 @@ Then verify targeted delivery from an operator session (see root README
 for the login-cookie setup):
 
 ```sh
-# list device ids
+# list device ids (GET needs only the session; the X-Requested-With
+# write-guard proof is required on state-changing operator APIs)
 curl -H "Cookie: pc_session=$COOKIE" http://127.0.0.1:8080/api/v1/devices
-# notify exactly one of them
+# notify exactly one of them (state-changing operator APIs require the
+# X-Requested-With write-guard proof, like enroll-tokens)
 curl -H "Cookie: pc_session=$COOKIE" -H 'Content-Type: application/json' \
+  -H 'X-Requested-With: XMLHttpRequest' \
   -d '{"target":{"device_ids":["<id-1>"]},"kind":"note","title":"Half","body":"Only phone 1"}' \
   http://127.0.0.1:8080/api/v1/notify
 # -> 202 {"notification_id":"...","accepted":1}

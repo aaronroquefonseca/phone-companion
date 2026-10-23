@@ -69,7 +69,7 @@ func main() {
 	// Same notify wiring as NewMux (kept inline: webui.RegisterRoutes below
 	// needs the bare *http.ServeMux, while ListenAndServe takes the
 	// no-store-wrapped handler).
-	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, csrf, handleNotify(db, sender)))
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,
 		PasswordHash: cfg.AdminPasswordHash,
@@ -78,7 +78,7 @@ func main() {
 	mux := withAuthNoStore(base)
 
 	// P3 widgets: SIGHUP-triggered reload of $WIDGET_DIR (plus best-effort
-	// mtime recheck per request; see widgets.go).
+	// mtime recheck per request; see widgets_load.go).
 	StartWidgetSIGHUPReloader(DefaultWidgetRegistry())
 
 	addr := ":" + cfg.Port
