@@ -75,4 +75,43 @@ class WidgetChooserTest {
         val options = WidgetChooser.options(listOf(row("a", "   ")), nowMs)
         assertTrue(options[1].line, options[1].line.contains("Untitled"))
     }
+
+    @Test
+    fun `pending none defers to the stored pin`() {
+        val rows = listOf(row("a"), row("b"))
+        val none: WidgetChooser.PendingPick = WidgetChooser.PendingPick.None
+        assertEquals(0, none.checkedIndex(rows, null))
+        assertEquals(0, none.checkedIndex(rows, "gone"))
+        assertEquals(1, none.checkedIndex(rows, "a"))
+        assertEquals(2, none.checkedIndex(rows, "b"))
+    }
+
+    @Test
+    fun `pending chosen survives as the checked option`() {
+        val rows = listOf(row("a"), row("b"))
+        assertEquals(2, WidgetChooser.PendingPick.Chosen("b").checkedIndex(rows, "a"))
+        assertEquals(0, WidgetChooser.PendingPick.Chosen(null).checkedIndex(rows, "a"))
+        // A row gone since the pick was made fails closed to not-associated.
+        assertEquals(0, WidgetChooser.PendingPick.Chosen("gone").checkedIndex(rows, "a"))
+    }
+
+    @Test
+    fun `pending restore round-trips the bundle fields`() {
+        assertEquals(
+            WidgetChooser.PendingPick.Chosen("a"),
+            WidgetChooser.PendingPick.restore(hasPending = true, widgetId = "a"),
+        )
+        assertEquals(
+            WidgetChooser.PendingPick.Chosen(null),
+            WidgetChooser.PendingPick.restore(hasPending = true, widgetId = null),
+        )
+        assertEquals(
+            WidgetChooser.PendingPick.None,
+            WidgetChooser.PendingPick.restore(hasPending = false, widgetId = "a"),
+        )
+        assertEquals(
+            WidgetChooser.PendingPick.None,
+            WidgetChooser.PendingPick.restore(hasPending = false, widgetId = null),
+        )
+    }
 }

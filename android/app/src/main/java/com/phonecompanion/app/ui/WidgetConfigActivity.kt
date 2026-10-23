@@ -53,8 +53,23 @@ class WidgetConfigActivity : AppCompatActivity() {
     private lateinit var noteView: TextView
     private lateinit var optionsGroup: RadioGroup
 
+    /**
+     * The user's pending (not yet saved) pick. Rebuilt from the stored
+     * pin on first open; every user tap updates it; rotation persists it
+     * through [onSaveInstanceState] so the rebuilt chooser checks the
+     * pending pick — never the stale stored pin — and Save pins it.
+     */
+    private var pendingPick: WidgetChooser.PendingPick = WidgetChooser.PendingPick.None
+
+    /** Rows backing the current radio buttons (for pick tracking). */
+    private var currentRows: List<WidgetCacheEntity> = emptyList()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingPick = WidgetChooser.PendingPick.restore(
+            hasPending = savedInstanceState?.getBoolean(KEY_HAS_PENDING, false) == true,
+            widgetId = savedInstanceState?.getString(KEY_PENDING_WIDGET_ID),
+        )
 
         val appWidgetId = intent.getIntExtra(
             AppWidgetManager.EXTRA_APPWIDGET_ID,
@@ -121,7 +136,10 @@ class WidgetConfigActivity : AppCompatActivity() {
         val cancelButton = Button(this).apply {
             text = "Cancel"
             setOnClickListener {
-                // Stores nothing: the widget stays explicitly unassociated.
+                // Stores nothing, requests nothing (see
+                // WidgetConfigActions.cancel): the widget stays explicitly
+                // unassociated.
+                WidgetConfigActions.cancel()
                 setResult(RESULT_CANCELED)
                 finish()
             }
@@ -167,7 +185,7 @@ class WidgetConfigActivity : AppCompatActivity() {
             noteView.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
             optionsGroup.removeAllViews()
             val options = WidgetChooser.options(rows)
-            val checked = WidgetChooser.checkedIndex(rows, pinned)
+            val checked = pendingPick.checkedIndex(rows, pinned)
             options.forEachIndexed { index, option ->
                 optionsGroup.addView(
                     RadioButton(this@WidgetConfigActivity).apply {
@@ -178,7 +196,24 @@ class WidgetConfigActivity : AppCompatActivity() {
                     },
                 )
             }
+            currentRows = rows
+            // Track taps (after building, so the initial check above does
+            // not count as a user pick): every change updates the pending
+            // pick that rotation restores and Save pins.
+            optionsGroup.setOnCheckedChangeListener { group, checkedId ->
+                val position = (group.findViewById<RadioButton>(checkedId)?.tag as? Int) ?: 0
+                pendingPick = WidgetChooser.PendingPick.Chosen(
+                    WidgetChooser.chosenId(currentRows, position),
+                )
+            }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        val pick = pendingPick as? WidgetChooser.PendingPick.Chosen
+        outState.putBoolean(KEY_HAS_PENDING, pick != null)
+        pick?.widgetId?.let { outState.putString(KEY_PENDING_WIDGET_ID, it) }
     }
 
     private fun save(entry: WidgetProviderEntry, glanceKey: String, resultAppWidgetId: Int?) {
@@ -200,15 +235,14 @@ class WidgetConfigActivity : AppCompatActivity() {
             } else {
                 (optionsGroup.findViewById<RadioButton>(checkedId)?.tag as? Int) ?: 0
             }
-            val widgetId = WidgetChooser.chosenId(rows, position)
             try {
-                WidgetBinder.pinAndPush(
+                WidgetConfigActions.save(
                     dao = DatabaseHolder.get(this@WidgetConfigActivity).widgetBindingDao(),
-                    pusher = WidgetBinder.GlancePusher(this@WidgetConfigActivity),
-                    providerClass = entry.providerClass,
-                    widgetType = entry.type,
+                    pusher = WidgetBinder.GlancePusher.forContext(this@WidgetConfigActivity),
+                    entry = entry,
                     glanceKey = glanceKey,
-                    widgetId = widgetId,
+                    rows = rows,
+                    position = position,
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -235,6 +269,9 @@ class WidgetConfigActivity : AppCompatActivity() {
 
         /** Re-configure extra: `widget_binding.glanceKey` of the instance. */
         const val EXTRA_GLANCE_KEY = "pc_glance_key"
+
+        private const val KEY_HAS_PENDING = "pc_pending_has"
+        private const val KEY_PENDING_WIDGET_ID = "pc_pending_widget_id"
 
         /**
          * Re-configure intent for one bound instance (unassociated widget

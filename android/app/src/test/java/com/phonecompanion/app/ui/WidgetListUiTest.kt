@@ -193,8 +193,12 @@ class WidgetListUiTest {
         assertEquals("1 day ago", WidgetListUi.humanUpdatedAt(minusMinutes(24 * 60), ISO_NOW_MS))
         assertEquals("6 days ago", WidgetListUi.humanUpdatedAt(minusMinutes(6 * 24 * 60), ISO_NOW_MS))
         assertEquals("2025-12-01", WidgetListUi.humanUpdatedAt("2025-12-01T00:00:00Z", ISO_NOW_MS))
-        // Unparseable passes through unchanged, future passes through unchanged.
+        // Unparseable and future inputs pass through unchanged.
         assertEquals("not-a-date", WidgetListUi.humanUpdatedAt("not-a-date", ISO_NOW_MS))
         assertEquals("", WidgetListUi.humanUpdatedAt("", ISO_NOW_MS))
+        assertEquals(
+            "2026-02-01T00:00:00Z",
+            WidgetListUi.humanUpdatedAt("2026-02-01T00:00:00Z", ISO_NOW_MS),
+        )
     }
 }

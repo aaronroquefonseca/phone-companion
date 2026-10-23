@@ -85,7 +85,8 @@ object WidgetListUi {
     /**
      * Human updated-at for chooser/instance lines ("just now",
      * "5 minutes ago", "3 hours ago", "2 days ago", else the calendar
-     * date). Unparseable input passes through unchanged; never throws.
+     * date). Unparseable and future inputs pass through unchanged; never
+     * throws.
      */
     fun humanUpdatedAt(iso: String, nowMs: Long = System.currentTimeMillis()): String {
         val then = try {

@@ -2,10 +2,13 @@ package com.phonecompanion.app.ui
 
 import android.content.Context
 import android.util.Log
+import androidx.glance.GlanceId
+import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import com.phonecompanion.app.data.WidgetBindingDao
 import com.phonecompanion.app.data.WidgetBindingEntity
 import com.phonecompanion.app.widgets.WidgetDirectory
+import com.phonecompanion.app.widgets.WidgetProviderEntry
 import com.phonecompanion.app.widgets.glanceKey
 import kotlinx.coroutines.CancellationException
 
@@ -83,30 +86,44 @@ object WidgetBinder {
      * (placement flow: the system's post-config update renders the pin).
      * Shape-only logging, never ids/titles/bodies/keys... (the glance key
      * is an internal instance id — never logged).
+     *
+     * The Glance edges are constructor seams ([glanceIdsFor],
+     * [pushUpdate], [log]) so JVM tests pin every silent branch with
+     * fakes; production uses [forContext].
      */
-    class GlancePusher(private val context: Context) : Pusher {
+    class GlancePusher(
+        private val glanceIdsFor: suspend (Class<out GlanceAppWidget>) -> List<GlanceId>,
+        private val pushUpdate: suspend (WidgetProviderEntry, GlanceId) -> Unit,
+        private val log: (String) -> Unit = { msg -> Log.d(TAG, msg) },
+    ) : Pusher {
         override suspend fun push(providerClass: String, glanceKey: String) {
             val entry = WidgetDirectory.forProviderClass(providerClass) ?: return
             val ids = try {
-                GlanceAppWidgetManager(context).getGlanceIds(entry.widgetClass)
+                glanceIdsFor(entry.widgetClass)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.d(TAG, "chooser push lookup-failed error=${e.javaClass.simpleName}")
+                log("chooser push lookup-failed error=${e.javaClass.simpleName}")
                 return
             }
             val target = ids.firstOrNull { glanceKey(it) == glanceKey } ?: return
             try {
-                entry.newWidget().update(context, target)
+                pushUpdate(entry, target)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.d(TAG, "chooser push update-failed error=${e.javaClass.simpleName}")
+                log("chooser push update-failed error=${e.javaClass.simpleName}")
             }
         }
 
         companion object {
             private const val TAG = "WidgetBinder"
+
+            /** Production pusher bound to [context]'s Glance state. */
+            fun forContext(context: Context): GlancePusher = GlancePusher(
+                glanceIdsFor = { clazz -> GlanceAppWidgetManager(context).getGlanceIds(clazz) },
+                pushUpdate = { entry, id -> entry.newWidget().update(context, id) },
+            )
         }
     }
 }
