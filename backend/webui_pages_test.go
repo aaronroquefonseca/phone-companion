@@ -115,31 +115,39 @@ func webuiGet(t *testing.T, mux http.Handler, target string, cookie *http.Cookie
 func TestWebUIOperatorGates(t *testing.T) {
 	mux, _, _, _, _, _ := setupWebUITestMux(t)
 
-	// Anonymous browser pages → 302 to /login.
-	for _, target := range []string{"/", "/webui/pair", "/webui/widgets", "/webui/notify"} {
+	// Anonymous browser pages → 303 to /login.
+	for _, target := range []string{"/", "/webui/pair", "/webui/widgets", "/webui/notify", "/logout"} {
 		w := webuiGet(t, mux, target, nil)
-		if w.Code != http.StatusFound {
-			t.Errorf("anon GET %s: got %d, want 302", target, w.Code)
+		if w.Code != http.StatusSeeOther {
+			t.Errorf("anon GET %s: got %d, want 303", target, w.Code)
 		}
 		if loc := w.Header().Get("Location"); loc != "/login" {
 			t.Errorf("anon GET %s: redirect to %q, want /login", target, loc)
 		}
 	}
-	// Anonymous form POSTs → 302 as well (auth first, CSRF second).
-	for _, target := range []string{"/webui/notify", "/webui/pair/revoke"} {
+	// Anonymous form POSTs → 303 as well (auth first, CSRF second).
+	for _, target := range []string{"/webui/notify", "/webui/pair/mint", "/webui/pair/revoke", "/webui/pair/purge"} {
 		w := webuiFormPost(t, mux, target, nil, url.Values{"title": {"t"}})
-		if w.Code != http.StatusFound {
-			t.Errorf("anon POST %s: got %d, want 302", target, w.Code)
+		if w.Code != http.StatusSeeOther {
+			t.Errorf("anon POST %s: got %d, want 303", target, w.Code)
 		}
 	}
 	// Authed form POSTs without CSRF → 403 (auth passes, CSRF fails).
 	mux, _, csrf, _, _, cookie := setupWebUITestMux(t)
 	_ = csrf
-	for _, target := range []string{"/webui/notify", "/webui/pair/revoke"} {
+	for _, target := range []string{"/webui/notify", "/webui/pair/mint", "/webui/pair/revoke", "/webui/pair/purge"} {
 		w := webuiFormPost(t, mux, target, cookie, url.Values{"title": {"t"}})
 		if w.Code != http.StatusForbidden {
 			t.Errorf("authed no-CSRF POST %s: got %d, want 403", target, w.Code)
 		}
+		if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("authed no-CSRF POST %s content type %q, want html", target, ct)
+		}
+	}
+	// Authed GET /logout → 405 inside the shared shell (sign-out is POST-only).
+	w := webuiGet(t, mux, "/logout", cookie)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("authed GET /logout: got %d, want 405", w.Code)
 	}
 }
 
@@ -248,7 +256,8 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 		t.Errorf("notify form Cache-Control %q, want no-store", cc)
 	}
 
-	// Plaintext round-trip: 202 + confirmation + history row + payload.
+	// Plaintext round-trip: PRG 303 + GET confirmation + history row +
+	// payload. Refreshing the confirmation must not re-send (no-resubmit).
 	w = webuiFormPost(t, mux, "/webui/notify", cookie, url.Values{
 		"csrf_token": {tok},
 		"target":     {id},
@@ -257,15 +266,31 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 		"body":       {"from the operator console"},
 		"priority":   {"high"},
 	})
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("notify post: got %d (%s), want 202", w.Code, w.Body.String())
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("notify post: got %d (%s), want 303", w.Code, w.Body.String())
 	}
-	m := notifyIDRe.FindStringSubmatch(w.Body.String())
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/webui/notify?sent=") || !strings.Contains(loc, "&accepted=1") {
+		t.Fatalf("PRG location %q, want ?sent=&accepted=1", loc)
+	}
+	cw := webuiGet(t, mux, loc, cookie)
+	if cw.Code != http.StatusOK {
+		t.Fatalf("confirmation GET: got %d, want 200", cw.Code)
+	}
+	m := notifyIDRe.FindStringSubmatch(cw.Body.String())
 	if len(m) != 2 || m[1] == "" {
-		t.Fatalf("success page must show the notification id (%s)", w.Body.String())
+		t.Fatalf("confirmation page must show the notification id (%s)", cw.Body.String())
+	}
+	if !strings.Contains(cw.Body.String(), `class="success"`) {
+		t.Error("accepted:1 confirmation must celebrate in green")
+	}
+	// Second GET: same page, still exactly one fan-out.
+	rw := webuiGet(t, mux, loc, cookie)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("refresh GET: got %d, want 200", rw.Code)
 	}
 	if n, st := e2eHistoryRows(t, db, m[1], id); n != 1 || st[0] != notify.StatusQueued {
-		t.Fatalf("history rows = %d %v, want 1 queued", n, st)
+		t.Fatalf("history rows = %d %v, want 1 queued (no-resubmit)", n, st)
 	}
 	if len(sender.payloads) != 1 || sender.payloads[0]["title"] != "Hello form" {
 		t.Fatalf("captured payloads = %v, want plaintext title", sender.payloads)
@@ -282,8 +307,12 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 		"priority":   {"default"},
 		"secret":     {"true"},
 	})
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("secret notify post: got %d (%s), want 202", w.Code, w.Body.String())
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("secret notify post: got %d (%s), want 303", w.Code, w.Body.String())
+	}
+	sw := webuiGet(t, mux, w.Header().Get("Location"), cookie)
+	if sw.Code != http.StatusOK {
+		t.Fatalf("secret confirmation GET: got %d, want 200", sw.Code)
 	}
 	if len(sender.payloads) != 1 {
 		t.Fatalf("want 1 captured payload, got %d", len(sender.payloads))

@@ -195,7 +195,7 @@ row, and the other copies keep working under their own keys.
 - P2 shipped with `pair_admin_stub.go` (fail-OPEN pass-through) so the
   pairing flow was verifiable before login existed. P8 DELETES the stub.
   Every operator route is now behind `webui.RequireAdmin(sessionStore)`:
-  `/api/*` → `401 {"error":"unauthorized"}`, `/webui/*` → `302 /login`.
+  `/api/*` → `401 {"error":"unauthorized"}`, `/webui/*` → `303 /login`.
 - `POST /api/v1/enroll` is deliberately OUTSIDE the gate (token-only).
 - CSRF: the WebUI session cookie is `SameSite=Lax`, which still allows
   top-level-navigation CSRF. `POST /webui/pair/revoke` therefore

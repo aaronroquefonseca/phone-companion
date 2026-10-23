@@ -56,7 +56,7 @@ func RequireAdmin(store SessionStore, next http.Handler) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
-		http.Redirect(w, r, "/login", http.StatusFound)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
 	})
 }
 

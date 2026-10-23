@@ -70,6 +70,15 @@ func newBaseMux(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CS
 	// Pairing (P2+P8): enroll + device registry + revocation + WebUI.
 	// See devices.go / pair_wire.go / webui/.
 	RegisterPairingRoutes(mux, sessions, csrf)
+	// Sign-out is POST-only (CSRF-guarded nav form): a plain GET explains
+	// that inside the shared shell (405) instead of 404ing or signing out
+	// via a link. Gated like the other operator pages (303 to /login when
+	// anonymous; the 405 page keeps the nav when signed in).
+	mux.Handle("GET /logout", webui.RequireAdmin(sessions, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webui.WriteOperatorError(w, r, csrf, true, "login", http.StatusMethodNotAllowed,
+			"Sign out", "Signing out needs the Sign out button (POST /logout) — a plain link cannot sign you out.",
+			"/", "Back to dashboard")
+	})))
 	// P3 widgets: poll endpoint (device Bearer auth) + single-widget fetch
 	// (additive v1 extension; envelope per docs/api-contract.md).
 	mux.HandleFunc("GET /api/v1/widgets", withWidgetCachePolicy(reg.handleWidgetsList))

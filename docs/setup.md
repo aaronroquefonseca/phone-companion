@@ -53,6 +53,10 @@ Then sign in at `/login` and open `/webui/pair` (login-gated; anonymous
 visits redirect to `/login`). Continue with `docs/pairing.md` to enroll
 phones and send the first notification.
 
+> Plain HTTP? Browsers refuse to send `Secure` cookies over `http://`, so
+> sign-in loops on a TLS-less dev box. Set `ALLOW_INSECURE_COOKIES=1`
+> (dev-only, never in production) — see section 6 below.
+
 ## 3. Backup (`/data`)
 
 All state is the sqlite file at `$DB_PATH` (default
@@ -139,3 +143,29 @@ rotation), fan-out records a failed row carrying `fcm-unregistered` /
 re-pairing (or the app's automatic token backfill on the next widgets
 poll) uploads a fresh token and delivery resumes with no operator action
 beyond spotting the history rows.
+
+## 6. Plain-HTTP development (no TLS)
+
+Session cookies (`pc_session`) are `Secure` by default: browsers only send
+them over HTTPS, which is correct in production behind the TLS proxy —
+and which breaks sign-in on a plain-`http://` dev box (the cookie never
+arrives, so every page bounces back to `/login`).
+
+The explicit, fail-closed escape hatch is `ALLOW_INSECURE_COOKIES=1`:
+
+```sh
+# docker-compose.yml (local testing only — never commit, never production)
+ALLOW_INSECURE_COOKIES: "1"
+```
+
+Rules:
+
+- Fail-closed default: unset, empty, or anything other than `1`/`true`/
+  `yes` keeps always-`Secure` cookies. You must opt in on every boot.
+- The backend logs `WARNING: ALLOW_INSECURE_COOKIES=1 drops the Secure
+  flag ...` at startup so the open hatch is visible in `docker compose
+  logs backend`.
+- NEVER enable in production: session cookies are live credentials and
+  must ride TLS. If the browser still loops after setting it, the cause is
+  elsewhere (wrong `ADMIN_USER`/password, or the compose `$` doubling on
+  the bcrypt hash — section 1).

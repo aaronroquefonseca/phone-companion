@@ -8,8 +8,10 @@
 // lookup, so forged cookies fail fast without touching storage.
 //
 // Cookie: pc_session, Path=/, HttpOnly, Secure, SameSite=Lax, 24h expiry.
-// Secure is always set because production sits behind a TLS-terminating
-// reverse proxy (see docker-compose.example.yml).
+// Secure is set by default because production sits behind a TLS-terminating
+// reverse proxy (see docker-compose.example.yml); plain-HTTP development may
+// drop it explicitly via ALLOW_INSECURE_COOKIES=1 (dev-only, never in
+// production — see docs/setup.md "Plain-HTTP development").
 package main
 
 import (
@@ -24,6 +26,21 @@ import (
 	"strings"
 	"time"
 )
+
+// allowInsecureSessionCookie is the explicit, fail-closed escape hatch for
+// plain-HTTP development (see Config.AllowInsecureCookies /
+// ALLOW_INSECURE_COOKIES). Default false: cookies stay always-Secure.
+// When true the Secure flag is dropped so browsers send pc_session over
+// http:// loopback/LAN origins. NEVER enable in production: session cookies
+// are live credentials and must ride TLS. Wired once at boot from main.go.
+var allowInsecureSessionCookie bool
+
+// SetAllowInsecureSessionCookie enables (true) or restores (false) the
+// Secure flag on session cookies. Called once at boot from the validated
+// Config; tests may toggle it with cleanup.
+func SetAllowInsecureSessionCookie(allow bool) {
+	allowInsecureSessionCookie = allow
+}
 
 // SessionCookieName is the WebUI session cookie pinned by docs/api-contract.md.
 const SessionCookieName = "pc_session"
@@ -210,7 +227,7 @@ func setSessionCookie(w http.ResponseWriter, value string, exp time.Time) {
 		Expires:  exp,
 		MaxAge:   int(SessionTTL.Seconds()),
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   !allowInsecureSessionCookie,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -223,7 +240,7 @@ func clearSessionCookie(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   !allowInsecureSessionCookie,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

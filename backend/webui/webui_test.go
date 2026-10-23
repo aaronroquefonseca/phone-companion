@@ -76,11 +76,14 @@ func TestLoginGetRendersForm(t *testing.T) {
 
 func TestLoginSuccessAndFailure(t *testing.T) {
 	resetLoginLimiter()
-	h, _ := testHandler()
+	h, store := testHandler()
 
 	ok := postLogin(h, "admin", "correct-horse-pw")
 	if ok.Code != http.StatusSeeOther {
 		t.Errorf("success: got %d, want 303", ok.Code)
+	}
+	if loc := ok.Header().Get("Location"); loc != "/" {
+		t.Errorf("success: redirect to %q, want /", loc)
 	}
 	if c := ok.Result().Cookies(); len(c) == 0 {
 		t.Error("success: expected Set-Cookie")
@@ -89,17 +92,35 @@ func TestLoginSuccessAndFailure(t *testing.T) {
 		t.Errorf("login response Cache-Control %q, want no-store", cc)
 	}
 
+	// POST-while-authed redirects too (no credential check, no bcrypt).
+	already := postLogin(h, "admin", "wrong-password")
+	if already.Code != http.StatusSeeOther {
+		t.Errorf("authed post: got %d, want 303", already.Code)
+	}
+	if loc := already.Header().Get("Location"); loc != "/" {
+		t.Errorf("authed post: redirect to %q, want /", loc)
+	}
+
 	for name, tc := range map[string][2]string{
 		"wrong password": {"admin", "nope"},
 		"wrong user":     {"root", "correct-horse-pw"},
 		"empty":          {"", ""},
 	} {
+		store.valid = false
 		w := postLogin(h, tc[0], tc[1])
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s: got %d, want 401", name, w.Code)
 		}
-		if !strings.Contains(w.Body.String(), "Invalid username or password") {
+		body := w.Body.String()
+		if !strings.Contains(body, "Invalid username or password") {
 			t.Errorf("%s: expected generic error page", name)
+		}
+		// Username echoes back so a typo is visible (password never does).
+		if tc[0] != "" && !strings.Contains(body, `value="`+tc[0]+`"`) {
+			t.Errorf("%s: expected echoed username in form", name)
+		}
+		if !strings.Contains(body, "autofocus") {
+			t.Errorf("%s: expected autofocus on username", name)
 		}
 	}
 }
@@ -148,6 +169,15 @@ func TestLoginRateLimit(t *testing.T) {
 	if w.Header().Get("Retry-After") == "" {
 		t.Error("limited login: missing Retry-After header")
 	}
+	// Limiter exhaustion renders the layout-wrapped operator page (nav-less
+	// while anonymous, but inside the shared shell with an onward link),
+	// never bare text.
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("limited login content type %q, want html", ct)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "rate_limited") || !strings.Contains(body, "Back to Sign in") {
+		t.Errorf("limited login page missing code/onward link: %s", body)
+	}
 
 	// Window passes → login works again.
 	frozen = now.Add(2 * loginWindow)
@@ -184,6 +214,9 @@ func TestLogoutClearsAndRedirects(t *testing.T) {
 	if w.Code != http.StatusSeeOther {
 		t.Errorf("got %d, want 303", w.Code)
 	}
+	if loc := w.Header().Get("Location"); loc != "/login?signed_out=1" {
+		t.Errorf("logout redirect to %q, want /login?signed_out=1", loc)
+	}
 	if store.valid {
 		t.Error("expected session destroyed")
 	}
@@ -203,7 +236,8 @@ func TestLogoutRequiresCSRF(t *testing.T) {
 		cookie = c
 	}
 
-	// No token → 403, session survives.
+	// No token → 403, session survives. The failure renders inside the
+	// shared shell (nav/chrome + onward link), never bare text.
 	form := url.Values{}.Encode()
 	req := httptest.NewRequest("POST", "/logout", strings.NewReader(form))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -212,6 +246,12 @@ func TestLogoutRequiresCSRF(t *testing.T) {
 	h.handleLogoutPost(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("logout without CSRF: got %d, want 403", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("logout CSRF failure content type %q, want html", ct)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "csrf_mismatch") {
+		t.Errorf("logout CSRF failure page missing code: %s", body)
 	}
 
 	// Wrong token → 403.
@@ -234,11 +274,11 @@ func cookieRequest(cookie *http.Cookie) *http.Request {
 	return req
 }
 
-// The signed-in login page must render the logout form WITH a session-bound
-// CSRF token: without it every browser logout 403s (regression B1 —
-// hand-constructed tokens in unit tests masked the missing form field).
-// This test drives the exact browser flow: read the token out of the
-// rendered form, submit it, expect 303 + destroyed session.
+// Authed GET /login redirects to the dashboard (303 to /): the signed-in
+// page is gone, so the regression this test pins (the logout form must
+// carry a session-bound CSRF token or every browser logout 403s) now drives
+// the exact browser flow through the dashboard nav: read the token out of
+// the rendered nav logout form, submit it, expect the signed-out flash.
 func TestLoginPageLogoutFormCarriesCSRF(t *testing.T) {
 	resetLoginLimiter()
 	h, store := testHandler()
@@ -254,18 +294,26 @@ func TestLoginPageLogoutFormCarriesCSRF(t *testing.T) {
 		t.Fatal("no session cookie minted")
 	}
 
+	// Authed GET /login leaves the sign-in surface for the dashboard.
 	getReq := httptest.NewRequest("GET", "/login", nil)
 	getReq.AddCookie(cookie)
 	get := httptest.NewRecorder()
 	h.handleLoginGet(get, getReq)
-	if get.Code != http.StatusOK {
-		t.Fatalf("signed-in login page: got %d, want 200", get.Code)
+	if get.Code != http.StatusSeeOther {
+		t.Fatalf("signed-in login page: got %d, want 303", get.Code)
 	}
-	page := get.Body.String()
+	if loc := get.Header().Get("Location"); loc != "/" {
+		t.Fatalf("signed-in login redirect to %q, want /", loc)
+	}
+
+	// The dashboard nav logout form carries the session-bound token.
+	dash := httptest.NewRecorder()
+	HandleDashboard(&fakeStore{}, &fakeLister{}, h.csrf)(dash, authedPageReq("GET", "/", ""))
+	page := dash.Body.String()
 	const marker = `name="csrf_token" value="`
 	i := strings.Index(page, marker)
 	if i < 0 {
-		t.Fatalf("signed-in page has no csrf_token logout field (browser logout would always 403):\n%s", page)
+		t.Fatalf("dashboard nav has no csrf_token logout field (browser logout would always 403):\n%s", page)
 	}
 	rest := page[i+len(marker):]
 	j := strings.Index(rest, `"`)
@@ -366,8 +414,8 @@ func TestRequireAdmin(t *testing.T) {
 	anon := &memStore{}
 	w = httptest.NewRecorder()
 	RequireAdmin(anon, next).ServeHTTP(w, httptest.NewRequest("GET", "/devices", nil))
-	if w.Code != http.StatusFound {
-		t.Errorf("anon page: got %d, want 302", w.Code)
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("anon page: got %d, want 303", w.Code)
 	}
 
 	w = httptest.NewRecorder()

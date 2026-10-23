@@ -53,6 +53,7 @@ type widgetListItem struct {
 
 var widgetsBody = template.Must(template.New("widgetsBody").Parse(`<h1>Widgets</h1>
 {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+{{if .Skipped}}<p class="notice" role="status">{{.SkippedCount}} widget {{if eq .SkippedCount 1}}directory{{else}}directories{{end}} skipped (invalid): {{range $i, $n := .Skipped}}{{if $i}}, {{end}}<code>{{$n}}</code>{{end}}. Check the server logs and backend/README.md “Widgets”, then fix or remove {{if eq .SkippedCount 1}}it{{else}}them{{end}}.</p>{{end}}
 {{if .Rows}}
 <table>
 <tr><th>Widget</th><th>Type</th><th>Updated</th><th>Value</th></tr>
@@ -64,7 +65,7 @@ var widgetsBody = template.Must(template.New("widgetsBody").Parse(`<h1>Widgets</
 <td>
 {{if .Secret}}
 <span class="masked" aria-label="hidden secret value">&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;</span>
-<p class="muted">Secret value hidden. Served encrypted per device only{{if .SecretRef}} (device <code>{{.SecretRef}}</code>){{end}}.</p>
+<p class="muted">Secret value hidden. This widget is addressed to one device only{{if .SecretRef}} (device <code>{{.SecretRef}}</code> — only that phone holds the key that can decrypt it){{end}}. It is served encrypted per device, and the server never shows the plaintext here.</p>
 {{else if .TextBody}}<pre>{{.TextBody}}</pre>
 {{else if .ListItems}}<ul>{{range .ListItems}}<li>{{if .Done}}[x] {{else}}[ ] {{end}}{{.Text}}</li>{{end}}</ul>
 {{else if .StatusState}}<p>State: <strong>{{.StatusState}}</strong></p>{{if .StatusDet}}<p>{{.StatusDet}}</p>{{end}}
@@ -75,12 +76,24 @@ var widgetsBody = template.Must(template.New("widgetsBody").Parse(`<h1>Widgets</
 {{end}}
 </table>
 {{else}}
-{{if not .Error}}<p>No widgets configured.</p>{{end}}
+{{if not .Error}}<p>No widgets configured. Add a widget directory under <code>$WIDGET_DIR</code> — see backend/README.md “Widgets”. <a href="/">Back to dashboard</a></p>{{end}}
 {{end}}`))
 
 type widgetsPageData struct {
 	Rows  []widgetRow
 	Error string
+	// Skipped names invalid widget directories the scan skipped (names
+	// only, never payloads). Sourced from the lister when it exposes
+	// skipped names; otherwise empty.
+	Skipped      []string
+	SkippedCount int
+}
+
+// skippedLister is implemented by listers that can report invalid widget
+// directory names the scan skipped. The core WidgetLister interface stays
+// minimal; adapters opt in without breaking existing callers.
+type skippedLister interface {
+	ListSkippedWidgets(ctx context.Context) []string
 }
 
 // HandleWidgetsPage serves GET /webui/widgets: a live operator preview of
@@ -103,8 +116,15 @@ func HandleWidgetsPage(lister WidgetLister, csrf *CSRFProtection) http.HandlerFu
 		for _, v := range views {
 			rows = append(rows, renderWidgetRow(v))
 		}
+		data := widgetsPageData{Rows: rows}
+		if sl, ok := lister.(skippedLister); ok {
+			if skipped := sl.ListSkippedWidgets(r.Context()); len(skipped) > 0 {
+				data.Skipped = skipped
+				data.SkippedCount = len(skipped)
+			}
+		}
 		var body strings.Builder
-		_ = widgetsBody.Execute(&body, widgetsPageData{Rows: rows})
+		_ = widgetsBody.Execute(&body, data)
 		renderLayout(w, http.StatusOK, layoutData{
 			Title:     "Widgets",
 			Active:    "widgets",

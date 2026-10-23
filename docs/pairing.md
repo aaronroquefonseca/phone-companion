@@ -6,10 +6,11 @@ How phones join, leave, and re-join. Wire shapes: `docs/api-contract.md`
 
 ## Pair a phone
 
-1. Sign in to the WebUI, open `GET /webui/pair`. Loading the page mints
-   a fresh 32-byte enroll token (single-use, 15 min expiry, at most 10
-   outstanding) and renders it as a QR encoding
-   `{"enroll_url": "<EXTERNAL_BASE_URL>/api/v1/enroll", "enroll_token": "…"}`.
+1. Sign in to the WebUI, open `GET /webui/pair`. The page lists the device
+   registry and mints nothing on load — press **Generate pairing token**
+   (`POST /webui/pair/mint`, CSRF-guarded) to mint a fresh 32-byte enroll
+   token (single-use, 15 min expiry, at most 10 outstanding), rendered as
+   a QR encoding the enroll URL + token (see below).
 2. In the app's Pair screen, scan the QR (base URL + token fill in; or
    type them manually) and tap Enroll. The phone POSTs
    `{"enroll_token","device_name","fcm_token"}` — no session cookie; the
@@ -19,8 +20,17 @@ How phones join, leave, and re-join. Wire shapes: `docs/api-contract.md`
    {device_id, device_token, device_key}` — each shown exactly once. The
    app persists them to encrypted storage and never transmits the key.
 
-Refresh `/webui/pair` for a new token per phone. Issuance is rate-limited
-(30/min/IP across page + API) to stop token-spray.
+Refresh via **Generate pairing token** / **Issue a fresh token** (one mint
+per phone). Issuance is rate-limited (30/min/IP across mint endpoint +
+API) to stop token-spray; plain page loads cost nothing from the bucket.
+
+The QR panel shows a live countdown (`expires in N min`, exact time as a
+hover tooltip), a copy-to-clipboard button for the raw token, and an
+in-page warning when `EXTERNAL_BASE_URL` is unset (Host-derived fallback —
+a phone outside this network may not reach it). About 60 s before expiry
+the page fetches one fresh token via the mint endpoint (page CSRF token,
+`Accept: application/json`): a single request per ~14 min, never a tight
+loop; on failure (e.g. `429`) it says so and stops.
 
 ## Pair a second phone, target one
 
@@ -46,10 +56,17 @@ skipped silently. `{"target":{"all":true}}` fans out to every live row.
 
 ## Revoke
 
-- WebUI: the Revoke button per device row (`POST /webui/pair/revoke`,
-  CSRF-guarded form).
+- WebUI: the Revoke button per active-device row. Revoking is two-step:
+  the first POST renders a confirm interstitial naming the device;
+  confirming revokes and flashes `?revoked=<name>`. Unknown ids redirect
+  with `?error=device_not_found`.
+- The registry hides revoked rows by default; `Show revoked (N)` reveals
+  them dimmed. Revoked rows offer **Purge** (two-step confirm hard-delete,
+  `?purged=<name>`); active rows refuse purge (`?error=not_revoked`).
+  Purged tokens `401` exactly like revoked ones, so purging is safe, and
+  the notification history still references the device id for audit.
 - API: `DELETE /api/v1/devices/{id}` → `204`; unknown id → `404
-  device_not_found` (WebUI redirects with `?error=device_not_found`).
+  device_not_found`.
 
 Revocation is immediate (next request against the same DB fails `401`;
 no caches, no grace window) and idempotent (re-revoking still succeeds).

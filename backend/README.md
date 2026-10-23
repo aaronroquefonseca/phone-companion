@@ -29,10 +29,12 @@ model: `docs/threat-model.md`.
 | Method + path | Auth | Notes |
 | --- | --- | --- |
 | `GET /healthz` | none | `{"status":"ok"}` |
-| `GET /login`, `POST /login` | form `username`+`password` | Sets session cookie; failures are generic (no user enumeration) |
-| `POST /logout` | session | Clears session |
-| `GET /webui/pair` | admin session (else `302 /login`) | Issues single-use enroll token, renders QR + device list with CSRF-guarded revoke forms; shares the 30/min issuance bucket (see below) |
-| `POST /webui/pair/revoke` | admin session + CSRF token | Form `device_id`; unknown id redirects with `?error=device_not_found` |
+| `GET /login`, `POST /login` | form `username`+`password` | Sign-in surface: authed `GET /login` (and `POST /login` while authed) `303` to `/`; success `303` to `/`; logout lands on `/login?signed_out=1` with a signed-out flash; failures are generic (no user enumeration), username echoes, 429/CSRF failures render in-shell |
+| `POST /logout` | session + CSRF token | Clears session, `303` to `/login?signed_out=1`; `GET /logout` answers `405` in-shell (sign-out is POST-only) |
+| `GET /webui/pair` | admin session (else `303 /login`) | Device registry only — never mints (page loads cost nothing from the issuance bucket). Active devices by default; `?show=revoked` reveals dimmed revoked rows with purge controls. Two-step revoke confirm + success flash (`?revoked=`); revoked-only two-step purge (`?purged=`) |
+| `POST /webui/pair/mint` | admin session + CSRF token | Mints one single-use enroll token (15 min), renders the QR panel: human countdown, Host-fallback warning, copy-to-clipboard, Issue-a-fresh-token refresh, single-shot auto-refresh fetch (JSON via `Accept: application/json`). Shares the 30/min issuance bucket; exhaustion is an in-shell `429` page |
+| `POST /webui/pair/revoke` | admin session + CSRF token | Two-step confirm form `device_id` (+`confirm=yes`); success flashes `?revoked=<name>`; unknown id redirects with `?error=device_not_found`; active rows only |
+| `POST /webui/pair/purge` | admin session + CSRF token | Two-step confirm hard-delete of REVOKED rows only (`?purged=<name>`); active rows refused (`?error=not_revoked`); purged tokens `401` exactly like revoked ones |
 | `POST /api/v1/enroll` | enroll token only (phone) | `201 {device_id, device_token, device_key}` shown once |
 | `POST /api/v1/enroll-tokens` | admin session | Issues token via API; shares the 30/min issuance bucket (see below) |
 | `GET /api/v1/devices` | admin session | Device registry |
@@ -40,11 +42,15 @@ model: `docs/threat-model.md`.
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
 | `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `GET /webui/notify` | admin session (else `303 /login`) | Test-notification form (target dropdown from the live registry; revoked devices excluded) + PRG confirmation banner. `accepted:0` renders neutral guidance (pair first), never green |
+| `POST /webui/notify` | admin session + CSRF token | PRG: `303` to `/webui/notify?sent=<id>&accepted=<n>` (whitelisted params); refreshing the confirmation never re-sends |
 
 Issuance rate limit (shared bucket): `POST /api/v1/enroll-tokens` and
-`GET /webui/pair` share 30 token mints per `RemoteAddr` per minute
-(in-memory; restarts clear it). Exhaustion is `429 rate_limited`
-(JSON `{"error":"rate_limited"}` on `/api/*`, plain text on
+`POST /webui/pair/mint` share 30 token mints per `RemoteAddr` per minute
+(in-memory; restarts clear it). `GET /webui/pair` never mints, so page
+loads and refreshes cost nothing from the bucket. Exhaustion is
+`429 rate_limited` (JSON `{"error":"rate_limited"}` on `/api/*`, an
+in-shell operator page naming `rate_limited` with `Retry-After` on
 `/webui/*`). The key is `RemoteAddr` only — no `X-Forwarded-For` is
 trusted — so behind a reverse proxy all callers share the proxy's
 bucket. Rationale: `docs/threat-model.md` ("Enroll-token lifecycle").
@@ -136,6 +142,19 @@ htpasswd -bnBC 10 admin 'your-password' | cut -d: -f2
 
 `SESSION_SECRET`: `openssl rand -hex 32` (min 32 bytes, no `CHANGEME`
 prefix). It signs session cookies AND (domain-separated) CSRF tokens.
+
+Session cookies are `Secure` by default (browsers only send them over
+HTTPS — correct behind the TLS proxy). Plain-HTTP development (loopback /
+LAN without TLS) needs the explicit escape hatch or the browser will not
+send `pc_session` and sign-in will loop:
+
+```sh
+ALLOW_INSECURE_COOKIES=1   # dev-only, never in production
+```
+
+Fail-closed rules: unset/any other value keeps always-`Secure`; the boot
+log warns when the hatch is open. See `docs/setup.md` "Plain-HTTP
+development" for the full pointer.
 
 ## Pairing QR origin (`EXTERNAL_BASE_URL`)
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validTestConfig() Config {
@@ -121,5 +123,54 @@ func TestAllowHTTPExbaseParsing(t *testing.T) {
 		if allowHTTPExbase(v) {
 			t.Errorf("allowHTTPExbase(%q) = true, want false", v)
 		}
+	}
+}
+
+// The insecure-cookie escape hatch stays fail-closed by default and opts in
+// only on explicit values — same shape as the EXTERNAL_BASE_URL override.
+func TestAllowInsecureCookiesParsing(t *testing.T) {
+	for _, v := range []string{"1", "true", "TRUE", "yes", " Yes "} {
+		if !allowInsecureCookies(v) {
+			t.Errorf("allowInsecureCookies(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "no", "2"} {
+		if allowInsecureCookies(v) {
+			t.Errorf("allowInsecureCookies(%q) = true, want false", v)
+		}
+	}
+	c := validTestConfig()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("insecure cookies unset: unexpected error %v", err)
+	}
+	c.AllowInsecureCookies = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("insecure cookies opt-in: unexpected error %v (warn-only, never reject)", err)
+	}
+}
+
+// The Secure flag stays on by default and drops only under the explicit
+// escape hatch (restored after the test so other tests keep the default).
+func TestSessionCookieSecureFlag(t *testing.T) {
+	SetAllowInsecureSessionCookie(false)
+	t.Cleanup(func() { SetAllowInsecureSessionCookie(false) })
+
+	secure := func() bool {
+		w := httptest.NewRecorder()
+		setSessionCookie(w, "v", time.Now().Add(time.Hour))
+		for _, c := range w.Result().Cookies() {
+			if c.Name == SessionCookieName {
+				return c.Secure
+			}
+		}
+		t.Fatal("session cookie not set")
+		return false
+	}
+	if !secure() {
+		t.Error("default session cookie must be Secure")
+	}
+	SetAllowInsecureSessionCookie(true)
+	if secure() {
+		t.Error("escape hatch must drop Secure for plain-HTTP dev")
 	}
 }

@@ -6,7 +6,7 @@
 // webui interfaces, plus route registration behind webui.RequireAdmin.
 //
 // Auth gating matches the pairing pages: every route here is operator-only
-// (302 to /login without a session). The notify POST requires the same
+// (303 to /login without a session). The notify POST requires the same
 // session-bound CSRF token as the revoke form; the API write guard is not
 // needed because a plain HTML form is the intended client.
 package main
@@ -52,6 +52,26 @@ func (a webuiWidgetAdapter) ListWidgets(_ context.Context) ([]webui.WidgetView, 
 		out = append(out, view)
 	}
 	return out, nil
+}
+
+// ListSkippedWidgets reports invalid $WIDGET_DIR directory names the scan
+// skipped (names only, never payloads) so the operator preview can warn.
+// Satisfies webui's optional skippedLister; the core WidgetLister interface
+// is unchanged.
+func (a webuiWidgetAdapter) ListSkippedWidgets(_ context.Context) []string {
+	if a.reg == nil {
+		return nil
+	}
+	a.reg.maybeReload()
+	a.reg.mu.RLock()
+	defer a.reg.mu.RUnlock()
+	var out []string
+	for _, name := range a.reg.snap.observed {
+		if _, ok := a.reg.snap.widgets[name]; !ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // webuiNotifyService implements webui.NotifyService through the shared

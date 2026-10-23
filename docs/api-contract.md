@@ -88,13 +88,15 @@ here; generation and storage land in the pairing PR):
 
 ### Token-issuance rate limit (additive note)
 
-Minting enroll tokens — `POST /api/v1/enroll-tokens` and the `GET
-/webui/pair` page render — shares one bucket: 30 per `RemoteAddr` per
-minute (in-memory, best-effort; a restart clears it). Exhaustion returns
-`429 rate_limited` (`{"error":"rate_limited"}` JSON on `/api/*`, plain
-text on `/webui/*`). The key is `RemoteAddr` only; no `X-Forwarded-For`
-is trusted, so behind a reverse proxy all callers share the proxy's
-bucket (see `docs/threat-model.md`). `POST /api/v1/enroll`
+Minting enroll tokens — `POST /api/v1/enroll-tokens` and `POST
+/webui/pair/mint` (the WebUI's Generate-token button) — shares one bucket:
+30 per `RemoteAddr` per minute (in-memory, best-effort; a restart clears
+it). `GET /webui/pair` never mints, so page loads cost nothing.
+Exhaustion returns `429 rate_limited` (`{"error":"rate_limited"}` JSON on
+`/api/*`, an in-shell operator page naming `rate_limited` with
+`Retry-After` on `/webui/*`). The key is `RemoteAddr` only; no
+`X-Forwarded-For` is trusted, so behind a reverse proxy all callers share
+the proxy's bucket (see `docs/threat-model.md`). `POST /api/v1/enroll`
 (consumption) is NOT rate-limited; replays lose the atomic consume race
 with `410`.
 
