@@ -5,10 +5,13 @@ package com.phonecompanion.app.data
  * unit-testable on the JVM.
  *
  * Accepted QR contents, in order of preference:
- * 1. JSON object with the server URL and the single-use enroll token, e.g.
+ * 1. JSON object with the single-use enroll token plus the server address,
+ *    e.g. `{"enroll_url":"https://example.com/api/v1/enroll",
+ *    "enroll_token":"..."}` (backend P2 canonical form) or equivalently
  *    `{"base_url":"https://example.com","enroll_token":"..."}`.
- *    Key aliases (`server_url`, `url`, `enrollToken`, `token`) are accepted
- *    so the WebUI pairing page has room to evolve without an app update.
+ *    Key aliases (`base_url`, `server_url`, `baseUrl`, `url`,
+ *    `enrollToken`, `token`) are accepted so the WebUI pairing page has
+ *    room to evolve without an app update.
  * 2. A enroll deep-link/query URL carrying `enroll_token=...` (base URL must
  *    then come from the manual server-URL field).
  * 3. The bare enroll token (same fallback as 2).
@@ -28,11 +31,14 @@ fun parsePairingQr(raw: String?): QrParse {
     if (text.isEmpty()) return QrParse.Invalid("empty QR code")
 
     if (text.startsWith("{")) {
-        val base = extractJsonField(text, "base_url", "server_url", "baseUrl", "url")
         val token = extractJsonField(text, "enroll_token", "enrollToken", "token")
         if (token.isNullOrBlank()) {
             return QrParse.Invalid("QR JSON has no enroll token")
         }
+        // Plain base URL wins; otherwise derive it from the backend P2
+        // canonical `enroll_url` by stripping the endpoint suffix.
+        val base = extractJsonField(text, "base_url", "server_url", "baseUrl", "url")
+            ?: extractJsonField(text, "enroll_url")?.let(::baseFromEnrollUrl)
         return QrParse.Ok(PairingQr(base.orEmpty(), token))
     }
 
@@ -56,3 +62,10 @@ private fun extractJsonField(json: String, vararg names: String): String? {
     }
     return null
 }
+
+/** Strips the `/api/v1/enroll` endpoint suffix to recover the server base. */
+private fun baseFromEnrollUrl(enrollUrl: String): String =
+    enrollUrl.trim()
+        .removeSuffix("/api/v1/enroll")
+        .removeSuffix("/api/v1")
+        .removeSuffix("/")

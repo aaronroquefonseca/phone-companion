@@ -38,6 +38,22 @@ class PairingQrTest {
     }
 
     @Test
+    fun `backend P2 enroll_url payload derives base url`() {
+        val result = parsePairingQr(
+            """{"enroll_url":"https://example.com/api/v1/enroll","enroll_token":"tok"}""",
+        )
+        assertEquals(QrParse.Ok(PairingQr("https://example.com", "tok")), result)
+    }
+
+    @Test
+    fun `plain base_url still wins over enroll_url`() {
+        val result = parsePairingQr(
+            """{"base_url":"https://example.com","enroll_url":"https://other.example/api/v1/enroll","enroll_token":"tok"}""",
+        )
+        assertEquals(QrParse.Ok(PairingQr("https://example.com", "tok")), result)
+    }
+
+    @Test
     fun `empty input is invalid`() {
         assertTrue(parsePairingQr(null) is QrParse.Invalid)
         assertTrue(parsePairingQr("   ") is QrParse.Invalid)

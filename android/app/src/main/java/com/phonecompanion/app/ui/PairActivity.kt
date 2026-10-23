@@ -52,7 +52,7 @@ class PairActivity : AppCompatActivity() {
 
         baseUrlEdit.setText(storage.baseUrl.orEmpty())
         if (deviceNameEdit.text.isBlank()) {
-            deviceNameEdit.setText(Build.MODEL ?: EnrollRepository.DEFAULT_DEVICE_NAME)
+            deviceNameEdit.setText(Build.MODEL)
         }
 
         scanButton.setOnClickListener { startScan() }
@@ -90,8 +90,7 @@ class PairActivity : AppCompatActivity() {
 
         val rawBaseUrl = baseUrlEdit.text.toString()
         val token = enrollTokenEdit.text.toString()
-        val deviceName = deviceNameEdit.text.toString()
-            .ifBlank { Build.MODEL ?: EnrollRepository.DEFAULT_DEVICE_NAME }
+        val deviceName = deviceNameEdit.text.toString().ifBlank { Build.MODEL }
 
         lifecycleScope.launch {
             val fcmToken = fetchFcmToken()

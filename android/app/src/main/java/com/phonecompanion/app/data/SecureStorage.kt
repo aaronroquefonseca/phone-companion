@@ -66,6 +66,8 @@ class SecureStorage private constructor(context: Context) {
      * Persists a fresh enrollment, overwriting any previous credentials.
      * Re-pair rotates the per-device key by design (see api-contract.md):
      * payloads encrypted under the old key become undecryptable.
+     * Synchronous commit: credentials must be durable before the caller
+     * proceeds (e.g. process death right after a 201).
      */
     fun saveEnrollment(baseUrl: String, deviceId: String, deviceToken: String, deviceKey: String) {
         prefs.edit()
@@ -73,7 +75,7 @@ class SecureStorage private constructor(context: Context) {
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_DEVICE_TOKEN, deviceToken)
             .putString(KEY_DEVICE_KEY, deviceKey)
-            .apply()
+            .commit()
     }
 
     /** Revokes local credentials (server-side revocation is the WebUI's job). */

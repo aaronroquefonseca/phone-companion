@@ -37,9 +37,11 @@ class EnrollRepository(private val storage: SecureStorage) {
         }
 
         // Enroll authenticates with the single-use token in the body, so no
-        // Bearer token is attached to this client.
-        val service = ApiClient.create(baseUrl)
+        // Bearer token is attached to this client. Client construction stays
+        // inside the try: Retrofit validates the URL eagerly and throws
+        // IllegalArgumentException for malformed input (e.g. bare "https://").
         return try {
+            val service = ApiClient.create(baseUrl)
             val response = service.enroll(
                 EnrollRequest(
                     enrollToken = enrollToken.trim(),
@@ -65,6 +67,8 @@ class EnrollRepository(private val storage: SecureStorage) {
                     else -> Result.ServerError(response.code(), code)
                 }
             }
+        } catch (e: IllegalArgumentException) {
+            Result.InvalidUrl(e.message ?: "Invalid server URL")
         } catch (e: IOException) {
             Result.NetworkError(e.message)
         } catch (e: Exception) {
