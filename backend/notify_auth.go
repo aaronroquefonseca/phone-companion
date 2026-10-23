@@ -41,7 +41,12 @@ func rejectNotifyDeviceToken(next http.Handler) http.Handler {
 }
 
 // notifyAdminChain gates the notify handler: device tokens are rejected
-// with 403 first, then the WebUI session is required (401 without one).
-func notifyAdminChain(sessions webui.SessionStore, next http.Handler) http.Handler {
-	return rejectNotifyDeviceToken(webui.RequireAdmin(sessions, next))
+// with 403 first, then the WebUI session is required (401 without one),
+// then the operator write guard requires explicit non-browser intent
+// (X-Requested-With or a session-bound CSRF token, same as enroll-tokens)
+// so a bare session cookie alone cannot send cross-site. Runs inside
+// RequireAdmin so unauthenticated callers still get 401 (auth first,
+// CSRF second). Phone enroll stays exempt (token-only auth, no session).
+func notifyAdminChain(sessions webui.SessionStore, csrf *webui.CSRFProtection, next http.Handler) http.Handler {
+	return rejectNotifyDeviceToken(webui.RequireAdmin(sessions, requireAPIWriteGuard(csrf, next)))
 }

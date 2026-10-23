@@ -43,8 +43,14 @@ CREATE TABLE IF NOT EXISTS devices (
 // so driver-created sidecar files (journal/WAL) default to owner-only too;
 // the explicit Chmod below is defense-in-depth for pre-existing files.
 func OpenDB(path string) (*sql.DB, error) {
-	if dir := filepath.Dir(path); dir != "" {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		// Tighten pre-existing dirs left behind by a looser umask or an
+		// earlier version (MkdirAll is a no-op when the dir exists). Skip
+		// "." so opening a bare filename never chmods the process cwd.
+		if err := os.Chmod(dir, 0o700); err != nil {
 			return nil, err
 		}
 	}

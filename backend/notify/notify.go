@@ -209,10 +209,11 @@ func (m Message) Validate() error {
 // uses a fixed 32-char placeholder notification id (the length
 // newNotificationID mints) and, for secret messages, envelope sizes
 // computed from the real plaintext lengths with the longest known kid
-// (explicit targets) or MaxSecretKidLen ({"all":true}). JSON escaping can
-// only shrink the estimate (base64/hex need no escaping), so the real
-// per-device payload never exceeds this by more than a few bytes — the
-// 3500-vs-4096 headroom absorbs that slack.
+// (explicit targets) or MaxSecretKidLen ({"all":true}). JSON escaping
+// EXPANDS the estimate: the real envelopes are embedded as strings, so
+// each envelope quote gains a backslash (~+32B across the title+body
+// pair) — the 3500-vs-4096 headroom absorbs that growth, so the check
+// stays conservative (fail closed) without tripping on real traffic.
 func (m Message) estimatedPayloadBytes() int {
 	const placeholderID = "0123456789abcdef0123456789abcdef"
 	payload := m.DataPayload(placeholderID)
@@ -300,7 +301,11 @@ const (
 // DataPayload — only title/body are secret-bearing. Any encrypt or binding
 // failure returns an error and the caller must record a failed delivery
 // (the app maps undecryptable secrets to its needs-refresh UI with no
-// oracle — see SecretCrypto on Android).
+// oracle — see SecretCrypto on Android). A missing/unusable device key is a
+// per-device precondition failure, not an FCM misconfiguration, but the
+// handler deliberately reports both as 500 driver_unavailable (fail closed,
+// no key oracle): zero matching targets stay 202 accepted:0, while a real
+// target that cannot be sealed is never silently dropped.
 func (m Message) SecretDataPayload(notificationID, deviceID string, key [crypto.KeySize]byte) (map[string]string, error) {
 	payload := m.DataPayload(notificationID)
 	delete(payload, "title")

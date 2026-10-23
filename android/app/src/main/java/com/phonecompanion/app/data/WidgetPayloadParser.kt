@@ -1,9 +1,6 @@
 package com.phonecompanion.app.data
 
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.Types
 import kotlinx.coroutines.CancellationException
-
 /**
  * Central parser for cached widget payload envelopes (per
  * docs/api-contract.md v1 shapes).
@@ -14,6 +11,9 @@ import kotlinx.coroutines.CancellationException
  * and only parsed fields are ever rendered — the raw envelope JSON must
  * never appear on screen. Malformed JSON yields null (callers show their
  * fallback) rather than throwing.
+ *
+ * JSON wiring lives in [WidgetJson] (shared with WidgetPoller): this file
+ * only applies the length bounds.
  */
 object WidgetPayloadParser {
     const val TEXT_BODY_MAX = 2000
@@ -29,19 +29,10 @@ object WidgetPayloadParser {
 
     data class Status(val state: String, val detail: String)
 
-    private val moshi: Moshi by lazy { Moshi.Builder().build() }
-
-    private val mapAdapter by lazy {
-        moshi.adapter<Map<String, Any?>>(
-            Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java),
-        )
-    }
-
     /** Raw payload object, or null when [payloadJson] is blank/malformed. */
     fun parseObject(payloadJson: String): Map<String, Any?>? {
-        if (payloadJson.isBlank()) return null
         return try {
-            mapAdapter.fromJson(payloadJson)
+            WidgetJson.fromJson(payloadJson)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

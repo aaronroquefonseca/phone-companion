@@ -33,7 +33,7 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf 
 	// successful per-device sends; accepted:0 still returns 202 and means
 	// no devices matched (unknown device_ids, or an empty registry) — not
 	// an error. See handleNotify.
-	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, handleNotify(db, sender)))
+	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, csrf, handleNotify(db, sender)))
 	return withAuthNoStore(mux)
 }
 

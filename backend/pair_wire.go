@@ -22,10 +22,13 @@ import (
 //     POST /api/v1/enroll-tokens (issue), GET /api/v1/devices (list),
 //     DELETE /api/v1/devices/{id} (revoke), GET /webui/pair,
 //     POST /webui/pair/revoke (CSRF-guarded form).
-//   - POST /api/v1/enroll-tokens additionally requires explicit
+//   - POST /api/v1/enroll-tokens, DELETE /api/v1/devices/{id}, and
+//     POST /api/v1/notify additionally require explicit
 //     non-browser intent via requireAPIWriteGuard (X-Requested-With or
 //     session-bound CSRF token) so a bare session cookie alone cannot mint
-//     tokens cross-site. Missing proof fails closed with 403 JSON.
+//     tokens, revoke devices, or send cross-site. Missing proof fails closed
+//     with 403 JSON. Phone enroll (POST /api/v1/enroll) stays exempt:
+//     token-only auth, no session, no guard.
 //
 // Unauthenticated callers get 401 JSON on /api/* and a 302 to /login on
 // /webui/*, per docs/api-contract.md.
@@ -41,7 +44,9 @@ func RegisterPairingRoutes(mux *http.ServeMux, sessions webui.SessionStore, csrf
 		HandleIssueEnrollToken(w, r)
 	}))))
 	mux.Handle("GET /api/v1/devices", webui.RequireAdmin(sessions, http.HandlerFunc(HandleListDevices)))
-	mux.Handle("DELETE /api/v1/devices/{id}", webui.RequireAdmin(sessions, http.HandlerFunc(HandleRevokeDevice)))
+	// Revoke is state-changing operator API: same write guard as
+	// enroll-tokens (X-Requested-With or session-bound CSRF token).
+	mux.Handle("DELETE /api/v1/devices/{id}", webui.RequireAdmin(sessions, requireAPIWriteGuard(csrf, http.HandlerFunc(HandleRevokeDevice))))
 
 	store := webuiStoreAdapter{}
 	mux.Handle("GET /webui/pair", webui.RequireAdmin(sessions, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

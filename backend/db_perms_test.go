@@ -51,3 +51,31 @@ func TestOpenDBTightensExistingFile(t *testing.T) {
 		t.Fatalf("db mode = %04o, want 0600", got)
 	}
 }
+
+// A pre-existing world-readable parent dir must be tightened on open,
+// mirroring TestOpenDBTightensExistingFile for the file itself.
+func TestOpenDBTightensExistingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "loosedir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("seed chmod: %v", err)
+	}
+	path := filepath.Join(dir, "tight.db")
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	db.Close()
+	if fi, err := os.Stat(dir); err != nil {
+		t.Fatalf("stat dir: %v", err)
+	} else if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("dir mode = %04o, want 0700", got)
+	}
+	if fi, err := os.Stat(path); err != nil {
+		t.Fatalf("stat db: %v", err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("db mode = %04o, want 0600", got)
+	}
+}

@@ -229,7 +229,8 @@ object SecretCrypto {
      * fields are ignored (forward compatibility); missing/typed-wrong
      * required fields fail closed.
      */
-    private fun extractField(json: String, field: String): String? {        // Matches "field" : "value" with no escaped-quote support beyond
+    private fun extractField(json: String, field: String): String? {
+        // Matches "field" : "value" with no escaped-quote support beyond
         // what the backend emits (kids, nonces, ciphertexts, alg are all
         // [A-Za-z0-9+/=_-] without quotes or backslashes).
         val pattern = Regex("\"" + Regex.escape(field) + "\"\\s*:\\s*\"([^\"]*)\"")

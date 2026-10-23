@@ -11,6 +11,7 @@ import androidx.glance.text.Text
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetCacheEntity
+import com.phonecompanion.app.data.WidgetPayloadParser
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -25,11 +26,12 @@ import kotlinx.coroutines.CancellationException
  * (re-pair) makes cached envelopes undecryptable until the next poll
  * fetches freshly-encrypted ones.
  *
- * Per-instance content: the row whose id matches this Glance instance is
- * shown; when nothing matches (or the cache is empty) the first cached
- * secret is used so a single widget still renders. Database access is one
- * shared open via [DatabaseHolder] — never a per-call builder, never
- * closed here.
+ * Per-instance content: same [WidgetInstancePicker] row selection as the
+ * other widgets, with the title bounded by
+ * [WidgetPayloadParser.sanitizeTitle]; resolution stays fail-closed
+ * ([resolveVisibleSecret] null → [SecretWidget.MASKED]). Database access
+ * is one shared open via [DatabaseHolder] — never a per-call builder,
+ * never closed here.
  */
 class SecretWidget : GlanceAppWidget() {
 
@@ -40,8 +42,11 @@ class SecretWidget : GlanceAppWidget() {
         try {
             val db = DatabaseHolder.get(context)
             val rows = db.widgetCacheDao().getByType("secret")
-            val row = selectRowForGlance(rows, glanceKey(id))
-            title = row?.title ?: FALLBACK_TITLE
+            val row = WidgetInstancePicker.pick(
+                rows,
+                WidgetInstancePicker.boundIndex(context, SecretWidget::class.java, id),
+            )
+            title = row?.let { WidgetPayloadParser.sanitizeTitle(it.title) } ?: FALLBACK_TITLE
             val storage = SecureStorage.getInstance(context)
             visible = resolveVisibleSecret(storage.deviceId, storage.deviceKey, row)
         } catch (e: CancellationException) {

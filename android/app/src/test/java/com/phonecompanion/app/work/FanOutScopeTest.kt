@@ -9,6 +9,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -25,20 +26,23 @@ class FanOutScopeTest {
     @Test
     fun `sibling failure does not cancel siblings`() = runBlocking {
         val completed = mutableListOf<String>()
+        var failedSeen: Throwable? = null
         supervisorScope {
-            listOf(
-                async {
-                    try {
-                        throw IllegalStateException("one type broke")
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        completed += "failed-type-contained"
-                    }
-                },
-                async { completed += "sibling-ok" },
-            ).awaitAll()
+            val failing = async {
+                // Uncaught: a true supervisor-isolation pin (no in-child
+                // catch). The failure must surface via awaitAll while the
+                // sibling still completes.
+                throw IllegalStateException("one type broke")
+            }
+            val sibling = async { completed += "sibling-ok" }
+            try {
+                awaitAll(failing, sibling)
+            } catch (e: IllegalStateException) {
+                failedSeen = e
+            }
+            completed += "failed-type-contained"
         }
+        assertTrue(failedSeen is IllegalStateException)
         assertEquals(setOf("failed-type-contained", "sibling-ok"), completed.toSet())
     }
 
@@ -60,7 +64,10 @@ class FanOutScopeTest {
                 delay(Long.MAX_VALUE)
             }
         }
-        while (!childStarted) delay(1)
+        // Bounded start-poll: a stuck child must fail the test, not hang it.
+        withTimeout(5_000) {
+            while (!childStarted) delay(1)
+        }
         parent.cancelAndJoin()
         assertTrue(childSawCancellation)
     }

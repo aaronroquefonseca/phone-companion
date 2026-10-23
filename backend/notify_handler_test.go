@@ -481,9 +481,6 @@ func TestHandleNotifySecretRoundTrip(t *testing.T) {
 	if payload[notify.SecretFlagKey] != "true" {
 		t.Fatalf("missing secret flag: %v", payload)
 	}
-	for _, v := range payload {
-		_ = v
-	}
 	if _, ok := payload["title"]; ok {
 		t.Fatal("secret payload carries plaintext title")
 	}
