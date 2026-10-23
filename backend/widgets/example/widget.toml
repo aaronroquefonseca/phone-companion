@@ -1,0 +1,17 @@
+# Example widget: hello
+#
+# Folder-per-widget contract (see docs/api-contract.md, "Widget envelope"):
+# one directory per widget, named by widget id, containing exactly:
+#   widget.toml — metadata: id, type, title (+ type-specific options)
+#   body.md     — plain-text/markdown content for text-type widgets
+#
+# Widget types: text | secret | list | status. Only `text` is shown here;
+# the others are defined by the contract and implemented in the widgets PR.
+
+id = "hello"
+type = "text"
+title = "Hello"
+
+# Optional: overridable refresh hint (backend may ignore; the app polls at
+# most ~hourly regardless). TODO (widgets PR): define semantics.
+# refresh_hint = "1h"
