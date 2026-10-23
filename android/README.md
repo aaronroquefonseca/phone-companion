@@ -15,8 +15,8 @@ notifications. Contract: `docs/api-contract.md`.
   (kinds registry: `note`/`alert`, generic fallback for unknown kinds),
   `NotificationImages` (HTTPS `BigPictureStyle`, fails closed to
   `BigTextStyle`).
-- `widgets/` — one Glance implementation per type (`HelloWidget`,
-  `TextWidget`, `ListWidget`, `StatusWidget`, `SecretWidget` + `SecretCrypto`
+- `widgets/` — one Glance implementation per type (`TextWidget`,
+  `ListWidget`, `StatusWidget`, `SecretWidget` + `SecretCrypto`
   for per-device decrypt), never fully-generic.
 - `work/` — `RefreshWorker` (hourly `WorkManager` poll: needs network +
   battery-not-low; screen-off returns retry, no exact alarms),

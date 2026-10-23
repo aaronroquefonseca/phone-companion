@@ -105,12 +105,6 @@ data class NotificationPayload(
     fun notifyId(): Int = (notificationId ?: "$kind:$title:$body").hashCode()
 
     companion object {
-        const val KIND_NOTE = NotificationKinds.NOTE
-        const val KIND_ALERT = NotificationKinds.ALERT
-
-        /** Kept for P6 callers: the pre-registry known-kind set. */
-        val BASIC_KINDS: Set<String> = NotificationKinds.KNOWN_KINDS
-
         /** Max actions honored per notification (contract cap). */
         const val MAX_ACTIONS = 3
 
@@ -118,7 +112,7 @@ data class NotificationPayload(
 
         fun fromMap(data: Map<String, String>): NotificationPayload {
             val kind = data["kind"]?.trim()?.lowercase()?.ifEmpty { null }
-                ?: KIND_NOTE
+                ?: NotificationKinds.NOTE
             return NotificationPayload(
                 kind = kind,
                 title = data["title"].orEmpty(),
