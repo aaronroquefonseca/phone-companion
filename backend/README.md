@@ -31,15 +31,23 @@ model: `docs/threat-model.md`.
 | `GET /healthz` | none | `{"status":"ok"}` |
 | `GET /login`, `POST /login` | form `username`+`password` | Sets session cookie; failures are generic (no user enumeration) |
 | `POST /logout` | session | Clears session |
-| `GET /webui/pair` | admin session (else `302 /login`) | Issues single-use enroll token, renders QR + device list with CSRF-guarded revoke forms |
+| `GET /webui/pair` | admin session (else `302 /login`) | Issues single-use enroll token, renders QR + device list with CSRF-guarded revoke forms; shares the 30/min issuance bucket (see below) |
 | `POST /webui/pair/revoke` | admin session + CSRF token | Form `device_id`; unknown id redirects with `?error=device_not_found` |
 | `POST /api/v1/enroll` | enroll token only (phone) | `201 {device_id, device_token, device_key}` shown once |
-| `POST /api/v1/enroll-tokens` | admin session | Issues token via API; 30/min/IP rate limit |
+| `POST /api/v1/enroll-tokens` | admin session | Issues token via API; shares the 30/min issuance bucket (see below) |
 | `GET /api/v1/devices` | admin session | Device registry |
 | `DELETE /api/v1/devices/{id}` | admin session | Revoke; idempotent; unknown id → `404 device_not_found` |
-| `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` |
-| `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle) |
+| `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
+| `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
 | `POST /api/v1/notify` | admin session (`401` without; device Bearer → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+
+Issuance rate limit (shared bucket): `POST /api/v1/enroll-tokens` and
+`GET /webui/pair` share 30 token mints per `RemoteAddr` per minute
+(in-memory; restarts clear it). Exhaustion is `429 rate_limited`
+(JSON `{"error":"rate_limited"}` on `/api/*`, plain text on
+`/webui/*`). The key is `RemoteAddr` only — no `X-Forwarded-For` is
+trusted — so behind a reverse proxy all callers share the proxy's
+bucket. Rationale: `docs/threat-model.md` ("Enroll-token lifecycle").
 
 ## Build and run
 
@@ -103,6 +111,12 @@ Other types use `payload.json` instead of `body.md`:
   envelope with `kid == secret_ref == device_id`. `widget.toml` MUST
   declare `secret_ref = "<target device_id>"`; other devices get `404`
   (list omits it entirely).
+
+Cardinality (v1): one secret widget directory targets exactly one
+device (`secret_ref` is a single id). To show the same secret on N
+phones, duplicate the directory per device — each copy is its own
+widget (own id, own `secret_ref`); there are no secret groups and no
+key history (re-pair re-keys only that row).
 
 Reload: `docker kill -s HUP <container>` triggers an explicit reload,
 plus a best-effort mtime recheck on every poll (no inotify — the

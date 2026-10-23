@@ -69,10 +69,15 @@ Oracle policy (single needs-refresh outcome):
 - Foreign secret id (authenticated device B asking for device A's
   `secret_ref`) → `404 widget_not_found`, byte-identical to an unknown
   id (no existence oracle). The list omits foreign secrets entirely.
+- Unwired device DB (`deviceDB == nil`, server misconfiguration) →
+  `500 server misconfigured` on both list and single fetch, before auth
+  (fail closed, never a panic, never plaintext).
 - Own secret that cannot be encrypted (NULL/malformed `secret_key`,
-  RNG/crypto failure, nil DB) → `500 needs_refresh` on single fetch;
-  the list omits that widget (fail closed, never plaintext, never a
-  crash). Server logs note only the widget id, never key/nonce/plaintext.
+  RNG/crypto failure) → `500 needs_refresh` on single fetch; the list
+  omits that widget (fail closed, never plaintext, never a crash).
+  `needs_refresh` is only ever an authenticated per-secret outcome —
+  never the misconfiguration signal. Server logs note only the widget
+  id, never key/nonce/plaintext.
 - App decrypt: `kid`/binding mismatch, unknown `alg`, bad base64, wrong
   nonce length, auth-tag failure, and non-UTF-8 output ALL map to the one
   masked `•••••• needs refresh` UI state with no log distinction
@@ -82,6 +87,14 @@ Oracle policy (single needs-refresh outcome):
   ciphertexts fail closed under the new key on both sides; the next poll
   fetches a freshly-encrypted envelope that decrypts. Cached pre-rotation
   envelopes show needs-refresh until then.
+
+Multi-secret cardinality (v1): one widget directory targets exactly one
+device — `secret_ref` is a single `device_id`, required at load and
+re-verified at serve. To show the same secret on N phones, duplicate the
+directory per device (each copy is its own widget: own directory name =
+own widget id, own `secret_ref`); there are no secret groups and no key
+history. Rotation is per-row: re-pairing one device re-keys only that
+row, and the other copies keep working under their own keys.
 
 ## Enroll-token lifecycle (P8)
 
@@ -96,7 +109,14 @@ Oracle policy (single needs-refresh outcome):
    `POST /api/v1/enroll-tokens` and `GET /webui/pair` (shared bucket).
    Exhaustion returns `429 rate_limited` (JSON on `/api/*`, plain text
    on `/webui/*`). The limiter is best-effort (restart clears it);
-   correctness never depends on it.
+   correctness never depends on it. The key is `RemoteAddr` only
+   (`enrollClientIP` in `pair_wire.go`); no `X-Forwarded-For` is
+   trusted — deliberately, since that header is client-spoofable (same
+   reason the Host fallback above is dev-only). Consequence behind a
+   proxy: every client arrives with the proxy's IP, so all operators
+   share the one bucket. At v1 pairing volumes that is harmless (a
+   legitimate pairing needs ~1 token per scan), but the limiter is not
+   per-operator attribution.
 4. The phone POSTs the token to `POST /api/v1/enroll` with NO session
    cookie. Consumption is a single atomic
    `UPDATE ... SET used = 1 WHERE hash AND used = 0 AND unexpired` —

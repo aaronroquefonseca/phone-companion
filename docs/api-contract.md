@@ -53,8 +53,9 @@ Response `201`:
 ```
 
 The raw `device_token` is returned exactly once; the server keeps only its
-hash. Errors: `410` expired/used enroll token, `409` device already
-enrolled (re-pair flow, pairing PR decides).
+hash. Errors: `410` expired/used enroll token. (Errata: the P0 draft's
+`409 device already enrolled` is reserved, never emitted at v1 — re-pair
+returns `201` with key rotation instead. Do not branch on `409`.)
 
 ### Key bootstrap at enrollment (pairing P2 / widgets P5 / notify P10)
 
@@ -85,6 +86,18 @@ here; generation and storage land in the pairing PR):
   (`docs/threat-model.md` stub); this section defines the wire contract so
   P2/P5/P10 implement compatibly.
 
+### Token-issuance rate limit (additive note)
+
+Minting enroll tokens — `POST /api/v1/enroll-tokens` and the `GET
+/webui/pair` page render — shares one bucket: 30 per `RemoteAddr` per
+minute (in-memory, best-effort; a restart clears it). Exhaustion returns
+`429 rate_limited` (`{"error":"rate_limited"}` JSON on `/api/*`, plain
+text on `/webui/*`). The key is `RemoteAddr` only; no `X-Forwarded-For`
+is trusted, so behind a reverse proxy all callers share the proxy's
+bucket (see `docs/threat-model.md`). `POST /api/v1/enroll`
+(consumption) is NOT rate-limited; replays lose the atomic consume race
+with `410`.
+
 ### `GET /api/v1/widgets` (widgets PR)
 
 Poll endpoint for the app. Auth: device Bearer token.
@@ -112,8 +125,11 @@ the widgets PR's call.
 
 ### `POST /api/v1/notify` (notifications PR)
 
-Enqueues fan-out to devices. Auth: WebUI session (operator) or future
-automation credential — never a device token.
+Enqueues fan-out to devices. Auth (v1): WebUI session (operator) ONLY —
+never a device token (a request carrying a Bearer token is rejected
+with `403`, even alongside a session). The automation credential named
+in earlier drafts does not exist yet; when it lands it will be a
+separate v1-compatible auth scheme, not a device token.
 
 Request:
 
