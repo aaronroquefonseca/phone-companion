@@ -1,0 +1,120 @@
+name: Release
+
+# Tag-triggered distribution. Push a tag like v0.1.0 and this workflow:
+#   1. builds + pushes the backend image to a registry (default ghcr.io),
+#   2. builds a versioned Android APK,
+#   3. attaches the APK + SHA256SUMS.txt (APK hash + backend image digest)
+#      to a GitHub Release for the tag.
+#
+# Auth: only GITHUB_TOKEN (image push + release creation). No secrets are
+# committed anywhere; nothing in this workflow needs extra secrets for the
+# default registry. To point at a different registry, set the REGISTRY
+# repo variable — pushes there need that registry's credentials, which is
+# intentionally left as an extension point (see comment on the login step).
+#
+# APK signing note: the app has no release keystore yet (never committed;
+# see android/app/build.gradle), so the release artifact is the debug APK
+# renamed with the tag. Release signing is future work, tracked alongside
+# the remaining F-Droid steps in docs/fdroid.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ${{ vars.REGISTRY || 'ghcr.io' }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  backend-image:
+    name: backend image (registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build + push backend image
+        run: |
+          echo 'Local repro (from repo root): docker build -t phone-companion-backend:local ./backend'
+          IMAGE="$(echo "$REGISTRY/${{ github.repository }}-backend" | tr '[:upper:]' '[:lower:]')"
+          TAG="${GITHUB_REF_NAME}"
+          docker build -t "$IMAGE:$TAG" ./backend
+          # Works as-is for the default ghcr.io (GITHUB_TOKEN). A custom
+          # REGISTRY needs its own credentials wired in here instead.
+          echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:$TAG"
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$TAG" > image-digest.txt
+          cat image-digest.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-image-digest
+          path: image-digest.txt
+
+  android-apk:
+    name: android APK (release attachment)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: build APK
+        run: |
+          echo 'Local repro: cd android && ./gradlew assembleDebug   (needs JDK 17 + Android SDK)'
+          ./gradlew assembleDebug --console=plain
+          OUT="phone-companion-${GITHUB_REF_NAME}.apk"
+          cp "app/build/outputs/apk/debug/app-debug.apk" "$GITHUB_WORKSPACE/$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: phone-companion-*.apk
+
+  publish:
+    name: publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [backend-image, android-apk]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-image-digest
+
+      - name: checksums + create release
+        run: |
+          ls -la
+          cat image-digest.txt
+          sha256sum phone-companion-*.apk > SHA256SUMS.txt
+          {
+            echo '# backend image digest (registry)'
+            cat image-digest.txt
+            echo ''
+            echo '# file checksums'
+            cat SHA256SUMS.txt
+          } > release-checksums.txt
+          mv release-checksums.txt SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" \
+            phone-companion-*.apk SHA256SUMS.txt \
+            --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

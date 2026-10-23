@@ -142,3 +142,17 @@ docker logs <container>              # plain docker run
 
 Logs carry request outcomes and widget skip/reload lines only — never
 token, key, nonce, or plaintext secret material.
+
+## CI
+
+PR checks (`.github/workflows/ci.yml`) run these exact commands; run them
+locally before pushing:
+
+```sh
+cd backend && gofmt -l .   # empty output = clean
+cd backend && go vet ./...
+cd backend && go test ./...
+
+# from the repo root:
+docker build -t phone-companion-backend:local ./backend
+```
