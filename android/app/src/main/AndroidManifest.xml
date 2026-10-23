@@ -39,7 +39,8 @@
             android:name=".ui.WidgetsActivity"
             android:exported="false" />
 
-        <!-- Push receiver. TODO (notifications PR): channels, kinds, actions. -->
+        <!-- Push receiver (P9: per-kind channels, up to 3 action buttons,
+             BigPictureStyle image attachments, extensible kinds registry). -->
         <service
             android:name=".notify.CompanionMessagingService"
             android:exported="false">

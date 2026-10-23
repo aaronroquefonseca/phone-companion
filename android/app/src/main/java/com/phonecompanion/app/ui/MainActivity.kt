@@ -29,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        dismissFromIntent(intent)
 
         statusView = findViewById(R.id.pairStatus)
 
@@ -56,7 +57,20 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        dismissFromIntent(intent)
         renderStatus()
+    }
+
+    /**
+     * Action-button taps do not auto-dismiss (only content taps do), so the
+     * app cancels the notification id the service attached. Harmless when
+     * the tap already dismissed it.
+     */
+    private fun dismissFromIntent(intent: Intent) {
+        if (intent.hasExtra(EXTRA_NOTIFY_INT_ID)) {
+            val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            manager.cancel(intent.getIntExtra(EXTRA_NOTIFY_INT_ID, 0))
+        }
     }
 
     private fun renderStatus() {
@@ -74,7 +88,10 @@ class MainActivity : AppCompatActivity() {
         val title = intent.getStringExtra(EXTRA_NOTIFICATION_TITLE).orEmpty()
         val body = intent.getStringExtra(EXTRA_NOTIFICATION_BODY).orEmpty()
         if (title.isNotBlank() || body.isNotBlank()) {
-            lines += getString(R.string.main_last_notification, title, body)
+            var last = getString(R.string.main_last_notification, title, body)
+            val actionId = intent.getStringExtra(EXTRA_NOTIFICATION_ACTION_ID).orEmpty()
+            if (actionId.isNotBlank()) last += " (action: $actionId)"
+            lines += last
         }
         statusView.text = lines.joinToString("\n\n")
     }
@@ -82,5 +99,11 @@ class MainActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_NOTIFICATION_TITLE = "pc_notification_title"
         const val EXTRA_NOTIFICATION_BODY = "pc_notification_body"
+        /** Opaque backend notification id, if the payload carried one. */
+        const val EXTRA_NOTIFICATION_ID = "pc_notification_id"
+        /** Tapped action button id, or null for a content tap. */
+        const val EXTRA_NOTIFICATION_ACTION_ID = "pc_notification_action_id"
+        /** Int id to cancel on open (action taps don't auto-dismiss). */
+        const val EXTRA_NOTIFY_INT_ID = "pc_notify_int_id"
     }
 }

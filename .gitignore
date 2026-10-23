@@ -21,6 +21,10 @@ venv/
 *.token
 secrets/
 
+# FCM sender config (notifications PR): per-developer/machine file, fetched
+# from the Firebase console. Documented in android/README.md; never commit.
+android/app/google-services.json
+
 # OS / editor
 .DS_Store
 Thumbs.db
