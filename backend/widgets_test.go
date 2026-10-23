@@ -1,7 +1,8 @@
-// Widget loader tests (P3). Temp-dir fixtures only; no network, no secrets.
+// Widget loader + serve tests (P3 + P10 SECRET ROUND-TRIP).
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -67,15 +68,42 @@ func snapshotOf(r *WidgetRegistry) *widgetSnapshot {
 	return r.snap
 }
 
-func authedGet(mux http.Handler, method, target string, headers map[string]string) *httptest.ResponseRecorder {
+func authedGet(mux http.Handler, method, target, token string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, nil)
-	req.Header.Set("Authorization", "Bearer test-token")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec
+}
+
+// setupWidgetDeviceDB creates a migrated DB, wires the global deviceDB, and
+// enrolls one device. Returns the DB (cleanup closes + unwires), device id,
+// bearer token, and base64 device key.
+func setupWidgetDeviceDB(t *testing.T) (*sql.DB, string, string, string) {
+	t.Helper()
+	db, err := OpenDB(t.TempDir() + "/widgets-test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	old := deviceDB
+	SetDeviceDB(db)
+	t.Cleanup(func() {
+		db.Close()
+		SetDeviceDB(old)
+	})
+	id, tok, key, err := EnrollDevice(db, "Widget Test Phone", "fcm-widget-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db, id, tok, key
 }
 
 func TestParseWidgetTOML(t *testing.T) {
@@ -94,7 +122,32 @@ func TestParseWidgetTOML(t *testing.T) {
 	}
 }
 
+func TestParseSecretPlaintextPayload(t *testing.T) {
+	got, err := parseSecretPlaintextPayload([]byte(`{"secret": "hello secret"}`))
+	if err != nil || string(got) != "hello secret" {
+		t.Fatalf("good plaintext: got %q err=%v", got, err)
+	}
+	empty, err := parseSecretPlaintextPayload([]byte(`{"secret": ""}`))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty plaintext must be legal: %q err=%v", empty, err)
+	}
+	for _, bad := range []string{
+		``,
+		`not json`,
+		`{"alg":"AES-256-GCM","kid":"x","nonce":"Ag==","ciphertext":"AA=="}`,
+		`{"secret": 42}`,
+		`{"secret": "x", "future": 1}`,
+		`{}`,
+		`"just a string"`,
+	} {
+		if _, err := parseSecretPlaintextPayload([]byte(bad)); err == nil {
+			t.Fatalf("bad secret payload accepted: %q", bad)
+		}
+	}
+}
+
 func TestWidgetEndpoints(t *testing.T) {
+	_, _, token, _ := setupWidgetDeviceDB(t)
 	dir := t.TempDir()
 	writeWidget(t, dir, "hello",
 		"id = \"hello\"\ntype = \"text\"\ntitle = \"Hello\"\n",
@@ -122,7 +175,7 @@ func TestWidgetEndpoints(t *testing.T) {
 	}
 
 	// List: envelopes served id-sorted, secret_ref omitted for non-secrets.
-	rec = authedGet(mux, "GET", "/api/v1/widgets", nil)
+	rec = authedGet(mux, "GET", "/api/v1/widgets", token, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -153,8 +206,8 @@ func TestWidgetEndpoints(t *testing.T) {
 		t.Fatal("list missing ETag")
 	}
 
-	// Conditional GET → 304 with no body Content-Type.
-	rec = authedGet(mux, "GET", "/api/v1/widgets", map[string]string{"If-None-Match": etag})
+	// Conditional GET → 304 with no body Content-Type (stable non-secrets).
+	rec = authedGet(mux, "GET", "/api/v1/widgets", token, map[string]string{"If-None-Match": etag})
 	if rec.Code != http.StatusNotModified {
 		t.Fatalf("conditional list status = %d, want 304", rec.Code)
 	}
@@ -163,7 +216,7 @@ func TestWidgetEndpoints(t *testing.T) {
 	}
 
 	// Single widget + 404.
-	rec = authedGet(mux, "GET", "/api/v1/widgets/hello", nil)
+	rec = authedGet(mux, "GET", "/api/v1/widgets/hello", token, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d", rec.Code)
 	}
@@ -171,7 +224,7 @@ func TestWidgetEndpoints(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &one); err != nil || one.ID != "hello" {
 		t.Fatalf("bad single envelope: %s", rec.Body.String())
 	}
-	rec = authedGet(mux, "GET", "/api/v1/widgets/nope", nil)
+	rec = authedGet(mux, "GET", "/api/v1/widgets/nope", token, nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown id status = %d, want 404", rec.Code)
 	}
@@ -181,6 +234,7 @@ func TestWidgetEndpoints(t *testing.T) {
 // backdated well before Load, asserting NO change before the edit and change
 // after — including same-second edits (B1: full-precision comparison).
 func TestMtimeRecheck(t *testing.T) {
+	_, _, token, _ := setupWidgetDeviceDB(t)
 	dir := t.TempDir()
 	writeWidget(t, dir, "hello",
 		"id = \"hello\"\ntype = \"text\"\ntitle = \"Hello\"\n",
@@ -203,7 +257,7 @@ func TestMtimeRecheck(t *testing.T) {
 		t.Fatal("widgetTreeChanged == true with no edits (would rescan every request)")
 	}
 	for _, target := range []string{"/api/v1/widgets", "/api/v1/widgets/hello", "/api/v1/widgets/tasks"} {
-		if rec := authedGet(mux, "GET", target, nil); rec.Code != http.StatusOK {
+		if rec := authedGet(mux, "GET", target, token, nil); rec.Code != http.StatusOK {
 			t.Fatalf("GET %s status = %d", target, rec.Code)
 		}
 	}
@@ -218,7 +272,7 @@ func TestMtimeRecheck(t *testing.T) {
 	if !widgetTreeChanged(dir, snapshotOf(reg)) {
 		t.Fatal("widgetTreeChanged == false after body.md edit (same-second edit missed)")
 	}
-	rec := authedGet(mux, "GET", "/api/v1/widgets/hello", nil)
+	rec := authedGet(mux, "GET", "/api/v1/widgets/hello", token, nil)
 	var updated widgetEnvelope
 	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("reload decode: %v", err)
@@ -230,7 +284,7 @@ func TestMtimeRecheck(t *testing.T) {
 	if got := reg.loadCount(); got != 2 {
 		t.Fatalf("loads after edit GET = %d, want 2", got)
 	}
-	if rec := authedGet(mux, "GET", "/api/v1/widgets", nil); rec.Code != http.StatusOK {
+	if rec := authedGet(mux, "GET", "/api/v1/widgets", token, nil); rec.Code != http.StatusOK {
 		t.Fatalf("post-edit list status = %d", rec.Code)
 	}
 	if got := reg.loadCount(); got != 2 {
@@ -241,6 +295,7 @@ func TestMtimeRecheck(t *testing.T) {
 // TestInvalidDirsNoRescan (B2): skipped widgets must not force a rescan per
 // request, and repairing one must be picked up via folded mtimes.
 func TestInvalidDirsNoRescan(t *testing.T) {
+	_, _, token, _ := setupWidgetDeviceDB(t)
 	dir := t.TempDir()
 	writeWidget(t, dir, "hello",
 		"id = \"hello\"\ntype = \"text\"\ntitle = \"Hello\"\n",
@@ -259,10 +314,10 @@ func TestInvalidDirsNoRescan(t *testing.T) {
 	}
 	mux := NewMuxWithWidgets(reg, nil, nil)
 	for i := 0; i < 3; i++ {
-		if rec := authedGet(mux, "GET", "/api/v1/widgets", nil); rec.Code != http.StatusOK {
+		if rec := authedGet(mux, "GET", "/api/v1/widgets", token, nil); rec.Code != http.StatusOK {
 			t.Fatalf("list status = %d", rec.Code)
 		}
-		if rec := authedGet(mux, "GET", "/api/v1/widgets/hello", nil); rec.Code != http.StatusOK {
+		if rec := authedGet(mux, "GET", "/api/v1/widgets/hello", token, nil); rec.Code != http.StatusOK {
 			t.Fatalf("get status = %d", rec.Code)
 		}
 	}
@@ -272,7 +327,7 @@ func TestInvalidDirsNoRescan(t *testing.T) {
 	var list struct {
 		Widgets []widgetEnvelope `json:"widgets"`
 	}
-	rec := authedGet(mux, "GET", "/api/v1/widgets", nil)
+	rec := authedGet(mux, "GET", "/api/v1/widgets", token, nil)
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Widgets) != 1 {
 		t.Fatalf("invalid widgets must be skipped, got %s", rec.Body.String())
 	}
@@ -282,7 +337,7 @@ func TestInvalidDirsNoRescan(t *testing.T) {
 	writeWidget(t, dir, "broken",
 		"id = \"broken\"\ntype = \"text\"\ntitle = \"Fixed\"\n",
 		"fixed body\n", "")
-	rec = authedGet(mux, "GET", "/api/v1/widgets", nil)
+	rec = authedGet(mux, "GET", "/api/v1/widgets", token, nil)
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Widgets) != 2 {
 		t.Fatalf("repaired widget not picked up: %s", rec.Body.String())
 	}
@@ -291,28 +346,34 @@ func TestInvalidDirsNoRescan(t *testing.T) {
 	}
 }
 
-// TestSecretTripleEquality covers the P5 strictness reconciliation: unknown
-// envelope fields rejected, secret_ref == kid enforced at load, kid ==
-// device filtering at serve (stub device is "stub-device").
+// TestSecretTripleEquality covers the P10 strictness: unknown plaintext
+// fields rejected, secret_ref required at load, secret_ref == device
+// filtering at serve (real device auth).
 func TestSecretTripleEquality(t *testing.T) {
-	const goodPayload = `{"alg":"AES-256-GCM","kid":"stub-device","nonce":"Ag==","ciphertext":"AA=="}`
-	const otherPayload = `{"alg":"AES-256-GCM","kid":"dev-123","nonce":"Ag==","ciphertext":"AA=="}`
+	db, ownerID, ownerToken, _ := setupWidgetDeviceDB(t)
+	_, otherToken, _, err := func() (string, string, string, error) {
+		id, tok, _, err := EnrollDevice(db, "Other Phone", "fcm-other-widget-test")
+		return id, tok, "", err
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	writeWidget(t, dir, "vault",
-		"id = \"vault\"\ntype = \"secret\"\ntitle = \"Vault\"\nsecret_ref = \"stub-device\"\n",
-		"", goodPayload)
+		"id = \"vault\"\ntype = \"secret\"\ntitle = \"Vault\"\nsecret_ref = \""+ownerID+"\"\n",
+		"", `{"secret": "vault-value"}`)
 	writeWidget(t, dir, "other",
-		"id = \"other\"\ntype = \"secret\"\ntitle = \"Other\"\nsecret_ref = \"dev-123\"\n",
-		"", otherPayload) // loads, but filtered for the stub device
-	writeWidget(t, dir, "mismatch",
-		"id = \"mismatch\"\ntype = \"secret\"\ntitle = \"Mismatch\"\nsecret_ref = \"dev-123\"\n",
-		"", goodPayload) // secret_ref != kid → skipped
+		"id = \"other\"\ntype = \"secret\"\ntitle = \"Other\"\nsecret_ref = \"dev-foreign-123\"\n",
+		"", `{"secret": "other-value"}`) // loads, but filtered for the owner
 	writeWidget(t, dir, "future",
-		"id = \"future\"\ntype = \"secret\"\ntitle = \"Future\"\nsecret_ref = \"stub-device\"\n",
-		"", `{"alg":"AES-256-GCM","kid":"stub-device","nonce":"Ag==","ciphertext":"AA==","v2only":1}`) // unknown field → skipped
+		"id = \"future\"\ntype = \"secret\"\ntitle = \"Future\"\nsecret_ref = \""+ownerID+"\"\n",
+		"", `{"secret": "x", "v2only": 1}`) // unknown field → skipped
 	writeWidget(t, dir, "noref",
 		"id = \"noref\"\ntype = \"secret\"\ntitle = \"NoRef\"\n",
-		"", goodPayload) // missing secret_ref → skipped
+		"", `{"secret": "x"}`) // missing secret_ref → skipped
+	writeWidget(t, dir, "envelope",
+		"id = \"envelope\"\ntype = \"secret\"\ntitle = \"Envelope\"\nsecret_ref = \""+ownerID+"\"\n",
+		"", `{"alg":"AES-256-GCM","kid":"`+ownerID+`","nonce":"Ag==","ciphertext":"AA=="}`) // old envelope shape → skipped
 
 	reg := NewWidgetRegistry(dir)
 	if err := reg.Load(); err != nil {
@@ -323,34 +384,59 @@ func TestSecretTripleEquality(t *testing.T) {
 	var list struct {
 		Widgets []widgetEnvelope `json:"widgets"`
 	}
-	rec := authedGet(mux, "GET", "/api/v1/widgets", nil)
+	rec := authedGet(mux, "GET", "/api/v1/widgets", ownerToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d (%s)", rec.Code, rec.Body.String())
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("list decode: %v", err)
 	}
 	if len(list.Widgets) != 1 || list.Widgets[0].ID != "vault" {
 		t.Fatalf("want only [vault], got %s", rec.Body.String())
 	}
-	if list.Widgets[0].SecretRef != "stub-device" {
+	if list.Widgets[0].SecretRef != ownerID {
 		t.Fatalf("secret must carry secret_ref, got %+v", list.Widgets[0])
 	}
+	// Served payload must be a P5 envelope, never the plaintext.
+	var envPayload map[string]any
+	if err := json.Unmarshal(list.Widgets[0].Payload, &envPayload); err != nil {
+		t.Fatalf("secret payload not JSON: %s", list.Widgets[0].Payload)
+	}
+	for _, k := range []string{"alg", "kid", "nonce", "ciphertext"} {
+		if _, ok := envPayload[k]; !ok {
+			t.Fatalf("secret payload missing %q: %s", k, list.Widgets[0].Payload)
+		}
+	}
+	if envPayload["kid"] != ownerID || envPayload["alg"] != "AES-256-GCM" {
+		t.Fatalf("bad envelope identity: %s", list.Widgets[0].Payload)
+	}
+	if strings.Contains(rec.Body.String(), "vault-value") {
+		t.Fatal("list leaks plaintext")
+	}
 
-	if rec := authedGet(mux, "GET", "/api/v1/widgets/vault", nil); rec.Code != http.StatusOK {
-		t.Fatalf("own secret status = %d, want 200", rec.Code)
+	if rec := authedGet(mux, "GET", "/api/v1/widgets/vault", ownerToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("own secret status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 	// Another device's secret: no existence oracle.
-	if rec := authedGet(mux, "GET", "/api/v1/widgets/other", nil); rec.Code != http.StatusNotFound {
+	if rec := authedGet(mux, "GET", "/api/v1/widgets/other", ownerToken, nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("foreign secret status = %d, want 404", rec.Code)
 	}
-	for _, id := range []string{"mismatch", "future", "noref"} {
-		if rec := authedGet(mux, "GET", "/api/v1/widgets/"+id, nil); rec.Code != http.StatusNotFound {
+	// The other device cannot see the owner's secret either (symmetric).
+	if rec := authedGet(mux, "GET", "/api/v1/widgets/vault", otherToken, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-device secret status = %d, want 404", rec.Code)
+	}
+	for _, id := range []string{"future", "noref", "envelope"} {
+		if rec := authedGet(mux, "GET", "/api/v1/widgets/"+id, ownerToken, nil); rec.Code != http.StatusNotFound {
 			t.Fatalf("invalid secret %s status = %d, want 404", id, rec.Code)
 		}
 	}
+	_ = db
 }
 
 // TestWidgetFileLimits covers the hardening: oversized files and symlinked
 // files fail closed (widget skipped, rest still serve).
 func TestWidgetFileLimits(t *testing.T) {
+	_, _, token, _ := setupWidgetDeviceDB(t)
 	dir := t.TempDir()
 	writeWidget(t, dir, "hello",
 		"id = \"hello\"\ntype = \"text\"\ntitle = \"Hello\"\n",
@@ -377,7 +463,7 @@ func TestWidgetFileLimits(t *testing.T) {
 	var list struct {
 		Widgets []widgetEnvelope `json:"widgets"`
 	}
-	rec := authedGet(mux, "GET", "/api/v1/widgets", nil)
+	rec := authedGet(mux, "GET", "/api/v1/widgets", token, nil)
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("list decode: %v", err)
 	}
