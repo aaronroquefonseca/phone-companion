@@ -166,7 +166,10 @@ func TestHandleNotifyRejects(t *testing.T) {
 
 func openAuthedMux(t *testing.T, db *sql.DB) (*http.ServeMux, *SessionStore) {
 	t.Helper()
-	store := NewSessionStore(db, strings.Repeat("s", 32))
+	store, err := NewSessionStore(db, strings.Repeat("s", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return NewMux(db, notify.NoopSender{}, store, webui.NewCSRFProtection(strings.Repeat("s", 32))), store
 }
 

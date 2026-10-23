@@ -34,8 +34,15 @@ type loginData struct {
 	Username string
 }
 
+// maxLoginFieldLen caps username/password bytes BEFORE bcrypt (see
+// handleLoginPost). Generous for legitimate input, bounded for CPU.
+const maxLoginFieldLen = 256
+
 func (h *handler) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The login page must never be cached: it reflects auth state and its
+	// form targets a credential-bearing endpoint.
+	w.Header().Set("Cache-Control", "no-store")
 	data := loginData{}
 	if h.store.ValidateSession(r) {
 		data.SignedIn = true
@@ -45,12 +52,28 @@ func (h *handler) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleLoginPost(w http.ResponseWriter, r *http.Request) {
+	// Credential-bearing response: never cache, even on failure.
+	w.Header().Set("Cache-Control", "no-store")
+	// Rate-limit BEFORE bcrypt: every attempt burns a bcrypt comparison,
+	// so the bucket must gate entry, not failure.
+	if !allowLogin(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if !h.verify(r.FormValue("username"), r.FormValue("password")) {
+	// Length caps BEFORE bcrypt: bcrypt only hashes the first 72 bytes, so
+	// arbitrarily long inputs buy attacker-controlled CPU for zero signal.
+	// 256 bytes is orders of magnitude above any legitimate username or
+	// password typed into this form.
+	username, password := r.FormValue("username"), r.FormValue("password")
+	if len(username) > maxLoginFieldLen || len(password) > maxLoginFieldLen {
+		http.Error(w, "invalid_request", http.StatusBadRequest)
+		return
+	}
+	if !h.verify(username, password) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = loginPage.Execute(w, loginData{Error: true})
@@ -64,6 +87,16 @@ func (h *handler) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleLogoutPost(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	// Logout is state-changing and the session cookie is sent on top-level
+	// navigations (SameSite=Lax still sends it), so it requires the same
+	// session-bound CSRF token as the other WebUI POST forms. A missing or
+	// wrong token fails closed with 403 — including when the protector is
+	// nil or fail-closed, so logout can never be downgraded to unguarded.
+	if h.csrf == nil || !h.csrf.VerifyRequest(r) {
+		http.Error(w, "csrf_mismatch", http.StatusForbidden)
+		return
+	}
 	h.store.DestroySession(w, r)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }

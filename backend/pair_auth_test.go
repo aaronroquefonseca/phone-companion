@@ -36,7 +36,10 @@ func setupPairingMux(t *testing.T) (*http.ServeMux, *SessionStore, *webui.CSRFPr
 	t.Cleanup(func() { webui.ExternalBaseURL = oldBase })
 	resetEnrollIssueLimiter()
 
-	sessions := NewSessionStore(db, pairTestSecret)
+	sessions, err := NewSessionStore(db, pairTestSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
 	csrf := webui.NewCSRFProtection(pairTestSecret)
 	mux := NewMux(db, notify.NoopSender{}, sessions, csrf)
 
@@ -345,7 +348,10 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 
 	// Cross-session CSRF: token minted for another session is rejected.
 	other := httptest.NewRecorder()
-	sess2 := NewSessionStore(deviceDB, pairTestSecret)
+	sess2, err := NewSessionStore(deviceDB, pairTestSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := sess2.CreateSession(other, httptest.NewRequest("POST", "/login", nil)); err != nil {
 		t.Fatal(err)
 	}

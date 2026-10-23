@@ -137,6 +137,16 @@ htpasswd -bnBC 10 admin 'your-password' | cut -d: -f2
 `SESSION_SECRET`: `openssl rand -hex 32` (min 32 bytes, no `CHANGEME`
 prefix). It signs session cookies AND (domain-separated) CSRF tokens.
 
+## Pairing QR origin (`EXTERNAL_BASE_URL`)
+
+Production must set `EXTERNAL_BASE_URL=https://<public-host>` (bare origin:
+no userinfo, path, query, or fragment). Fail-closed rule: plain `http://`
+to a non-loopback host is rejected at boot — enroll URLs, tokens, and
+device credentials must ride TLS. Loopback `http://` (`localhost`,
+`127/8`, `::1`) stays allowed for dev. LAN testing without TLS is possible
+with the dev-only override `EXTERNAL_BASE_URL_ALLOW_HTTP=1` (never enable
+in production).
+
 ## Notifications (`POST /api/v1/notify`)
 
 Operator-only (see Routes). Caps: 1 MiB body, max 500 explicit

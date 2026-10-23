@@ -165,7 +165,10 @@ func TestE2EDoneCriteria(t *testing.T) {
 	resetEnrollIssueLimiter()
 
 	const sessionSecret = "e2e-done-session-secret-01234567"
-	sessions := NewSessionStore(db, sessionSecret)
+	sessions, err := NewSessionStore(db, sessionSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
 	csrf := webui.NewCSRFProtection(sessionSecret)
 
 	widgetDir := t.TempDir()
@@ -181,7 +184,7 @@ func TestE2EDoneCriteria(t *testing.T) {
 	webui.RegisterRoutes(mux, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",
-	})
+	}, csrf)
 
 	// --- Operator login: the real RequireAdmin gate for everything below.
 	cookie := e2eOperatorLogin(t, mux, "op", "op-pass-e2e-0123456789abcdef")
