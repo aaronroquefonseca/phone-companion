@@ -79,3 +79,27 @@ func TestOpenDBTightensExistingDir(t *testing.T) {
 		t.Fatalf("db mode = %04o, want 0600", got)
 	}
 }
+
+// A symlinked parent dir must fail closed instead of managing through the
+// link (MkdirAll/Chmod follow symlinks, so they would retarget outside the
+// state dir). Nothing may be created on either side of the link.
+func TestOpenDBRefusesSymlinkedDir(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("seed symlink: %v", err)
+	}
+	if db, err := OpenDB(filepath.Join(link, "tight.db")); err == nil {
+		db.Close()
+		t.Fatal("OpenDB through symlinked dir: want fail-closed error")
+	}
+	for _, p := range []string{filepath.Join(link, "tight.db"), filepath.Join(real, "tight.db")} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("refused open created %q (err=%v)", p, err)
+		}
+	}
+}

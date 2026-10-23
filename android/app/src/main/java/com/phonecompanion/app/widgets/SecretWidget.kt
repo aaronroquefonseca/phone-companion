@@ -2,7 +2,6 @@ package com.phonecompanion.app.widgets
 
 import android.content.Context
 import androidx.glance.GlanceId
-import androidx.glance.appwidget.AppWidgetId
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.provideContent
@@ -69,22 +68,6 @@ class SecretWidget : GlanceAppWidget() {
         internal const val MASKED = "•••••• needs refresh"
     }
 }
-
-/**
- * Derives the cache key for one Glance instance. App-widget instances
- * expose their numeric id; anything else falls back to the id string.
- */
-internal fun glanceKey(id: GlanceId): String =
-    (id as? AppWidgetId)?.appWidgetId?.toString() ?: id.toString()
-
-/**
- * Per-instance row selection: exact id match wins, otherwise the first
- * cached secret (single-widget fallback). Null when the cache is empty.
- */
-internal fun selectRowForGlance(
-    rows: List<WidgetCacheEntity>,
-    key: String,
-): WidgetCacheEntity? = rows.find { it.id == key } ?: rows.firstOrNull()
 
 /**
  * Fail-closed secret resolution for one selected row. Returns null for

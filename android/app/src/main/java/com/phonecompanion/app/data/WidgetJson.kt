@@ -3,6 +3,7 @@ package com.phonecompanion.app.data
 import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
+import kotlinx.coroutines.CancellationException
 
 /**
  * Shared Moshi JSON adapter for widget payload maps (P7).
@@ -11,7 +12,8 @@ import com.squareup.moshi.Types
  * path ([com.phonecompanion.app.work.WidgetPoller]) and the parse path
  * ([WidgetPayloadParser]): one Moshi instance, one adapter, no behavior
  * change. Payloads stay length-bounded at the parser; this helper only
- * serializes/deserializes the raw envelope map.
+ * serializes/deserializes the raw envelope map. Cancellation is always
+ * rethrown, never converted to a fallback.
  */
 object WidgetJson {
     val moshi: Moshi by lazy { Moshi.Builder().build() }
@@ -22,14 +24,14 @@ object WidgetJson {
         )
     }
 
-    /** Serializes a widgets-poll payload map for the cache. Never null. */
+    /**
+     * Serializes a widgets-poll payload map for the cache. Throws on
+     * serialization failure (never stores a fallback): the poll path keeps
+     * the last cache on error instead of clobbering it with "{}".
+     */
     fun toJson(payload: Map<String, Any?>?): String {
         if (payload == null) return "{}"
-        return try {
-            mapAdapter.toJson(payload) ?: "{}"
-        } catch (_: Exception) {
-            "{}"
-        }
+        return mapAdapter.toJson(payload) ?: "{}"
     }
 
     /** Raw payload object, or null when [payloadJson] is blank/malformed. */
@@ -37,6 +39,8 @@ object WidgetJson {
         if (payloadJson.isBlank()) return null
         return try {
             mapAdapter.fromJson(payloadJson)
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             null
         }

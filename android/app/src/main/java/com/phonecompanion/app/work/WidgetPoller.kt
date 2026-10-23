@@ -35,7 +35,11 @@ import kotlinx.coroutines.supervisorScope
  */
 object WidgetPoller {
 
-    /** Serializes a widgets-poll payload map for the cache. Never null. */
+    /**
+     * Serializes a widgets-poll payload map for the cache. Throws on
+     * serialization failure so [pollOnce] keeps the last cache instead of
+     * upserting a fallback.
+     */
     internal fun payloadToJson(payload: Map<String, Any?>?): String = WidgetJson.toJson(payload)
 
     suspend fun refresh(context: Context) {
