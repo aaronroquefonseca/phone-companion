@@ -1,14 +1,22 @@
 package com.phonecompanion.app.data
 
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 
 /**
- * Runs `POST /api/v1/enroll` and persists the issued credentials to
- * [SecureStorage]. Maps HTTP/transport failures to a closed set of results
- * so [com.phonecompanion.app.ui.PairActivity] can show precise error states.
+ * Runs `POST /api/v1/enroll` and persists the issued credentials to an
+ * [EnrollmentStore] (production: [SecureStorage]). Maps HTTP/transport
+ * failures to a closed set of results so
+ * [com.phonecompanion.app.ui.PairActivity] can show precise error states.
  * Call from a background dispatcher; Retrofit suspending calls do the I/O.
+ *
+ * A failed persist (`saveEnrollment` returns false) is reported as
+ * [Result.Unexpected] `"persist-failed"` — never as success.
  */
-class EnrollRepository(private val storage: SecureStorage) {
+class EnrollRepository(
+    private val storage: EnrollmentStore,
+    private val serviceFactory: (String) -> ApiService = { baseUrl -> ApiClient.create(baseUrl) },
+) {
 
     sealed interface Result {
         data class Success(val deviceId: String) : Result
@@ -41,7 +49,7 @@ class EnrollRepository(private val storage: SecureStorage) {
         // inside the try: Retrofit validates the URL eagerly and throws
         // IllegalArgumentException for malformed input (e.g. bare "https://").
         return try {
-            val service = ApiClient.create(baseUrl)
+            val service = serviceFactory(baseUrl)
             val response = service.enroll(
                 EnrollRequest(
                     enrollToken = enrollToken.trim(),
@@ -55,7 +63,13 @@ class EnrollRepository(private val storage: SecureStorage) {
                 if (body.deviceId.isBlank() || body.deviceToken.isBlank() || body.deviceKey.isBlank()) {
                     return Result.ServerError(response.code(), "empty-credentials")
                 }
-                storage.saveEnrollment(baseUrl, body.deviceId, body.deviceToken, body.deviceKey)
+                val persisted = storage.saveEnrollment(
+                    baseUrl,
+                    body.deviceId,
+                    body.deviceToken,
+                    body.deviceKey,
+                )
+                if (!persisted) return Result.Unexpected("persist-failed")
                 Result.Success(body.deviceId)
             } else {
                 val code = ApiClient.parseErrorCode(
@@ -67,6 +81,8 @@ class EnrollRepository(private val storage: SecureStorage) {
                     else -> Result.ServerError(response.code(), code)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: IllegalArgumentException) {
             Result.InvalidUrl(e.message ?: "Invalid server URL")
         } catch (e: IOException) {
