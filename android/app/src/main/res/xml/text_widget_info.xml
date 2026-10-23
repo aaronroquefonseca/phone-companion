@@ -1,19 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Text widget: wide card for a title + body. Tap opens the app (tap router:
-     Widgets screen when paired, Pair when unpaired). A per-instance
-     configuration activity (picking a specific row per widget) is out of
-     scope at v1 — each slot shows the cached row matching its position among
-     the bound widgets of its type. -->
+<!-- Text widget: wide card for a title + body. Tap opens the app (bound:
+      tap router → Widgets screen when paired, Pair when unpaired;
+      unassociated: the configuration activity to pick a row). Placing the
+      widget opens the configuration (android:configure): pick a cached
+      text row or leave it unassociated, then tap the widget to change it.
+      Clearing the pick (or a server-removed row) shows "Not associated". -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-    android:minWidth="180dp"
-    android:minHeight="110dp"
-    android:minResizeWidth="110dp"
+    android:minWidth="40dp"
+    android:minHeight="40dp"
+    android:minResizeWidth="40dp"
     android:minResizeHeight="40dp"
     android:targetCellWidth="3"
     android:targetCellHeight="2"
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen"
-    android:previewLayout="@layout/preview_text_widget"
+    android:configure="com.phonecompanion.app.ui.WidgetConfigActivity"
     android:label="@string/widget_text_label"
     android:description="@string/widget_text_desc" />
 <!-- updatePeriodMillis=0: the app drives refresh via WorkManager. -->

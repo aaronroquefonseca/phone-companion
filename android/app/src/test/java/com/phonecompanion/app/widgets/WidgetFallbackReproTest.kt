@@ -7,6 +7,7 @@ import com.phonecompanion.app.data.WidgetPayloadParser
 import com.phonecompanion.app.ui.WidgetListUi
 import com.phonecompanion.app.work.WidgetPoller
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -142,15 +143,24 @@ class WidgetFallbackReproTest {
     }
 
     /**
-     * Populated + matching + well-formed cache must never fall back, per
-     * type. Pins the fixed point: resolution finds the row and the parse
-     * yields content.
+     * Populated + matching + well-formed cache never renders the fallback,
+     * per type. Pins the fixed point: resolution finds the row and the
+     * parse yields content. Unbound (null) and stale pins select nothing —
+     * the model layer (see WidgetContentTest) renders "Not associated".
      */
     @Test
     fun `matching text row with valid payload yields content`() {
         val rows = listOf(cacheRow())
-        val row = WidgetBindingResolver.resolve(rows, null)!!
+        val row = WidgetBindingResolver.resolve(rows, "hello")!!
         assertEquals("hi", WidgetPayloadParser.parseTextBody(row.payloadJson))
+    }
+
+    @Test
+    fun `unbound and stale text pins select nothing`() {
+        val rows = listOf(cacheRow())
+        assertNull(WidgetBindingResolver.resolve(rows, null))
+        assertNull(WidgetBindingResolver.resolve(rows, "ghost"))
+        assertEquals("was-ghost", WidgetBindingResolver.staleHint(rows, "ghost"))
     }
 
     @Test
@@ -180,7 +190,7 @@ class WidgetFallbackReproTest {
                 payloadJson = """{"state":"ok","detail":"All systems go"}""",
             ),
         )
-        val row = WidgetBindingResolver.resolve(rows, null)!!
+        val row = WidgetBindingResolver.resolve(rows, "state")!!
         assertEquals(
             WidgetPayloadParser.Status("ok", "All systems go"),
             WidgetPayloadParser.parseStatus(row.payloadJson),
