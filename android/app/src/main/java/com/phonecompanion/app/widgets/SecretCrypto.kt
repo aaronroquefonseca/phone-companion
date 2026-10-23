@@ -164,7 +164,7 @@ object SecretCrypto {
             val keySpec = SecretKeySpec(keyBytes, "AES")
             val gcmSpec = GCMParameterSpec(GCM_TAG_BITS, nonce)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-            cipher.updateAAD(buildAad(kid, widgetId))
+            cipher.updateAAD(buildAad(kid, binding))
             val plainBytes = runCipherOrNull { cipher.doFinal(sealed) }
                 ?: return null
             return strictUtf8(plainBytes) ?: return null
