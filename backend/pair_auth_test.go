@@ -86,7 +86,7 @@ func doReq(t *testing.T, mux http.Handler, method, target, body, contentType str
 // (X-Requested-With: XMLHttpRequest). All legitimate enroll-tokens
 // callers in tests use this; the missing-header 403 path is pinned by
 // constructing a header-less request via doReq directly.
-func doOperatorWriteReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+func doOperatorWriteReq(t *testing.T, mux http.Handler, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader
 	if body == "" {
