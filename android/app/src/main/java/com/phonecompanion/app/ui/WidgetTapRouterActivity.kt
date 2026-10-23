@@ -14,12 +14,12 @@ import com.phonecompanion.app.data.SecureStorage
  * finishes without rendering anything.
  *
  * Position-binding note (user-visible in MainActivity's About explainer):
- * each widget slot shows the cached row matching its position among the
- * bound widgets of its type (see
- * [com.phonecompanion.app.widgets.WidgetInstancePicker]) — add a second
- * text widget and it shows the second text row. A per-instance
- * configuration activity (picking a specific row per widget) is out of
- * scope at v1.
+ * each home-screen instance shows the cached row pinned for it in the
+ * Widgets screen (see
+ * [com.phonecompanion.app.widgets.WidgetBindingResolver]) — add a second
+ * text widget and pin a different text row to it. Unpinned instances show
+ * the first row of their type. A per-instance configuration activity
+ * (picking UI outside the Widgets screen) is out of scope at v1.
  */
 class WidgetTapRouterActivity : AppCompatActivity() {
 

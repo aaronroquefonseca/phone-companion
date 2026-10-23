@@ -78,4 +78,96 @@ class WidgetListUiTest {
         assertTrue(WidgetListUi.emptyStateText(authStatus()).contains("auth-failed-attempt-1-of-2"))
         assertTrue(WidgetListUi.emptyStateText(null).contains("never-polled"))
     }
+
+    private fun payloadEntity(
+        type: String,
+        payloadJson: String,
+        id: String = "w1",
+    ) = WidgetCacheEntity(
+        id = id,
+        type = type,
+        title = "T",
+        updatedAt = "2026-01-01T00:00:00Z",
+        payloadJson = payloadJson,
+    )
+
+    @Test
+    fun `healthy rows of every type read ok`() {
+        assertEquals(
+            WidgetListUi.HEALTH_OK,
+            WidgetListUi.payloadHealth(payloadEntity("text", """{"body":"hi"}""")),
+        )
+        assertEquals(
+            WidgetListUi.HEALTH_OK,
+            WidgetListUi.payloadHealth(payloadEntity("list", """{"items":[]}""")),
+        )
+        assertEquals(
+            WidgetListUi.HEALTH_OK,
+            WidgetListUi.payloadHealth(payloadEntity("status", """{"state":"ok","detail":"d"}""")),
+        )
+        assertEquals(
+            WidgetListUi.HEALTH_ENCRYPTED_SHAPE,
+            WidgetListUi.payloadHealth(
+                payloadEntity(
+                    "secret",
+                    """{"alg":"AES-256-GCM","kid":"k","nonce":"n","ciphertext":"c"}""",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `unparseable payloads read unparseable, unknown types read unknown`() {
+        assertEquals(
+            WidgetListUi.HEALTH_UNPARSEABLE,
+            WidgetListUi.payloadHealth(payloadEntity("text", "{}")),
+        )
+        assertEquals(
+            WidgetListUi.HEALTH_UNPARSEABLE,
+            WidgetListUi.payloadHealth(payloadEntity("status", "{}")),
+        )
+        assertEquals(
+            WidgetListUi.HEALTH_UNPARSEABLE,
+            WidgetListUi.payloadHealth(payloadEntity("secret", "{}")),
+        )
+        assertEquals(
+            WidgetListUi.HEALTH_UNKNOWN_TYPE,
+            WidgetListUi.payloadHealth(payloadEntity("teleport", """{"beam":"up"}""")),
+        )
+    }
+
+    @Test
+    fun `row texts carry the health marker`() {
+        val rows = WidgetListUi.rowTexts(
+            listOf(
+                payloadEntity("text", """{"body":"hi"}""", id = "a"),
+                payloadEntity("teleport", """{"beam":"up"}""", id = "b"),
+            ),
+        )
+        assertTrue(rows[0].contains(WidgetListUi.HEALTH_OK))
+        assertTrue(rows[1].contains(WidgetListUi.HEALTH_UNKNOWN_TYPE))
+    }
+
+    @Test
+    fun `instance line shows default pinned stale and empty states`() {
+        val rows = listOf(
+            payloadEntity("text", """{"body":"hi"}""", id = "a").copy(title = "Hello"),
+            payloadEntity("text", """{"body":"yo"}""", id = "b").copy(title = "World"),
+        )
+        val default = WidgetListUi.instanceLine("k1", rows, null, null)
+        assertTrue(default.contains("k1"))
+        assertTrue(default.contains("Default"))
+        assertTrue(default.contains("Hello"))
+
+        val pinned = WidgetListUi.instanceLine("k1", rows, "b", null)
+        assertTrue(pinned.contains("Pinned"))
+        assertTrue(pinned.contains("World"))
+
+        val stale = WidgetListUi.instanceLine("k1", rows, "gone", "was-gone")
+        assertTrue(stale.contains("was-gone"))
+        assertTrue(stale.contains("Hello"))
+
+        val empty = WidgetListUi.instanceLine("k1", emptyList(), null, null)
+        assertTrue(empty.contains("no cached rows"))
+    }
 }

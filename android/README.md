@@ -17,7 +17,9 @@ notifications. Contract: `docs/api-contract.md`.
   `BigTextStyle`).
 - `widgets/` — one Glance implementation per type (`TextWidget`,
   `ListWidget`, `StatusWidget`, `SecretWidget` + `SecretCrypto`
-  for per-device decrypt), never fully-generic.
+  for per-device decrypt), never fully-generic. Per-instance row
+  selection via `WidgetBindingResolver` + the `widget_binding` table
+  (pinned in the Widgets screen).
 - `work/` — `RefreshWorker` (hourly `WorkManager` poll: needs network +
   battery-not-low; screen-off returns retry, no exact alarms),
   `WidgetPoller` (shared fetch plumbing).
@@ -109,6 +111,25 @@ Backend side: `FCM_PROJECT_ID` + service-account JSON at
   fails (wrong key after re-pair, corrupt payload) — never plaintext,
   never a crash; the next poll after a re-pair fetches a freshly
   encrypted envelope.
+
+## Per-instance widget selection
+
+Each home-screen widget shows the cached row pinned for it in the
+Widgets screen: tap the instance entry and pick a row (or leave it on
+Default for the first row of its type). Two instances of the same type
+may pin the same row.
+
+Where it is stored: the Room `widget_binding` table in the app database
+(`phone-companion.db`) maps one home-screen instance — provider class +
+Glance key — to one cached widget id (`widgetId` NULL = default). There
+is no foreign key to the widget cache on purpose.
+
+Gone-widget behavior: when the pinned widget disappears from the server,
+the instance falls back to the first row of its type (never a stale
+render) and the Widgets screen shows a `was-<old id>` hint on that
+instance so you can re-point it. Bindings for home-screen widgets you
+remove are pruned on the next widget push. Widget picker previews stay
+static (`res/layout/preview_*_widget.xml`) and never read the database.
 
 ## F-Droid compatibility notes
 

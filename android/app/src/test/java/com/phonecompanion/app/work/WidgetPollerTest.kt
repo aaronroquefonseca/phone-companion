@@ -4,6 +4,7 @@ import com.phonecompanion.app.data.WidgetEnvelope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -72,8 +73,51 @@ class WidgetPollerTest {
     }
 
     @Test
-    fun `null payload serializes to empty object`() {
-        assertEquals("{}", WidgetPoller.payloadToJson(null))
+    fun `batch split drops every null payload and keeps an empty cache write`() {
+        val allNull = WidgetPoller.toCacheEntities(
+            listOf(
+                WidgetEnvelope(
+                    id = "ghost",
+                    type = "text",
+                    title = "Ghost",
+                    updatedAt = "now",
+                    payload = null,
+                ),
+            ),
+        )
+        assertEquals(1, allNull.dropped)
+        assertTrue(allNull.kept.isEmpty())
+
+        val empty = WidgetPoller.toCacheEntities(emptyList())
+        assertEquals(0, empty.dropped)
+        assertTrue(empty.kept.isEmpty())
+    }
+
+    @Test
+    fun `batch split keeps every valid envelope with zero drops`() {
+        val batch = WidgetPoller.toCacheEntities(
+            listOf(
+                WidgetEnvelope(
+                    id = "w1",
+                    type = "text",
+                    title = "Hello",
+                    updatedAt = "now",
+                    payload = mapOf("body" to "hi"),
+                ),
+            ),
+        )
+        assertEquals(0, batch.dropped)
+        assertEquals(listOf("w1"), batch.kept.map { it.id })
+    }
+
+    @Test
+    fun `null payload refuses to serialize instead of storing a fallback`() {
+        try {
+            WidgetPoller.payloadToJson(null)
+            fail("null payload must throw, not cache \"{}\"")
+        } catch (e: IllegalArgumentException) {
+            // Expected: fail fast instead of poisoning the cache.
+        }
         assertEquals("{}", WidgetPoller.payloadToJson(emptyMap()))
     }
 }

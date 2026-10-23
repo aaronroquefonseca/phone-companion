@@ -1,6 +1,7 @@
 package com.phonecompanion.app.widgets
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.ui.unit.dp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
@@ -23,7 +24,7 @@ import com.phonecompanion.app.ui.WidgetTapRouterActivity
 /**
  * List widget: title + one row per item with a done marker.
  * Distinct rendering: rows of "[x]/[ ] label" — no other type renders rows.
- * Content is per instance (see [WidgetInstancePicker]); rows come from the
+ * Content is per instance (see [WidgetBindingResolver]); rows come from the
  * parsed `items` payload, capped and bounded by [WidgetPayloadParser].
  *
  * Only the first [WidgetFallbackCopy.LIST_MAX_SHOWN] items render; the rest
@@ -66,19 +67,29 @@ class ListWidget : GlanceAppWidget() {
         reason: WidgetFallbackCopy.Reason,
     ): Pair<String, List<WidgetPayloadParser.ListItem>> =
         loadOrFallback(fallbackFor(reason)) {
-            val rows = DatabaseHolder.get(context).widgetCacheDao().getByType("list")
-            val row = WidgetInstancePicker.pick(
-                rows,
-                WidgetInstancePicker.boundIndex(context, ListWidget::class.java, id),
-            ) ?: return@loadOrFallback fallbackFor(reason)
+            val db = DatabaseHolder.get(context)
+            val rows = db.widgetCacheDao().getByType("list")
+            val widgetId = loadBindingWidgetId {
+                db.widgetBindingDao().get(PROVIDER, glanceKey(id))?.widgetId
+            }
+            val row = WidgetBindingResolver.resolve(rows, widgetId)
+                ?: return@loadOrFallback fallbackFor(reason).also {
+                    Log.d(TAG, "list widget fallback rows=0")
+                }
             val items = WidgetPayloadParser.parseListItems(row.payloadJson)
-                ?: return@loadOrFallback fallbackFor(reason)
+                ?: return@loadOrFallback fallbackFor(reason).also {
+                    Log.d(TAG, "list widget fallback rows=${rows.size} payloadBytes=${row.payloadJson.toByteArray(Charsets.UTF_8).size}")
+                }
             WidgetPayloadParser.sanitizeTitle(row.title) to items
         }
 
     companion object {
+        private const val TAG = "ListWidget"
         private const val TITLE_MAX_CHARS = 80
         private const val LABEL_MAX_CHARS = 60
+
+        /** Stable provider key for the `widget_binding` table. */
+        val PROVIDER: String = ListWidget::class.java.name
 
         fun fallbackFor(
             reason: WidgetFallbackCopy.Reason,

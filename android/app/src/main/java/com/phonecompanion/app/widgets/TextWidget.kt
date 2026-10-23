@@ -1,6 +1,7 @@
 package com.phonecompanion.app.widgets
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.ui.unit.dp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
@@ -21,7 +22,7 @@ import com.phonecompanion.app.ui.WidgetTapRouterActivity
 /**
  * Text widget: title + markdown/plain body.
  * Distinct rendering: two-line column (title over body), no masking.
- * Content is per instance (see [WidgetInstancePicker]) and only parsed
+ * Content is per instance (see [WidgetBindingResolver]) and only parsed
  * payload fields are rendered — never the raw envelope JSON.
  *
  * Tapping the widget opens the app ([WidgetTapRouterActivity] routes to the
@@ -51,19 +52,31 @@ class TextWidget : GlanceAppWidget() {
         id: GlanceId,
         reason: WidgetFallbackCopy.Reason,
     ): Pair<String, String> = loadOrFallback(fallbackFor(reason)) {
-        val rows = DatabaseHolder.get(context).widgetCacheDao().getByType("text")
-        val row = WidgetInstancePicker.pick(
-            rows,
-            WidgetInstancePicker.boundIndex(context, TextWidget::class.java, id),
-        ) ?: return@loadOrFallback fallbackFor(reason)
+        val db = DatabaseHolder.get(context)
+        val rows = db.widgetCacheDao().getByType("text")
+        val widgetId = loadBindingWidgetId {
+            db.widgetBindingDao().get(PROVIDER, glanceKey(id))?.widgetId
+        }
+        val row = WidgetBindingResolver.resolve(rows, widgetId)
+            ?: return@loadOrFallback fallbackFor(reason).also {
+                Log.d(TAG, "text widget fallback rows=0")
+            }
         val body = WidgetPayloadParser.parseTextBody(row.payloadJson)
-            ?: return@loadOrFallback fallbackFor(reason)
+            ?: return@loadOrFallback fallbackFor(reason).also {
+                // Shape only (counts/bytes, never titles/bodies): names the
+                // poison-row state that used to present as a render bug.
+                Log.d(TAG, "text widget fallback rows=${rows.size} payloadBytes=${row.payloadJson.toByteArray(Charsets.UTF_8).size}")
+            }
         WidgetPayloadParser.sanitizeTitle(row.title) to body
     }
 
     companion object {
+        private const val TAG = "TextWidget"
         private const val TITLE_MAX_CHARS = 80
         private const val BODY_MAX_CHARS = 240
+
+        /** Stable provider key for the `widget_binding` table. */
+        val PROVIDER: String = TextWidget::class.java.name
 
         fun fallbackFor(reason: WidgetFallbackCopy.Reason): Pair<String, String> =
             WidgetFallbackCopy.titleFor("Phone Companion", reason) to
