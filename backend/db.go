@@ -48,10 +48,58 @@ func OpenDB(path string) (*sql.DB, error) {
 
 // Migrate applies the minimal schema stub. Future migrations are versioned
 // here; each change must be additive and reviewed.
+//
+// Pairing (P2) additions, all additive/idempotent: created_at + revoked_at +
+// fcm_token columns on devices (revocation index per the TODO above),
+// enroll_tokens table for single-use QR pairing tokens, and a token_hash
+// index for device Bearer auth.
 func Migrate(db *sql.DB) error {
 	// TODO (pairing PR): migration version tracking table.
 	if _, err := db.Exec(schemaDevicesV1); err != nil {
 		return err
 	}
+	for _, col := range []string{"created_at", "revoked_at", "fcm_token"} {
+		if err := ensureDeviceColumn(db, col); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS enroll_tokens (
+		token_hash TEXT PRIMARY KEY,
+		expires_at TEXT NOT NULL,
+		used INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_devices_token_hash ON devices (token_hash)`); err != nil {
+		return err
+	}
 	return migrateSessions(db)
+}
+
+// ensureDeviceColumn adds a nullable TEXT column to devices if missing, so
+// Migrate stays idempotent across P0 databases and re-runs.
+func ensureDeviceColumn(db *sql.DB, col string) error {
+	rows, err := db.Query(`PRAGMA table_info(devices)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var cid int
+	var name, ctype string
+	var notnull, pk int
+	var dflt sql.NullString
+	for rows.Next() {
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE devices ADD COLUMN ` + col + ` TEXT`)
+	return err
 }

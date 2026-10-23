@@ -26,6 +26,7 @@ func main() {
 	if err := Migrate(db); err != nil {
 		log.Fatalf("migrate database: %v", err)
 	}
+	SetDeviceDB(db)
 
 	mux := NewMux()
 	webui.RegisterRoutes(mux, NewSessionStore(db, cfg.SessionSecret), webui.Credentials{
