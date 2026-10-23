@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -77,6 +78,33 @@ func doReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType s
 	return w
 }
 
+// doOperatorWriteReq is doReq plus the explicit non-browser marker
+// required on state-changing operator API POSTs
+// (X-Requested-With: XMLHttpRequest). All legitimate enroll-tokens
+// callers in tests use this; the missing-header 403 path is pinned by
+// constructing a header-less request via doReq directly.
+func doOperatorWriteReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *strings.Reader
+	if body == "" {
+		reader = strings.NewReader("")
+	} else {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, reader)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
 func TestPairingUnauthenticatedGating(t *testing.T) {
 	mux, _, _, _ := setupPairingMux(t)
 
@@ -122,7 +150,7 @@ func TestPairingEnrollTokenOnlyNoSession(t *testing.T) {
 	mux, _, _, cookie := setupPairingMux(t)
 
 	// Issue a token WITH the session (operator-only).
-	w := doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	w := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("issue token: got %d (%s), want 201", w.Code, w.Body.String())
 	}
@@ -180,7 +208,7 @@ func TestPairingDevicesListRevokeHappyPath(t *testing.T) {
 	mux, _, _, cookie := setupPairingMux(t)
 
 	// Pair one device via token flow.
-	w := doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	w := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	var issued map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &issued); err != nil {
 		t.Fatal(err)
@@ -253,7 +281,7 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 	csrfToken := extractCSRFToken(t, page)
 
 	// Pair a device to have something to revoke via the form.
-	iw := doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	iw := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	var issued map[string]string
 	if err := json.Unmarshal(iw.Body.Bytes(), &issued); err != nil {
 		t.Fatal(err)
@@ -393,7 +421,7 @@ func TestPairingRateLimitOnTokenIssuance(t *testing.T) {
 	enrollIssueByIP["192.0.2.1"] = full
 	enrollIssueMu.Unlock()
 
-	w := doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	w := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("limited API issue: got %d, want 429", w.Code)
 	}
@@ -401,15 +429,21 @@ func TestPairingRateLimitOnTokenIssuance(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got["error"] != "rate_limited" {
 		t.Fatalf("limited API body: %q", w.Body.String())
 	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("limited API content type %q, want json", ct)
+	}
 
 	w = doReq(t, mux, "GET", "/webui/pair", "", "", cookie)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("limited page issue: got %d, want 429", w.Code)
 	}
+	if body := w.Body.String(); !strings.Contains(body, "rate_limited") {
+		t.Fatalf("limited page body %q, want rate_limited", body)
+	}
 
 	// Window passes → issuance works again.
 	enrollIssueNow = func() time.Time { return now.Add(2 * enrollIssueWindow) }
-	w = doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	w = doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("post-window issue: got %d (%s), want 201", w.Code, w.Body.String())
 	}
@@ -513,5 +547,177 @@ func TestConfigExternalBaseURLValidation(t *testing.T) {
 		if err := c.Validate(); err == nil {
 			t.Errorf("base %q: expected rejection", bad)
 		}
+	}
+}
+
+func TestPairingEnrollTokensRequiresWriteGuard(t *testing.T) {
+	mux, _, csrf, cookie := setupPairingMux(t)
+
+	// Authed but no header and no CSRF token → 403 JSON (fail closed).
+	w := doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("missing write guard: got %d (%s), want 403", w.Code, w.Body.String())
+	}
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got["error"] != "forbidden" {
+		t.Fatalf("missing guard body: %q, want {\"error\":\"forbidden\"}", w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("missing guard content type %q, want json", ct)
+	}
+
+	// Unauthenticated without guard → 401 (auth runs before the guard).
+	w = doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", nil)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth without guard: got %d, want 401", w.Code)
+	}
+
+	// Header path → 201.
+	w = doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("header path: got %d (%s), want 201", w.Code, w.Body.String())
+	}
+
+	// CSRF-token path without the header → 201 (session-bound alternative).
+	csrfReq := httptest.NewRequest("GET", "/", nil)
+	csrfReq.AddCookie(cookie)
+	tok, ok := csrf.TokenForRequest(csrfReq)
+	if !ok || tok == "" {
+		t.Fatal("no CSRF token for session")
+	}
+	formReq := httptest.NewRequest("POST", "/api/v1/enroll-tokens", strings.NewReader(""))
+	formReq.RemoteAddr = "192.0.2.1:1234"
+	formReq.AddCookie(cookie)
+	formReq.Header.Set("X-CSRF-Token", tok)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, formReq)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("csrf-token path: got %d (%s), want 201", rec.Code, rec.Body.String())
+	}
+
+	// Phone enroll (token-only) never requires the write guard: a token
+	// issued above enrolls with neither header nor session.
+	var issued map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &issued); err != nil || issued["enroll_token"] == "" {
+		t.Fatalf("bad issue response: %q err=%v", w.Body.String(), err)
+	}
+	enrollBody := `{"enroll_token":` + jsonQuote(issued["enroll_token"]) + `,"device_name":"Guard Phone","fcm_token":"fcm-guard-1"}`
+	w = doReq(t, mux, "POST", "/api/v1/enroll", enrollBody, "application/json", nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("phone enroll without guard: got %d (%s), want 201", w.Code, w.Body.String())
+	}
+}
+
+func TestEnrollLimiterSprayBounded(t *testing.T) {
+	resetEnrollIssueLimiter()
+	now := time.Now()
+	enrollIssueNow = func() time.Time { return now }
+	t.Cleanup(func() { enrollIssueNow = time.Now })
+
+	// Spray distinct IPs: each first hit must allow (1 << limit).
+	spray := maxEnrollLimiterIPs + 2000
+	for i := 0; i < spray; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xFF, (i>>8)&0xFF, i&0xFF)
+		req := httptest.NewRequest("POST", "/api/v1/enroll-tokens", nil)
+		req.RemoteAddr = ip + ":1234"
+		w := httptest.NewRecorder()
+		if !allowEnrollIssue(w, req) {
+			t.Fatalf("spray ip %s (i=%d): first hit unexpectedly limited", ip, i)
+		}
+	}
+	enrollIssueMu.Lock()
+	size := len(enrollIssueByIP)
+	enrollIssueMu.Unlock()
+	if size > maxEnrollLimiterIPs {
+		t.Fatalf("limiter map size %d, want <= %d after %d-IP spray", size, maxEnrollLimiterIPs, spray)
+	}
+
+	// Still limits: a fresh IP hammers past the window cap.
+	fresh := "192.0.2.99:1234"
+	for i := 0; i < maxEnrollIssuesPerWindow; i++ {
+		req := httptest.NewRequest("POST", "/api/v1/enroll-tokens", nil)
+		req.RemoteAddr = fresh
+		w := httptest.NewRecorder()
+		if !allowEnrollIssue(w, req) {
+			t.Fatalf("fresh IP hit %d: unexpectedly limited", i)
+		}
+	}
+	req := httptest.NewRequest("POST", "/api/v1/enroll-tokens", nil)
+	req.RemoteAddr = fresh
+	w := httptest.NewRecorder()
+	if allowEnrollIssue(w, req) {
+		t.Fatal("fresh IP over cap: unexpectedly allowed")
+	}
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-cap status %d, want 429", w.Code)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got["error"] != "rate_limited" {
+		t.Fatalf("over-cap body %q, want rate_limited JSON", w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("over-cap content type %q, want json", ct)
+	}
+
+	// Empty buckets are reclaimed: after the window passes, a new IP
+	// triggers a sweep and the map shrinks back toward live entries.
+	enrollIssueNow = func() time.Time { return now.Add(2 * enrollIssueWindow) }
+	req = httptest.NewRequest("POST", "/api/v1/enroll-tokens", nil)
+	req.RemoteAddr = "192.0.2.100:1234"
+	w = httptest.NewRecorder()
+	if !allowEnrollIssue(w, req) {
+		t.Fatalf("post-window recovery: unexpectedly limited (%d %s)", w.Code, w.Body.String())
+	}
+	enrollIssueMu.Lock()
+	after := len(enrollIssueByIP)
+	enrollIssueMu.Unlock()
+	if after >= size {
+		t.Fatalf("post-window map size %d, want < pre-sweep %d (empty buckets reclaimed)", after, size)
+	}
+}
+
+func TestPairingQRExternalBaseURLTrailingSlashPin(t *testing.T) {
+	t.Cleanup(func() { webui.ExternalBaseURL = "" })
+	for _, base := range []string{
+		"https://example.com/",
+		"  https://example.com/  ",
+	} {
+		webui.ExternalBaseURL = base
+		req := httptest.NewRequest("GET", "/webui/pair", nil)
+		req.Host = "evil.test"
+		payload, err := webui.EnrollPayloadForRequest(req, "tok123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]string
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatal(err)
+		}
+		// normalizeBaseURL (config) strips trailing slashes; the QR
+		// builder must never emit a doubled slash even when the base was
+		// configured with one. Pin via the production normalizer.
+		want := normalizeBaseURL(base) + "/api/v1/enroll"
+		if got["enroll_url"] != want {
+			t.Fatalf("base %q: enroll_url %q, want %q", base, got["enroll_url"], want)
+		}
+		if strings.Contains(got["enroll_url"], ".com//") {
+			t.Fatalf("base %q: doubled slash in %q", base, got["enroll_url"])
+		}
+	}
+
+	// Single trailing slash via the exact production path: normalized base
+	// yields the canonical enroll URL.
+	webui.ExternalBaseURL = normalizeBaseURL("https://example.com/")
+	req := httptest.NewRequest("GET", "/webui/pair", nil)
+	payload, err := webui.EnrollPayloadForRequest(req, "tok123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["enroll_url"] != "https://example.com/api/v1/enroll" {
+		t.Fatalf("normalized trailing-slash base: %s", payload)
 	}
 }

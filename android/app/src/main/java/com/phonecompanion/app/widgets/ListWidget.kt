@@ -8,21 +8,24 @@ import androidx.glance.appwidget.provideContent
 import androidx.glance.layout.Column
 import androidx.glance.layout.Row
 import androidx.glance.text.Text
-import androidx.room.Room
-import com.phonecompanion.app.data.AppDatabase
+import com.phonecompanion.app.data.DatabaseHolder
+import com.phonecompanion.app.data.WidgetPayloadParser
+import com.phonecompanion.app.data.loadOrFallback
 
 /**
  * List widget: title + one row per item with a done marker.
  * Distinct rendering: rows of "[x]/[ ] label" — no other type renders rows.
+ * Content is per instance (see [WidgetInstancePicker]); rows come from the
+ * parsed `items` payload, capped and bounded by [WidgetPayloadParser].
  */
 class ListWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val (title, rows) = loadList(context)
+        val (title, rows) = loadList(context, id)
         provideContent {
             Column {
                 Text(title)
-                for (row in rows.take(MAX_ROWS)) {
+                for (row in rows) {
                     Row {
                         Text(if (row.done) "[x] " else "[ ] ")
                         Text(row.label)
@@ -35,33 +38,23 @@ class ListWidget : GlanceAppWidget() {
         }
     }
 
-    private data class RowUi(val label: String, val done: Boolean)
-
-    private suspend fun loadList(context: Context): Pair<String, List<RowUi>> {
-        return try {
-            val db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-                .fallbackToDestructiveMigration()
-                .build()
-            try {
-                val row = db.widgetCacheDao().getByType("list").firstOrNull()
-                    ?: return FALLBACK_TITLE to emptyList()
-                // Payload parsing is P6's data-layer shape; until then show
-                // the cached envelope marker as a single row.
-                row.title to listOf(RowUi(row.payloadJson.take(PREVIEW_LEN), false))
-            } finally {
-                db.close()
-            }
-        } catch (e: Exception) {
-            FALLBACK_TITLE to emptyList()
+    private suspend fun loadList(
+        context: Context,
+        id: GlanceId,
+    ): Pair<String, List<WidgetPayloadParser.ListItem>> =
+        loadOrFallback(FALLBACK_TITLE to emptyList<WidgetPayloadParser.ListItem>()) {
+            val rows = DatabaseHolder.get(context).widgetCacheDao().getByType("list")
+            val row = WidgetInstancePicker.pick(
+                rows,
+                WidgetInstancePicker.boundIndex(context, ListWidget::class.java, id),
+            ) ?: return@loadOrFallback FALLBACK_TITLE to emptyList()
+            val items = WidgetPayloadParser.parseListItems(row.payloadJson) ?: emptyList()
+            WidgetPayloadParser.sanitizeTitle(row.title) to items
         }
-    }
 
     companion object {
-        private const val DB_NAME = "phone-companion.db"
         private const val FALLBACK_TITLE = "List"
         private const val EMPTY_HINT = "No items — pull to refresh."
-        private const val MAX_ROWS = 8
-        private const val PREVIEW_LEN = 120
     }
 }
 

@@ -1,12 +1,17 @@
 package com.phonecompanion.app.work
 
 import android.content.Context
-import androidx.room.Room
-import com.phonecompanion.app.data.AppDatabase
+import androidx.glance.appwidget.GlanceAppWidget
+import androidx.glance.appwidget.GlanceAppWidgetManager
+import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.widgets.ListWidget
 import com.phonecompanion.app.widgets.SecretWidget
 import com.phonecompanion.app.widgets.StatusWidget
 import com.phonecompanion.app.widgets.TextWidget
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
 
 /**
  * Shared generic polling plumbing (widgets PR / P7).
@@ -23,57 +28,51 @@ import com.phonecompanion.app.widgets.TextWidget
  */
 object WidgetPoller {
 
-    private const val DB_NAME = "phone-companion.db"
-
     suspend fun refresh(context: Context) {
         // TODO (P6 data/): fetch GET /api/v1/widgets and upsert into
         // widget_cache before fanning out. No hardcoded hosts/users.
-        val db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-            .fallbackToDestructiveMigration()
-            .build()
-        try {
-            // Touch the cache so the DAO + entity wiring is exercised even
-            // before the network fetch lands; keeps standalone builds green.
-            db.widgetCacheDao().getAll()
-        } finally {
-            db.close()
-        }
+        // Touch the cache so the DAO + entity wiring is exercised even
+        // before the network fetch lands; keeps standalone builds green.
+        // The singleton is shared — never closed here.
+        DatabaseHolder.get(context).widgetCacheDao().getAll()
         updateAllWidgets(context)
     }
 
-    /** Push cached state to each per-type widget. No fully-generic renderer. */
-    suspend fun updateAllWidgets(context: Context) {
-        TextWidget().update(context)
-        SecretWidget().update(context)
-        ListWidget().update(context)
-        StatusWidget().update(context)
+    /**
+     * Push cached state to each per-type widget. No fully-generic renderer.
+     *
+     * [supervisorScope] with one child per type: a failing type cannot cancel
+     * its siblings, while parent cancellation still propagates to every child
+     * (no detached jobs, nothing keeps running after the caller is gone).
+     * One try/catch per instance id so a broken instance cannot fail its type
+     * batch. Cancellation is always rethrown.
+     */
+    suspend fun updateAllWidgets(context: Context) = supervisorScope {
+        listOf(
+            async { updateAll(context, TextWidget()) },
+            async { updateAll(context, SecretWidget()) },
+            async { updateAll(context, ListWidget()) },
+            async { updateAll(context, StatusWidget()) },
+        ).awaitAll()
     }
 
-    private suspend fun TextWidget.update(context: Context) {
-        val manager = androidx.glance.appwidget.GlanceAppWidgetManager(context)
-        for (id in manager.getGlanceIds(TextWidget::class.java)) {
-            update(context, id)
+    private suspend inline fun <reified T : GlanceAppWidget> updateAll(context: Context, widget: T) {
+        val manager = GlanceAppWidgetManager(context)
+        val ids = try {
+            manager.getGlanceIds(T::class.java)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
         }
-    }
-
-    private suspend fun SecretWidget.update(context: Context) {
-        val manager = androidx.glance.appwidget.GlanceAppWidgetManager(context)
-        for (id in manager.getGlanceIds(SecretWidget::class.java)) {
-            update(context, id)
-        }
-    }
-
-    private suspend fun ListWidget.update(context: Context) {
-        val manager = androidx.glance.appwidget.GlanceAppWidgetManager(context)
-        for (id in manager.getGlanceIds(ListWidget::class.java)) {
-            update(context, id)
-        }
-    }
-
-    private suspend fun StatusWidget.update(context: Context) {
-        val manager = androidx.glance.appwidget.GlanceAppWidgetManager(context)
-        for (id in manager.getGlanceIds(StatusWidget::class.java)) {
-            update(context, id)
+        for (id in ids) {
+            try {
+                widget.update(context, id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // One broken instance must not fail its siblings.
+            }
         }
     }
 }

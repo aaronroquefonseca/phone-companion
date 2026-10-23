@@ -89,7 +89,6 @@ class SecretCryptoTest {
             "" to kid,
         )
         for ((json, expected) in cases) {
-            val key = if (json == envelope() && expected == kid) wrongKeyB64 else keyB64
             // The wrong-key case uses wrongKeyB64; others use the right key
             // but still fail for their own reason — all must be null.
             val useKey = if (json == envelope() && expected == kid) wrongKeyB64 else keyB64
@@ -97,8 +96,6 @@ class SecretCryptoTest {
                 "expected null for $json",
                 SecretCrypto.decryptSecretEnvelope(json, useKey, expected, widgetId),
             )
-            // Silence unused warning intent: every failure is the same null.
-            check(key.isNotEmpty())
         }
         // Null key / null kid / blank widget all fail closed too.
         assertNull(SecretCrypto.decryptSecretEnvelope(envelope(), null, kid, widgetId))

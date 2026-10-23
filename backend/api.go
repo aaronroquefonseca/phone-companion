@@ -1,8 +1,9 @@
-// Package main — HTTP routes (P0 BASE skeleton + P3 widgets).
+// Package main — HTTP routes (health check + pairing + widgets + notify).
 //
-// Only GET /healthz and the widgets endpoints are implemented. The remaining
-// /api/v1/* routes from docs/api-contract.md are registered as 501 stubs so
-// the URL contract is pinned early; implementations land in later PRs.
+// Implemented: GET /healthz, the pairing/device-registry/WebUI routes (see
+// devices.go / pair_wire.go / webui/), the P3 widgets endpoints, and
+// POST /api/v1/notify (operator-only). Further /api/v1/* routes from
+// docs/api-contract.md land in their own PRs.
 package main
 
 import (
@@ -52,15 +53,4 @@ func NewMuxWithWidgets(reg *WidgetRegistry, sessions webui.SessionStore, csrf *w
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// notImplemented pins an API route before its PR lands.
-func notImplemented(name string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": name + " not implemented (skeleton stub)",
-		})
-	}
 }

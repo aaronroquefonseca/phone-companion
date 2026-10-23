@@ -268,6 +268,11 @@ func loginCookie(t *testing.T, store *SessionStore) *http.Cookie {
 
 func postNotifyMux(mux *http.ServeMux, body string, cookie *http.Cookie, authHeader string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/notify", strings.NewReader(body))
+	// Forward-compatible with the operator API write guard (parallel auth
+	// batch): legitimate operator clients send X-Requested-With. The
+	// current handler ignores it; the hardened handler requires it (or a
+	// session-bound CSRF token).
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
