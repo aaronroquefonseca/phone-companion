@@ -1,0 +1,96 @@
+name: CI
+
+# Fast, cheap PR checks. No emulator anywhere here — Android runs unit tests
+# only (see android/README.md "CI"); emulator coverage is future work.
+#
+# Local repro for every step is echoed into the job log by each step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (gofmt · vet · test · docker build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          echo 'Local repro: cd backend && gofmt -l .   (empty output = clean)'
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo 'gofmt: files above need formatting'
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          echo 'Local repro: cd backend && go vet ./...'
+          go vet ./...
+
+      - name: go test
+        run: |
+          echo 'Local repro: cd backend && go test ./...'
+          go test ./...
+
+      - name: docker build
+        run: |
+          echo 'Local repro (from repo root): docker build -t phone-companion-backend:local ./backend'
+          docker build -t phone-companion-backend:ci "$GITHUB_WORKSPACE/backend"
+
+  android:
+    name: android (assembleDebug · unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Explicit package list: the action's defaults reference the obsolete
+      # `tools` package (sdkmanager exit 1). compileSdk/targetSdk 34 pins
+      # the platform + build-tools versions below.
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools platforms;android-34 build-tools;34.0.0
+
+      - uses: gradle/actions/setup-gradle@6cfc8b8e8bb586cc164bef1c478c1eea3a4d6a19 # v3
+
+      # Unit tests only — no emulator (slow/flaky on free runners).
+      # Instrumented tests under androidTest/ are NOT run here.
+      - name: assembleDebug
+        run: |
+          echo 'Local repro: cd android && ./gradlew assembleDebug   (needs JDK 17 + Android SDK)'
+          ./gradlew assembleDebug --console=plain
+
+      - name: unit tests
+        run: |
+          echo 'Local repro: cd android && ./gradlew testDebugUnitTest   (needs JDK 17 + Android SDK)'
+          ./gradlew testDebugUnitTest --console=plain
