@@ -64,7 +64,9 @@ here; generation and storage land in the pairing PR):
 
 - The server generates a random 256-bit key per device at enroll time and
   returns it once inside the `201` enroll response as `device_key`
-  (base64), delivered only over TLS alongside `device_token`.
+  (base64, RFC 4648 §4 standard alphabet with `=` padding and no line
+  breaks — the same base64 alphabet as the envelope fields below),
+  delivered only over TLS alongside `device_token`.
 - The server stores the key as `secret_key` on the device row; it is never
   logged, never returned by any other endpoint, and never embedded in
   widget payloads or notifications.
@@ -181,8 +183,9 @@ Payload shapes (v1):
 ### Encrypted envelope for `secret` widgets (widgets P5, notify P10)
 
 All secret-bearing fields use AES-256-GCM with a fresh random 96-bit nonce
-per message. The envelope is JSON with base64 (standard alphabet, no
-line breaks) values:
+per message. The envelope is JSON with base64 values. Base64 everywhere in
+this section (and `device_key` above) means RFC 4648 §4: standard alphabet,
+`=` padding, no line breaks:
 
 ```json
 {
@@ -193,20 +196,48 @@ line breaks) values:
 }
 ```
 
+Plaintext byte encoding: the plaintext is the UTF-8 bytes of the secret
+string value itself (unquoted — not JSON-quoted, not base64). The empty
+string (zero-length plaintext) is legal. Decryptors decode the output as
+UTF-8 and fail closed on invalid UTF-8.
+
+Payload placement (`payload` == envelope): for `secret` widgets the widget
+`payload` object IS exactly this envelope (four fields, no others) — it
+does not contain it under a sub-key. The top-level `secret_ref` MUST equal
+`payload.kid` MUST equal the target `device_id`. The app selects its stored
+key by `secret_ref`, then checks `payload.kid` agrees; any mismatch fails
+closed with no decrypt attempt.
+
 Rules:
 
 - `alg` is fixed to `AES-256-GCM` at v1. Unknown `alg` values fail closed
   (no decrypt attempt, "needs refresh" UI, never a crash) so a future
   algorithm can be introduced without breaking old apps.
-- `nonce` MUST be freshly random per encrypted message; reuse across two
-  messages under the same key is a correctness/security bug.
+- `nonce` MUST be freshly random (crypto-strength RNG) per encrypted
+  message: 12 bytes, base64-encoded as one field. Reuse across two messages
+  under the same key is a correctness/security bug.
 - `ciphertext` is the raw AES-GCM output (ciphertext concatenated with the
   16-byte auth tag), base64-encoded as one field.
-- Associated data: `kid` and widget `id` are bound as AES-GCM additional
-  authenticated data where implementations support it, so a ciphertext
-  cannot be transplanted across devices or widgets. Where a platform API
-  makes AAD awkward, implementations MUST still verify `kid`/`id` match
-  before rendering (fail closed on mismatch).
+- Associated data (exact byte construction): `AAD = UTF-8(kid) || 0x00 ||
+  UTF-8(binding)` — the UTF-8 bytes of `kid`, one zero byte, then the UTF-8
+  bytes of the binding. `kid` and `binding` are non-empty and never contain
+  `0x00`. Every implementation (server, app, reference
+  `backend/crypto/`) MUST construct these exact bytes, so cross-platform
+  ciphertexts verify. Where a platform API makes AAD awkward,
+  implementations MUST still verify `kid`/binding match before rendering
+  (fail closed on mismatch).
+- Binding values: for secret widgets, `binding` is the widget `id`, so a
+  ciphertext cannot be transplanted across devices or widgets. For notify
+  fan-out there is no widget `id`: each per-device copy encrypts each
+  secret-bearing field (e.g. `title`, `body`) as its own envelope under
+  that device's key with `binding =
+  "notify/<notification_id>/<field>"` (field = the JSON field name being
+  encrypted), so a ciphertext cannot move across devices, notifications,
+  or fields either. Notification ids and field names are server-issued,
+  non-empty, and contain neither `/` nor `0x00`, so distinct pairs never
+  produce the same binding string. The v1 `POST /api/v1/notify` request shape above stays
+  plaintext; this rule governs the per-device encrypted copies the
+  notifications PR fans out.
 - Key selection and rotation follow "Key bootstrap at enrollment" above:
   decrypt only under the stored key matching `kid`; on mismatch or auth
   failure, fail closed. Re-pair rotates the key; old ciphertexts become

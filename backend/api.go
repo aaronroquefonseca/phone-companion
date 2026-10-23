@@ -22,8 +22,9 @@ func NewMuxWithWidgets(reg *WidgetRegistry) *http.ServeMux {
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
 
-	// TODO (pairing PR): POST /api/v1/enroll
-	mux.HandleFunc("POST /api/v1/enroll", notImplemented("enroll"))
+	// Pairing (P2): enroll + device registry + revocation + WebUI.
+	// See devices.go / pair_wire.go / webui/.
+	RegisterPairingRoutes(mux)
 	// P3 widgets: poll endpoint (device Bearer auth) + single-widget fetch
 	// (additive v1 extension; envelope per docs/api-contract.md).
 	mux.HandleFunc("GET /api/v1/widgets", reg.handleWidgetsList)

@@ -2,7 +2,11 @@ module github.com/aaronroquefonseca/phone-companion/backend
 
 go 1.26.0
 
-require modernc.org/sqlite v1.61.0
+require (
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/crypto v0.58.0
+	modernc.org/sqlite v1.61.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect

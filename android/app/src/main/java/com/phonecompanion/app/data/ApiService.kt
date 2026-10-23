@@ -1,21 +1,34 @@
 package com.phonecompanion.app.data
 
+import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 
 /**
- * Backend API surface stub. Shapes follow docs/api-contract.md.
- * TODO (pairing/widgets/notifications PRs): wire base URL, auth headers,
- * models, and error mapping.
+ * Backend API surface per docs/api-contract.md v1.
+ *
+ * The app authenticates with the per-device Bearer token issued at enroll
+ * (see [ApiClient]); the `POST /api/v1/notify` fan-out endpoint is
+ * intentionally absent here — it takes the operator WebUI session, never a
+ * device token, so the app has no business calling it.
  */
 interface ApiService {
 
-    // TODO (widgets PR): response models for the widget envelope.
-    @GET("api/v1/widgets")
-    suspend fun getWidgets(): String
-
-    // TODO (pairing PR): enroll request/response models.
+    /**
+     * Enroll this phone. Auth is the single-use enroll token in the body
+     * (scanned from the WebUI pairing QR), NOT a device Bearer token —
+     * call this on a client built without a token provider.
+     * Success: HTTP 201. Failures: 410 expired/used token, 409 already
+     * enrolled, 422 malformed request.
+     */
     @POST("api/v1/enroll")
-    suspend fun enroll(@Body request: String): String
+    suspend fun enroll(@Body request: EnrollRequest): Response<EnrollResponse>
+
+    /**
+     * Poll widget definitions for this device. Requires the device Bearer
+     * token. Response parsing/rendering per type is the widgets PR's job.
+     */
+    @GET("api/v1/widgets")
+    suspend fun getWidgets(): Response<WidgetsResponse>
 }
