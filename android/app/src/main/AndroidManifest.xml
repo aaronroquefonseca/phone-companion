@@ -49,7 +49,7 @@
             </intent-filter>
         </service>
 
-        // Glance widget receivers. Per-type widgets (P7); shared poll feeds them.
+        <!-- Glance widget receivers. Per-type widgets (P7); shared poll feeds them. -->
         <receiver
             android:name=".widgets.TextWidgetReceiver"
             android:exported="false">

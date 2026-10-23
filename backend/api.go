@@ -1,8 +1,9 @@
-// Package main — HTTP routes (P0 BASE skeleton + P3 widgets).
+// Package main — HTTP routes (health check + pairing + widgets + notify).
 //
-// Only GET /healthz and the widgets endpoints are implemented. The remaining
-// /api/v1/* routes from docs/api-contract.md are registered as 501 stubs so
-// the URL contract is pinned early; implementations land in later PRs.
+// Implemented: GET /healthz, the pairing/device-registry/WebUI routes (see
+// devices.go / pair_wire.go / webui/), the P3 widgets endpoints, and
+// POST /api/v1/notify (operator-only). Further /api/v1/* routes from
+// docs/api-contract.md land in their own PRs.
 package main
 
 import (
