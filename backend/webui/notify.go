@@ -4,6 +4,8 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -62,7 +64,7 @@ var notifyFormTmpl = template.Must(template.New("notifyForm").Parse(`<h1>Send a 
 {{range .Devices}}<option value="{{.ID}}"{{if eq $.Target .ID}} selected{{end}}>{{.Name}} ({{.ID}})</option>{{end}}
 </select>
 {{if .FieldErrors.Target}}<p class="field-error" id="notify-target-error">{{.FieldErrors.Target}}</p>{{end}}
-{{if not .Devices}}<p class="hint">No active devices yet — pairing one first makes targeting specific devices possible. "All devices" still works (accepted: 0 until a device pairs).</p>{{end}}
+{{if not .Devices}}<p class="hint">No active devices yet — pairing one first makes targeting specific devices possible. Sending to "All devices" now records accepted:0 (nothing delivered); <a href="/webui/pair">pair a device first</a>.</p>{{end}}
 </div>
 <div class="field">
 <label for="notify-kind">Kind</label>
@@ -98,9 +100,18 @@ var notifyFormTmpl = template.Must(template.New("notifyForm").Parse(`<h1>Send a 
 </form>`))
 
 var notifySentTmpl = template.Must(template.New("notifySent").Parse(`<h1>Notification sent</h1>
-<p class="success" role="status">Accepted by {{.Accepted}} {{if eq .Accepted 1}}device{{else}}devices{{end}}.</p>
-<p>Notification ID: <code>{{.NotificationID}}</code></p>
+{{if .Celebrate}}<p class="success" role="status">Accepted by {{.Accepted}} {{if eq .Accepted 1}}device{{else}}devices{{end}}.</p>{{else}}<p class="notice" role="status">Notification recorded (ID <code>{{.NotificationID}}</code>) but no devices received it — <a href="/webui/pair">pair a device first</a>.</p>{{end}}
+{{if .Celebrate}}<p>Notification ID: <code>{{.NotificationID}}</code></p>{{end}}
 <p><a href="/webui/notify">Send another</a> · <a href="/">Back to dashboard</a></p>`))
+
+type notifySentData struct {
+	NotificationID string
+	Accepted       int
+	// Celebrate selects the green success banner (accepted > 0). A zero
+	// fan-out renders neutral guidance instead — never a green
+	// "accepted by 0" celebration.
+	Celebrate bool
+}
 
 type notifyFormData struct {
 	Devices    []DeviceInfo
@@ -192,8 +203,30 @@ func activeDevices(devices []DeviceInfo) []DeviceInfo {
 	return out
 }
 
+// sentNotice parses the whitelisted PRG query (?sent=<id>&accepted=<n>)
+// from the POST redirect. IDs are opaque hex (bounded length, word chars
+// only); accepted is a small non-negative integer. Anything else renders
+// no notice, so forged query input can never inject page content or fake
+// a confirmation for a fan-out that never happened.
+func sentNotice(sent, accepted string) (id string, n int, ok bool) {
+	if sent == "" || len(sent) > 128 {
+		return "", 0, false
+	}
+	for _, c := range sent {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return "", 0, false
+		}
+	}
+	a, err := strconv.Atoi(accepted)
+	if err != nil || a < 0 || a > 1000000 {
+		return "", 0, false
+	}
+	return sent, a, true
+}
+
 // HandleNotifyGet serves GET /webui/notify: the test-notification form with
-// the target dropdown built from the live device registry.
+// the target dropdown built from the live device registry, plus the PRG
+// confirmation banner after a successful POST (?sent=<id>&accepted=<n>).
 func HandleNotifyGet(store Store, csrf *CSRFProtection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if store == nil {
@@ -203,6 +236,18 @@ func HandleNotifyGet(store Store, csrf *CSRFProtection) http.HandlerFunc {
 		devices, err := store.ListDevices(r.Context())
 		if err != nil {
 			renderNotifyForm(w, http.StatusInternalServerError, notifyFormData{Error: "internal error"})
+			return
+		}
+		if id, n, ok := sentNotice(r.URL.Query().Get("sent"), r.URL.Query().Get("accepted")); ok {
+			var body strings.Builder
+			_ = notifySentTmpl.Execute(&body, notifySentData{NotificationID: id, Accepted: n, Celebrate: n > 0})
+			renderLayout(w, http.StatusOK, layoutData{
+				Title:     "Notification sent",
+				Active:    "notify",
+				SignedIn:  true,
+				CSRFToken: layoutCSRFToken(csrf, r),
+				Body:      template.HTML(body.String()),
+			})
 			return
 		}
 		renderNotifyForm(w, http.StatusOK, notifyFormData{
@@ -219,8 +264,10 @@ func HandleNotifyGet(store Store, csrf *CSRFProtection) http.HandlerFunc {
 // HandleNotifyPost serves POST /webui/notify: validates the session CSRF
 // token exactly like the revoke form, then fans out through NotifyService
 // (the shared requestToMessage + fan-out pipeline — no duplicated logic).
-// Success answers 202 with a confirmation page; validation failures
-// re-render the form with the pipeline's status and echoed input.
+// Success is PRG: 303 to /webui/notify?sent=<id>&accepted=<n>, and GET
+// renders the confirmation — so refreshing the result page can never
+// re-send the fan-out. Validation failures re-render the form with the
+// pipeline's status and echoed input.
 func HandleNotifyPost(store Store, csrf *CSRFProtection, svc NotifyService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// The outcome (notification id, accepted count) is operator state;
@@ -232,11 +279,15 @@ func HandleNotifyPost(store Store, csrf *CSRFProtection, svc NotifyService) http
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid_request", http.StatusBadRequest)
+			renderOperatorError(w, r, csrf, true, "notify", http.StatusBadRequest,
+				"Send a test notification", "Bad request — please try sending again.",
+				"/webui/notify", "Back to notify")
 			return
 		}
 		if csrf == nil || !csrf.VerifyRequest(r) {
-			http.Error(w, "csrf_mismatch", http.StatusForbidden)
+			renderOperatorError(w, r, csrf, true, "notify", http.StatusForbidden,
+				"Send a test notification", "Security token mismatch — please reload the form and try again (csrf_mismatch).",
+				"/webui/notify", "Back to notify")
 			return
 		}
 		target := strings.TrimSpace(r.FormValue("target"))
@@ -291,15 +342,13 @@ func HandleNotifyPost(store Store, csrf *CSRFProtection, svc NotifyService) http
 			})
 			return
 		}
-		var body strings.Builder
-		_ = notifySentTmpl.Execute(&body, res)
-		renderLayout(w, http.StatusAccepted, layoutData{
-			Title:     "Notification sent",
-			Active:    "notify",
-			SignedIn:  true,
-			CSRFToken: layoutCSRFToken(csrf, r),
-			Body:      template.HTML(body.String()),
-		})
+		// PRG: redirect to the GET confirmation so a refresh re-renders
+		// state instead of re-fanning-out. Params are server-issued and
+		// whitelisted on parse (see sentNotice); the id charset needs no
+		// escaping beyond QueryEscape here.
+		loc := "/webui/notify?sent=" + url.QueryEscape(res.NotificationID) +
+			"&accepted=" + strconv.Itoa(res.Accepted)
+		http.Redirect(w, r, loc, http.StatusSeeOther)
 	}
 }
 

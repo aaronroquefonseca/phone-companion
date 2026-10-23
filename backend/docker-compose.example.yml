@@ -44,6 +44,11 @@ services:
       # REQUIRED in production (e.g. "https://example.com"); when unset
       # the QR falls back to the request Host (dev-only, spoofable).
       # EXTERNAL_BASE_URL: "https://example.com"
+      # Plain-HTTP dev only: browsers will not send the Secure-flagged
+      # pc_session cookie over http://, so sign-in loops without TLS.
+      # Set this to "1" for local testing (dev-only, NEVER in production —
+      # see docs/setup.md "Plain-HTTP development").
+      # ALLOW_INSECURE_COOKIES: "1"
       # --- Push (notifications; leave unset for log-driver default) ---
       # NOTIFY_DRIVER: "fcm"
       # FCM_PROJECT_ID: ""

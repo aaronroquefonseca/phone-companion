@@ -1,6 +1,6 @@
 // Package main — P8 pairing end-to-end auth reconciliation tests.
 //
-// Covers: unauthenticated pairing routes (401 JSON on /api/*, 302 to
+// Covers: unauthenticated pairing routes (401 JSON on /api/*, 303 to
 // /login on /webui/*), authenticated happy paths, enroll-token single-use,
 // CSRF reject/accept on the revoke form, rate limiting, UTF-8-safe names,
 // nil-guarded store adapter, and EXTERNAL_BASE_URL QR behavior.
@@ -130,18 +130,20 @@ func TestPairingUnauthenticatedGating(t *testing.T) {
 		}
 	}
 
-	// WebUI pages → 302 to /login.
+	// WebUI pages → 303 to /login.
 	for _, tc := range []struct{ method, target, body string }{
 		{"GET", "/webui/pair", ""},
+		{"POST", "/webui/pair/mint", ""},
 		{"POST", "/webui/pair/revoke", url.Values{"device_id": {"x"}}.Encode()},
+		{"POST", "/webui/pair/purge", url.Values{"device_id": {"x"}}.Encode()},
 	} {
 		ct := ""
 		if tc.method == "POST" {
 			ct = "application/x-www-form-urlencoded"
 		}
 		w := doReq(t, mux, tc.method, tc.target, tc.body, ct, nil)
-		if w.Code != http.StatusFound {
-			t.Errorf("%s %s: got %d, want 302", tc.method, tc.target, w.Code)
+		if w.Code != http.StatusSeeOther {
+			t.Errorf("%s %s: got %d, want 303", tc.method, tc.target, w.Code)
 		}
 		if loc := w.Header().Get("Location"); loc != "/login" {
 			t.Errorf("%s %s: redirect to %q, want /login", tc.method, tc.target, loc)
@@ -272,7 +274,8 @@ func TestPairingDevicesListRevokeHappyPath(t *testing.T) {
 func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 	mux, _, _, cookie := setupPairingMux(t)
 
-	// Authenticated page renders with CSRF token + QR payload.
+	// Authenticated page renders the empty state (no mint-on-load) with a
+	// CSRF-guarded generate button.
 	w := doReq(t, mux, "GET", "/webui/pair", "", "", cookie)
 	if w.Code != http.StatusOK {
 		t.Fatalf("pair page: got %d (%s)", w.Code, w.Body.String())
@@ -282,6 +285,38 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 	}
 	page := w.Body.String()
 	csrfToken := extractCSRFToken(t, page)
+	if strings.Contains(page, "data:image/png;base64,") {
+		t.Fatal("GET /webui/pair must not mint a token")
+	}
+	for _, want := range []string{`action="/webui/pair/mint"`, "Generate pairing token"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("pair page missing %q", want)
+		}
+	}
+
+	// Minting renders the QR panel (mint endpoint, CSRF-guarded).
+	mintForm := url.Values{"csrf_token": {csrfToken}}.Encode()
+	w = doReq(t, mux, "POST", "/webui/pair/mint", mintForm, "application/x-www-form-urlencoded", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("pair mint: got %d (%s)", w.Code, w.Body.String())
+	}
+	minted := w.Body.String()
+	for _, want := range []string{"data:image/png;base64,", "expires in ", "Copy token"} {
+		if !strings.Contains(minted, want) {
+			t.Fatalf("minted page missing %q", want)
+		}
+	}
+	// Auto-refresh fetch shape: same endpoint, JSON + header CSRF.
+	jreq := httptest.NewRequest("POST", "/webui/pair/mint", nil)
+	jreq.RemoteAddr = "192.0.2.1:1234"
+	jreq.Header.Set("Accept", "application/json")
+	jreq.Header.Set("X-CSRF-Token", csrfToken)
+	jreq.AddCookie(cookie)
+	jw := httptest.NewRecorder()
+	mux.ServeHTTP(jw, jreq)
+	if jw.Code != http.StatusOK {
+		t.Fatalf("mint JSON: got %d (%s), want 200", jw.Code, jw.Body.String())
+	}
 
 	// Pair a device to have something to revoke via the form.
 	iw := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
@@ -297,11 +332,14 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 	}
 	id := enrolled["device_id"]
 
-	// POST without CSRF → 403 (fail closed).
+	// POST without CSRF → 403 (fail closed), inside the shared shell.
 	form := url.Values{"device_id": {id}}.Encode()
 	w = doReq(t, mux, "POST", "/webui/pair/revoke", form, "application/x-www-form-urlencoded", cookie)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("revoke without CSRF: got %d, want 403", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("revoke CSRF failure content type %q, want html", ct)
 	}
 
 	// POST with wrong CSRF → 403.
@@ -311,22 +349,36 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 		t.Fatalf("revoke with bad CSRF: got %d, want 403", w.Code)
 	}
 
-	// POST with valid CSRF → 303 back to /webui/pair; device revoked.
+	// Two-step: first POST renders the confirm interstitial naming the
+	// device; the confirming POST revokes with ?revoked=<name>.
 	form = url.Values{"device_id": {id}, "csrf_token": {csrfToken}}.Encode()
+	w = doReq(t, mux, "POST", "/webui/pair/revoke", form, "application/x-www-form-urlencoded", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("revoke interstitial: got %d (%s), want 200", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "Confirm revoke") || !strings.Contains(body, "WebUI Phone") {
+		t.Fatalf("interstitial must name the device: %s", body)
+	}
+	form = url.Values{"device_id": {id}, "csrf_token": {csrfToken}, "confirm": {"yes"}}.Encode()
 	w = doReq(t, mux, "POST", "/webui/pair/revoke", form, "application/x-www-form-urlencoded", cookie)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("revoke with CSRF: got %d (%s), want 303", w.Code, w.Body.String())
 	}
-	if loc := w.Header().Get("Location"); loc != "/webui/pair" {
-		t.Fatalf("revoke redirect to %q, want /webui/pair", loc)
+	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "/webui/pair?revoked=") {
+		t.Fatalf("revoke redirect to %q, want ?revoked=", loc)
+	}
+	// The flash renders as a success notice on the follow-up page.
+	fw := doReq(t, mux, "GET", w.Header().Get("Location"), "", "", cookie)
+	if body := fw.Body.String(); !strings.Contains(body, `class="success"`) || !strings.Contains(body, "WebUI Phone") {
+		t.Fatalf("revoked flash missing: %s", body)
 	}
 	found, err := RevokeDevice(deviceDB, id)
 	if err != nil || !found {
 		t.Fatalf("device should now read revoked: found=%v err=%v", found, err)
 	}
 
-	// Unknown ID with valid CSRF → 303 with ?error=device_not_found, and
-	// the follow-up page shows the operator notice as HTML.
+	// Unknown ID skips the interstitial: 303 with ?error=device_not_found,
+	// and the follow-up page shows the operator notice as HTML.
 	form = url.Values{"device_id": {"no-such-device"}, "csrf_token": {csrfToken}}.Encode()
 	w = doReq(t, mux, "POST", "/webui/pair/revoke", form, "application/x-www-form-urlencoded", cookie)
 	if w.Code != http.StatusSeeOther {
@@ -344,6 +396,47 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "Device not found") {
 		t.Fatalf("notice page missing unknown-id UX: %s", w.Body.String())
+	}
+
+	// The default registry view hides the revoked row behind the toggle.
+	def := doReq(t, mux, "GET", "/webui/pair", "", "", cookie)
+	if strings.Contains(def.Body.String(), id) {
+		t.Fatalf("revoked device %s must hide by default", id)
+	}
+	if !strings.Contains(def.Body.String(), "Show revoked (1)") {
+		t.Fatalf("revoked toggle missing: %s", def.Body.String())
+	}
+	shown := doReq(t, mux, "GET", "/webui/pair?show=revoked", "", "", cookie)
+	if !strings.Contains(shown.Body.String(), id) || !strings.Contains(shown.Body.String(), "Purge") {
+		t.Fatalf("show=revoked must list the row with purge: %s", shown.Body.String())
+	}
+
+	// Purge without confirm renders the interstitial; confirming hard-deletes
+	// the row, and the old token stays 401.
+	form = url.Values{"device_id": {id}, "csrf_token": {csrfToken}}.Encode()
+	w = doReq(t, mux, "POST", "/webui/pair/purge", form, "application/x-www-form-urlencoded", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("purge interstitial: got %d (%s), want 200", w.Code, w.Body.String())
+	}
+	form = url.Values{"device_id": {id}, "csrf_token": {csrfToken}, "confirm": {"yes"}}.Encode()
+	w = doReq(t, mux, "POST", "/webui/pair/purge", form, "application/x-www-form-urlencoded", cookie)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("purge confirm: got %d (%s), want 303", w.Code, w.Body.String())
+	}
+	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "/webui/pair?show=revoked&purged=") {
+		t.Fatalf("purge redirect to %q", loc)
+	}
+	var one int
+	if err := deviceDB.QueryRow(`SELECT 1 FROM devices WHERE id = ?`, id).Scan(&one); err == nil {
+		t.Fatalf("purged device %s still has a row", id)
+	}
+	// Purging twice reports not-found (idempotent surface, no 500).
+	w = doReq(t, mux, "POST", "/webui/pair/purge", form, "application/x-www-form-urlencoded", cookie)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("re-purge: got %d, want 303", w.Code)
+	}
+	if loc := w.Header().Get("Location"); !strings.Contains(loc, "error=device_not_found") {
+		t.Fatalf("re-purge redirect to %q, want device_not_found", loc)
 	}
 
 	// Cross-session CSRF: token minted for another session is rejected.
@@ -440,11 +533,23 @@ func TestPairingRateLimitOnTokenIssuance(t *testing.T) {
 	}
 
 	w = doReq(t, mux, "GET", "/webui/pair", "", "", cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("page load under full bucket: got %d, want 200", w.Code)
+	}
+	tokPage := extractCSRFToken(t, w.Body.String())
+	mintForm := url.Values{"csrf_token": {tokPage}}.Encode()
+	w = doReq(t, mux, "POST", "/webui/pair/mint", mintForm, "application/x-www-form-urlencoded", cookie)
 	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("limited page issue: got %d, want 429", w.Code)
+		t.Fatalf("limited mint issue: got %d, want 429", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("limited mint missing Retry-After")
 	}
 	if body := w.Body.String(); !strings.Contains(body, "rate_limited") {
-		t.Fatalf("limited page body %q, want rate_limited", body)
+		t.Fatalf("limited mint body %q, want rate_limited", body)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("limited mint content type %q, want html", ct)
 	}
 
 	// Window passes → issuance works again.
@@ -490,6 +595,9 @@ func TestPairingStoreAdapterNilGuard(t *testing.T) {
 	}
 	if _, err := a.RevokeDevice(t.Context(), "x"); err == nil {
 		t.Error("RevokeDevice(nil db): want error")
+	}
+	if _, err := a.PurgeDevice(t.Context(), "x"); err == nil {
+		t.Error("PurgeDevice(nil db): want error")
 	}
 }
 

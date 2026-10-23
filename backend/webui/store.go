@@ -34,4 +34,9 @@ type Store interface {
 	IssueEnrollToken(ctx context.Context, ttl time.Duration) (rawToken string, expiresAt time.Time, err error)
 	ListDevices(ctx context.Context) ([]DeviceInfo, error)
 	RevokeDevice(ctx context.Context, id string) (found bool, err error)
+	// PurgeDevice hard-deletes a REVOKED device row. Active rows must not
+	// be purged (implementations report found=false for them); unknown IDs
+	// report found=false. Safe by construction: a purged token is simply
+	// unknown afterwards, and unknown tokens 401 exactly like revoked ones.
+	PurgeDevice(ctx context.Context, id string) (found bool, err error)
 }

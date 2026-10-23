@@ -7,13 +7,18 @@ import (
 )
 
 // dashboardBody renders the operator home: registry counts plus shortcuts
-// to the pairing and notify-test flows.
+// to the pairing and notify-test flows. The two pairing links stay
+// distinct: the Devices card reviews/revokes the registry, the Pairing
+// card mints a fresh token for a new phone — both land on /webui/pair,
+// which hosts both halves.
 var dashboardBody = template.Must(template.New("dashboardBody").Parse(`<h1>Operator dashboard</h1>
 {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+{{if .FirstRun}}<p class="notice" role="status">No devices paired yet. <a href="/webui/pair">Pair your first phone</a>, then send a test notification.</p>{{end}}
 <div class="cards">
 <section class="card" aria-label="Devices">
 <h2>Devices</h2>
 <p><span class="count">{{.DeviceCount}}</span> {{if eq .DeviceCount 1}}device{{else}}devices{{end}} paired</p>
+<p>Review the registry or revoke access.</p>
 <p><a class="btn" href="/webui/pair">Manage devices</a></p>
 </section>
 <section class="card" aria-label="Widgets">
@@ -23,7 +28,7 @@ var dashboardBody = template.Must(template.New("dashboardBody").Parse(`<h1>Opera
 </section>
 <section class="card" aria-label="Pairing">
 <h2>Pair a device</h2>
-<p>Issue a single-use enroll token and scan it with the Phone Companion app.</p>
+<p>Show a fresh QR code to add a new phone.</p>
 <p><a class="btn" href="/webui/pair">Pair a new device</a></p>
 </section>
 <section class="card" aria-label="Notify">
@@ -36,7 +41,11 @@ var dashboardBody = template.Must(template.New("dashboardBody").Parse(`<h1>Opera
 type dashboardPageData struct {
 	DeviceCount int
 	WidgetCount int
-	Error       string
+	// FirstRun orders first-run operators to pairing: with zero devices the
+	// notify flow can only record accepted:0, so the banner points at
+	// /webui/pair before anything else.
+	FirstRun bool
+	Error    string
 }
 
 // HandleDashboard serves GET /: registry counts plus pairing/notify
@@ -45,8 +54,9 @@ type dashboardPageData struct {
 func HandleDashboard(store Store, widgets WidgetLister, csrf *CSRFProtection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			w.Header().Set("Cache-Control", "no-store")
-			http.NotFound(w, r)
+			renderOperatorError(w, r, csrf, true, "home", http.StatusNotFound,
+				"Page not found", "No such page — the address may be mistyped.",
+				"/", "Back to dashboard")
 			return
 		}
 		if store == nil || widgets == nil {
@@ -67,6 +77,7 @@ func HandleDashboard(store Store, widgets WidgetLister, csrf *CSRFProtection) ht
 		_ = dashboardBody.Execute(&body, dashboardPageData{
 			DeviceCount: len(devices),
 			WidgetCount: len(views),
+			FirstRun:    len(devices) == 0,
 		})
 		renderLayout(w, http.StatusOK, layoutData{
 			Title:     "Dashboard",

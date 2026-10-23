@@ -430,6 +430,38 @@ func RevokeDevice(db *sql.DB, id string) (found bool, err error) {
 	return true, nil
 }
 
+// PurgeDevice hard-deletes a REVOKED device row; subsequent device auth
+// with its token fails with 401 (unknown), exactly like a revoked token —
+// so purging is safe and revocation stays idempotent. Active rows are never
+// deleted here (found=false); the caller distinguishes active from unknown
+// via the registry. Unknown IDs report found=false. History rows referencing
+// the device are untouched (no cascade), preserving the audit trail.
+func PurgeDevice(db *sql.DB, id string) (found bool, err error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+	res, err := db.Exec(
+		`DELETE FROM devices WHERE id = ? AND revoked_at IS NOT NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return false, err
+	} else if n == 1 {
+		return true, nil
+	}
+	var one int
+	if err := db.QueryRow(`SELECT 1 FROM devices WHERE id = ?`, id).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	// Row exists but is still active: refuse (caller maps to not_revoked).
+	return false, nil
+}
+
 // AuthenticateDevice validates a device Bearer token from the request
 // (Authorization: Bearer <token>) against stored SHA-256 hashes. Revoked
 // and unknown tokens fail closed.

@@ -65,6 +65,13 @@ type Config struct {
 	// enable in production; enroll tokens and device credentials must ride
 	// TLS. See backend/README.md.
 	ExternalBaseURLAllowHTTP bool // $EXTERNAL_BASE_URL_ALLOW_HTTP
+	// AllowInsecureCookies is the dev-only escape hatch for the Secure
+	// cookie flag. $ALLOW_INSECURE_COOKIES=1 drops Secure so browsers send
+	// pc_session over plain http:// (loopback/LAN dev without TLS). Default
+	// false: cookies stay always-Secure (fail closed). NEVER enable in
+	// production — session cookies are live credentials and must ride TLS.
+	// See docs/setup.md "Plain-HTTP development" and backend/README.md.
+	AllowInsecureCookies bool // $ALLOW_INSECURE_COOKIES
 }
 
 // Fail-closed bounds for auth secrets. These are deliberately strict: the
@@ -96,10 +103,22 @@ func LoadConfig() Config {
 		FCMCredentials:           os.Getenv("FCM_CREDENTIALS_FILE"),
 		ExternalBaseURL:          normalizeBaseURL(os.Getenv("EXTERNAL_BASE_URL")),
 		ExternalBaseURLAllowHTTP: allowHTTPExbase(os.Getenv("EXTERNAL_BASE_URL_ALLOW_HTTP")),
+		AllowInsecureCookies:     allowInsecureCookies(os.Getenv("ALLOW_INSECURE_COOKIES")),
 	}
 }
 
-// allowHTTPExbase parses the dev-only EXTERNAL_BASE_URL_ALLOW_HTTP override.
+// allowInsecureCookies parses the dev-only ALLOW_INSECURE_COOKIES override.
+// Only explicit opt-ins ("1", "true", "yes") enable it; anything else,
+// including empty, keeps the fail-closed default (always-Secure cookies).
+func allowInsecureCookies(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 // Only explicit opt-ins ("1", "true", "yes") enable it; anything else,
 // including empty, keeps the fail-closed default (reject http to
 // non-loopback hosts).
@@ -186,6 +205,9 @@ func (c Config) Validate() error {
 		// active so operators are never surprised about which credential
 		// actually gates /login.
 		log.Printf("WARNING: both ADMIN_PASSWORD_HASH and ADMIN_PASSWORD are set; ADMIN_PASSWORD_HASH wins and ADMIN_PASSWORD is ignored")
+	}
+	if c.AllowInsecureCookies {
+		log.Printf("WARNING: ALLOW_INSECURE_COOKIES=1 drops the Secure flag on session cookies (dev-only over plain HTTP; never enable in production)")
 	}
 	if c.AdminPasswordHash != "" {
 		// Bcrypt cost floor: warn (do not reject) when the configured hash

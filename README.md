@@ -81,7 +81,7 @@ docker compose logs backend          # "loaded 1 widget(s)", notify driver
 ```
 
 ```sh
-# 4. Sign in (success is 303; the 302 to /login is the RequireAdmin
+# 4. Sign in (success is 303 to /; the 303 to /login is the RequireAdmin
 #    "not signed in" redirect on gated pages, not the login result):
 curl -c jar.txt -d 'username=admin&password=choose-a-long-password' \
   -w "\nPOST /login -> %{http_code}\n" \
@@ -100,7 +100,9 @@ see the pairing QR and device list.
 # 6. Send a test notification (operator session required + write-guard
 #    proof: X-Requested-With or a session-bound CSRF token, same as
 #    enroll-tokens). curl does not
-#    resend the Secure-flagged cookie over plain HTTP, so pass it explicitly:
+#    resend the Secure-flagged cookie over plain HTTP, so pass it explicitly
+#    (or set ALLOW_INSECURE_COOKIES=1 for local testing only — see
+#    docs/setup.md "Plain-HTTP development", never in production):
 COOKIE=$(grep pc_session jar.txt | awk '{print $NF}')
 curl -H "Cookie: pc_session=$COOKIE" -H 'Content-Type: application/json' \
   -H 'X-Requested-With: XMLHttpRequest' \
@@ -170,6 +172,7 @@ the backend refuses to boot on weak/missing secrets.
 | `DB_PATH` | `/data/phone-companion.db` | sqlite file; back up `/data` (see `docs/setup.md`) |
 | `WIDGET_DIR` | `/widgets` | Folder-per-widget mount (see `backend/README.md`) |
 | `EXTERNAL_BASE_URL` | — | `https://<public-host>` bare origin. Required in production; dev falls back to request Host |
+| `ALLOW_INSECURE_COOKIES` | — (fail-closed `Secure`) | Dev-only `1` drops the `Secure` flag so `pc_session` works over plain HTTP. Never in production (see `docs/setup.md`) |
 | `NOTIFY_DRIVER` | `log` | `log` (default, logs deliveries), `noop` (silent, CI), `fcm` (real FCM HTTPv1 push) |
 | `FCM_PROJECT_ID` | — | Needed only for `fcm` driver |
 | `FCM_CREDENTIALS_FILE` | — | Path to mounted service-account JSON; never committed or baked into the image |

@@ -35,8 +35,10 @@ var loginByIP = map[string][]time.Time{}
 var loginNow = time.Now
 
 // allowLogin reports whether the caller may attempt a login now. On
-// exhaustion it writes 429 + Retry-After and returns false; callers must
-// stop without touching bcrypt.
+// exhaustion it sets Retry-After and returns false WITHOUT writing a body:
+// the caller renders a layout-wrapped 429 page (see handleLoginPost) so no
+// operator path ever answers with bare text. Callers must stop without
+// touching bcrypt.
 func allowLogin(w http.ResponseWriter, r *http.Request) bool {
 	ip := loginClientIP(r)
 	now := loginNow()
@@ -62,7 +64,6 @@ func allowLogin(w http.ResponseWriter, r *http.Request) bool {
 			retry = 1
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		http.Error(w, "rate_limited", http.StatusTooManyRequests)
 		return false
 	}
 	if len(kept) == 0 {

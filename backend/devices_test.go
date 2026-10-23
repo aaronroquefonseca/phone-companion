@@ -512,3 +512,56 @@ func TestUpdatedAtMigrationIdempotent(t *testing.T) {
 		t.Fatalf("ListDevices after migration: %v", err)
 	}
 }
+
+// PurgeDevice hard-deletes revoked rows only: active rows are refused,
+// unknown IDs report not-found, and a purged token authenticates 401
+// (unknown) exactly like a revoked one.
+func TestPurgeDeviceRevokedOnly(t *testing.T) {
+	db := openDevicesTestDB(t)
+
+	liveID, liveToken, _, err := EnrollDevice(db, "Live", "fcm-live-purge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goneID, goneToken, _, err := EnrollDevice(db, "Gone", "fcm-gone-purge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RevokeDevice(db, goneID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Active rows are refused (no delete), unknown IDs not-found.
+	if found, err := PurgeDevice(db, liveID); err != nil || found {
+		t.Fatalf("purge active: found=%v err=%v, want false", found, err)
+	}
+	if found, err := PurgeDevice(db, "does-not-exist"); err != nil || found {
+		t.Fatalf("purge unknown: found=%v err=%v, want false", found, err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM devices`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("refused purges must not delete: n=%d err=%v", n, err)
+	}
+
+	// Purging the revoked row hard-deletes it; re-purge is not-found.
+	if found, err := PurgeDevice(db, goneID); err != nil || !found {
+		t.Fatalf("purge revoked: found=%v err=%v, want true", found, err)
+	}
+	if found, err := PurgeDevice(db, goneID); err != nil || found {
+		t.Fatalf("re-purge: found=%v err=%v, want false", found, err)
+	}
+
+	// Both tokens now fail closed: purged is 401-unknown, revoked-live
+	// would be 401-revoked — the same operator-visible outcome.
+	bearerReq := func(tok string) *http.Request {
+		r, _ := http.NewRequest("GET", "/api/v1/widgets", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		return r
+	}
+	if _, err := AuthenticateDevice(db, bearerReq(goneToken)); err != ErrDeviceAuthInvalid {
+		t.Fatalf("purged token auth: err=%v, want invalid", err)
+	}
+	if _, err := AuthenticateDevice(db, bearerReq(liveToken)); err != nil {
+		t.Fatalf("live token must still authenticate: %v", err)
+	}
+}

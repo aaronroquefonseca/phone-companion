@@ -59,6 +59,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("session store: %v", err)
 	}
+	// Fail-closed escape hatch for plain-HTTP development (default stays
+	// always-Secure; see Config.AllowInsecureCookies and
+	// docs/setup.md "Plain-HTTP development").
+	SetAllowInsecureSessionCookie(cfg.AllowInsecureCookies)
 	csrf := webui.NewCSRFProtection(cfg.SessionSecret)
 	webui.ExternalBaseURL = cfg.ExternalBaseURL
 	if webui.ExternalBaseURL == "" {

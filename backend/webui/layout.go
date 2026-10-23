@@ -10,6 +10,7 @@ package webui
 import (
 	"html/template"
 	"net/http"
+	"strings"
 )
 
 // sharedCSS is the single stylesheet for every WebUI page. Inline
@@ -53,9 +54,16 @@ input[type="hidden"]{display:none!important}
 .card .count{font-size:1.8rem;font-weight:700}
 .card a.btn{display:inline-block;background:#0b5fff;color:#fff;text-decoration:none;padding:.4rem .9rem;border-radius:.35rem}
 table{border-collapse:collapse;width:100%;margin:1rem 0}
-th,td{border:1px solid #999;padding:.4rem .6rem;text-align:left;vertical-align:top}
+th,td{border:1px solid #999;padding:.4rem .6rem;text-align:left;vertical-align:top;word-break:break-word}
 th{background:#f0f0f0}
 .revoked{color:#666}
+tr.revoked{opacity:.62}
+@media (max-width:40rem){
+table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+code{word-break:break-all}
+.card{overflow-wrap:anywhere}
+input,select,textarea{max-width:100%}
+}
 code{word-break:break-all}
 .notice{background:#f6f6f6;border:1px solid #999;padding:.6rem .9rem;border-radius:.4rem}
 .error{background:#fdecea;border:1px solid #b3261e;padding:.6rem .9rem;border-radius:.4rem}
@@ -89,7 +97,7 @@ var layoutTmpl = template.Must(template.New("layout").Parse(`<!DOCTYPE html>
 </head>
 <body>
 <header class="topbar">
-<div class="brand"><a href="/">Phone Companion</a></div>
+{{if .SignedIn}}<div class="brand"><a href="/">Phone Companion</a></div>{{else}}<div class="brand"><a href="/login">Phone Companion</a></div>{{end}}
 {{if .SignedIn}}
 <nav aria-label="Operator">
 <a href="/"{{if eq .Active "home"}} aria-current="page"{{end}}>Home</a>
@@ -126,4 +134,56 @@ func layoutCSRFToken(csrf *CSRFProtection, r *http.Request) string {
 		return tok
 	}
 	return ""
+}
+
+// errorBody is the shared operator error page: heading + message + onward
+// link inside the normal shell (nav/chrome preserved), so no operator path
+// ever answers with a bare-text http.Error. Message is operator-safe text
+// assembled by the caller (whitelisted codes or static copy) — never raw
+// user input or secret material.
+var errorBody = template.Must(template.New("errorBody").Parse(`<h1>{{.Heading}}</h1>
+<p class="error" role="alert">{{.Message}}</p>
+<p><a href="{{.OnwardHref}}">{{.OnwardText}}</a> · <a href="/">Back to dashboard</a></p>`))
+
+type errorPageData struct {
+	Heading    string
+	Message    string
+	OnwardHref string
+	OnwardText string
+}
+
+// renderOperatorError writes a layout-wrapped error page (nav/chrome kept,
+// no-store) for operator-surface failures that historically used bare
+// http.Error: login 429/400, CSRF 403s, pair 429/400/403/500s, unknown
+// authed paths (404), GET /logout (405). signedIn controls the nav shell;
+// onward points at the page the operator should retry from.
+func renderOperatorError(w http.ResponseWriter, r *http.Request, csrf *CSRFProtection, signedIn bool, active string, status int, heading, message, onwardHref, onwardText string) {
+	if onwardHref == "" {
+		onwardHref = "/"
+	}
+	if onwardText == "" {
+		onwardText = "Back to dashboard"
+	}
+	var body strings.Builder
+	_ = errorBody.Execute(&body, errorPageData{
+		Heading:    heading,
+		Message:    message,
+		OnwardHref: onwardHref,
+		OnwardText: onwardText,
+	})
+	renderLayout(w, status, layoutData{
+		Title:     heading,
+		Active:    active,
+		SignedIn:  signedIn,
+		CSRFToken: layoutCSRFToken(csrf, r),
+		Body:      template.HTML(body.String()),
+	})
+}
+
+// WriteOperatorError is the exported hook for main-package wiring (e.g. the
+// enroll-issuance limiter on GET /webui/pair) so limiter/gate failures on
+// operator pages render inside the shared shell too. signedIn should
+// reflect the validated session; callers behind RequireAdmin pass true.
+func WriteOperatorError(w http.ResponseWriter, r *http.Request, csrf *CSRFProtection, signedIn bool, active string, status int, heading, message, onwardHref, onwardText string) {
+	renderOperatorError(w, r, csrf, signedIn, active, status, heading, message, onwardHref, onwardText)
 }
