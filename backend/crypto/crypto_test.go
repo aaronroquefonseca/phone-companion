@@ -2,6 +2,8 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -139,15 +141,26 @@ func TestAADBinding(t *testing.T) {
 		t.Fatalf("wrong-binding decrypt err = %v, want ErrDecryptFailed", err)
 	}
 	// Notify bindings differ per notification and per field.
-	nb := NotifyBinding("n-1", "body")
+	nb, err := NotifyBinding("n-1", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
 	nenv, err := Encrypt(key, "dev-1", nb, []byte("dinner"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Decrypt(key, "dev-1", NotifyBinding("n-2", "body"), nenv); !errors.Is(err, ErrDecryptFailed) {
+	otherNote, err := NotifyBinding("n-2", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decrypt(key, "dev-1", otherNote, nenv); !errors.Is(err, ErrDecryptFailed) {
 		t.Fatalf("wrong-notification decrypt err = %v, want ErrDecryptFailed", err)
 	}
-	if _, err := Decrypt(key, "dev-1", NotifyBinding("n-1", "title"), nenv); !errors.Is(err, ErrDecryptFailed) {
+	otherField, err := NotifyBinding("n-1", "title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decrypt(key, "dev-1", otherField, nenv); !errors.Is(err, ErrDecryptFailed) {
 		t.Fatalf("wrong-field decrypt err = %v, want ErrDecryptFailed", err)
 	}
 }
@@ -179,8 +192,53 @@ func TestMalformedEnvelopesFailClosed(t *testing.T) {
 	if _, err := Encrypt(key, "dev-1", "", []byte("x")); err == nil {
 		t.Fatal("empty binding accepted")
 	}
+	if _, err := Encrypt(key, "dev\x00-1", "hello", []byte("x")); err == nil {
+		t.Fatal("NUL kid accepted")
+	}
+	if _, err := Encrypt(key, "dev-1", "hel\x00lo", []byte("x")); err == nil {
+		t.Fatal("NUL binding accepted")
+	}
 	if _, err := Encrypt(key, "dev-1", "hello", []byte{0xff, 0xfe}); err == nil {
 		t.Fatal("non-UTF-8 plaintext accepted")
+	}
+	// Truncated tag: decodes but is shorter than the 16-byte GCM tag.
+	short := good
+	short.Ciphertext = base64.StdEncoding.EncodeToString([]byte("short"))
+	if _, err := Decrypt(key, "dev-1", "hello", short); !errors.Is(err, ErrDecryptFailed) {
+		t.Fatalf("truncated-tag decrypt err = %v, want ErrDecryptFailed", err)
+	}
+	// Truncated valid seal: drop the last tag byte.
+	raw, _ := base64.StdEncoding.DecodeString(good.Ciphertext)
+	clipped := good
+	clipped.Ciphertext = base64.StdEncoding.EncodeToString(raw[:len(raw)-1])
+	if _, err := Decrypt(key, "dev-1", "hello", clipped); !errors.Is(err, ErrDecryptFailed) {
+		t.Fatalf("clipped-seal decrypt err = %v, want ErrDecryptFailed", err)
+	}
+}
+
+// TestDecryptRejectsNonUTF8Output covers the Decrypt-side UTF-8 check.
+// Encrypt refuses non-UTF-8 input, so this path is only reachable by sealing
+// raw bytes with the same key/AAD out-of-band; it must still fail closed.
+func TestDecryptRejectsNonUTF8Output(t *testing.T) {
+	key := mustKey(t)
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nonce [NonceSize]byte // fixed zero nonce: test-only, never Encrypt-like
+	sealed := gcm.Seal(nil, nonce[:], []byte{0xff, 0xfe}, BuildAAD("dev-1", "hello"))
+	env := Envelope{
+		Alg:        Algorithm,
+		Kid:        "dev-1",
+		Nonce:      base64.StdEncoding.EncodeToString(nonce[:]),
+		Ciphertext: base64.StdEncoding.EncodeToString(sealed),
+	}
+	if _, err := Decrypt(key, "dev-1", "hello", env); !errors.Is(err, ErrDecryptFailed) {
+		t.Fatalf("non-UTF-8 output decrypt err = %v, want ErrDecryptFailed", err)
 	}
 }
 
@@ -211,7 +269,74 @@ func TestAADConstruction(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("AAD = %q, want %q", got, want)
 	}
-	if NotifyBinding("n-1", "body") != "notify/n-1/body" {
-		t.Fatalf("NotifyBinding = %q", NotifyBinding("n-1", "body"))
+	nb, err := NotifyBinding("n-1", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nb != "notify/n-1/body" {
+		t.Fatalf("NotifyBinding = %q", nb)
+	}
+}
+
+func TestNotifyBindingRejects(t *testing.T) {
+	for _, tc := range [][2]string{
+		{"", "body"},
+		{"n-1", ""},
+		{"n/1", "body"},
+		{"n-1", "bo/dy"},
+		{"n\x00-1", "body"},
+		{"n-1", "bo\x00dy"},
+	} {
+		if _, err := NotifyBinding(tc[0], tc[1]); !errors.Is(err, ErrInvalidEnvelope) {
+			t.Fatalf("NotifyBinding(%q, %q) err = %v, want ErrInvalidEnvelope", tc[0], tc[1], err)
+		}
+	}
+}
+
+// TestFixedVector pins one deterministic (key, nonce, AAD, plaintext) tuple
+// for the future Kotlin port: same inputs MUST produce these exact bytes.
+// Key is bytes 0x00..0x1f, nonce is bytes 0xa0..0xab.
+func TestFixedVector(t *testing.T) {
+	var key [KeySize]byte
+	for i := range key {
+		key[i] = byte(i)
+	}
+	var nonce [NonceSize]byte
+	for i := range nonce {
+		nonce[i] = byte(0xa0 + i)
+	}
+	aad := BuildAAD("dev-1", "hello")
+	if got, want := string(aad), "dev-1\x00hello"; got != want {
+		t.Fatalf("AAD = %q, want %q", got, want)
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := gcm.Seal(nil, nonce[:], []byte("hello secret"), aad)
+	const wantCTB64 = "jn0QQSrrcdoBF+KnfT0X7AnZ7CubwyCVijmu9A=="
+	if got := base64.StdEncoding.EncodeToString(sealed); got != wantCTB64 {
+		t.Fatalf("sealed = %q, want %q", got, wantCTB64)
+	}
+	if len(sealed) != len("hello secret")+TagSize {
+		t.Fatalf("sealed length = %d, want plaintext+16 tag", len(sealed))
+	}
+	// The envelope built from these fixed bytes must Decrypt.
+	env := Envelope{
+		Alg:        Algorithm,
+		Kid:        "dev-1",
+		Nonce:      base64.StdEncoding.EncodeToString(nonce[:]),
+		Ciphertext: wantCTB64,
+	}
+	got, err := Decrypt(key, "dev-1", "hello", env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello secret" {
+		t.Fatalf("decrypted = %q", got)
 	}
 }

@@ -233,7 +233,9 @@ Rules:
   that device's key with `binding =
   "notify/<notification_id>/<field>"` (field = the JSON field name being
   encrypted), so a ciphertext cannot move across devices, notifications,
-  or fields either. The v1 `POST /api/v1/notify` request shape above stays
+  or fields either. Notification ids and field names are server-issued,
+  non-empty, and contain neither `/` nor `0x00`, so distinct pairs never
+  produce the same binding string. The v1 `POST /api/v1/notify` request shape above stays
   plaintext; this rule governs the per-device encrypted copies the
   notifications PR fans out.
 - Key selection and rotation follow "Key bootstrap at enrollment" above:

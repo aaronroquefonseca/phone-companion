@@ -38,13 +38,29 @@
 // Payload placement: for `secret` widgets the widget `payload` object IS
 // exactly the envelope (four fields, no others), and the top-level
 // `secret_ref` MUST equal `payload.kid` MUST equal the target device_id.
-// Callers enforce that equality beforeDecrypt; a mismatch fails closed
+// Callers enforce that equality before Decrypt; a mismatch fails closed
 // with no decrypt attempt. Notify per-device copies carry one envelope per
 // secret-bearing field — there is no widget id in that path, the binding
 // above replaces it.
 //
+// NOTE(callers) — two obligations live with envelope consumers (not this
+// package), and the widgets-loader side is already tasked with both:
+// (a) strict envelope JSON decoding that rejects unknown fields, so a
+// future envelope extension cannot slip past a v1 parser silently; and
+// (b) the secret_ref == payload.kid == target device_id triple-equality
+// check before Decrypt. This package takes a decoded Envelope struct, so
+// it cannot enforce (a); it enforces env.Kid == kid itself.
+//
+// Memory lifetime: keys live in caller-owned memory (device rows, enroll
+// responses, in-memory caches). Callers MUST zeroize key copies with
+// clear() where feasible when rotating or discarding them (re-pair,
+// revocation). This package keeps no key state, so there is nothing to
+// wipe here; key-sized stack copies during Encrypt/Decrypt die with the
+// call.
+//
 // Dependencies are stdlib only (crypto/aes, crypto/cipher, crypto/rand).
-// Test vectors are random per run; keys are never logged.
+// Tests use one fixed vector (for the Kotlin port) plus random round
+// trips; keys are never logged.
 package crypto
 
 import (
@@ -54,6 +70,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -70,6 +87,11 @@ const NonceSize = 12
 const TagSize = 16
 
 var (
+	// Sentinel errors distinguish failure modes for tests only. Production
+	// callers MUST map every error from this package to a single wire/UI
+	// outcome ("needs refresh") and MUST NOT branch user-visible behavior
+	// on which sentinel fired — that would be a decrypt oracle.
+	//
 	// ErrUnknownAlgorithm is returned when the envelope alg is not
 	// Algorithm. No decrypt is attempted.
 	ErrUnknownAlgorithm = errors.New("crypto: unknown alg")
@@ -138,9 +160,21 @@ func BuildAAD(kid, binding string) []byte {
 // NotifyBinding builds the AAD binding for a per-device notify secret field:
 // "notify/<notification_id>/<field>". There is no widget id in the notify
 // path; the notification id plus field name takes its place so a ciphertext
-// cannot move across devices, notifications, or fields.
-func NotifyBinding(notificationID, field string) string {
-	return "notify/" + notificationID + "/" + field
+// cannot move across devices, notifications, or fields. It fails closed on
+// empty segments or segments containing "/" (the join separator —
+// otherwise "a/b"+"c" and "a"+"b/c" would collide) or 0x00 (the AAD
+// separator): such ids/fields are never server-issued, so there is nothing
+// legitimate to encrypt under them.
+func NotifyBinding(notificationID, field string) (string, error) {
+	for _, seg := range []string{notificationID, field} {
+		if seg == "" {
+			return "", fmt.Errorf("%w: empty notify binding segment", ErrInvalidEnvelope)
+		}
+		if strings.ContainsAny(seg, "/\x00") {
+			return "", fmt.Errorf("%w: notify binding segment with separator", ErrInvalidEnvelope)
+		}
+	}
+	return "notify/" + notificationID + "/" + field, nil
 }
 
 // validParty reports whether s is usable as a kid or binding: non-empty and
