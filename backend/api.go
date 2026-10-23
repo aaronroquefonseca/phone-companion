@@ -34,6 +34,8 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf 
 	// no devices matched (unknown device_ids, or an empty registry) — not
 	// an error. See handleNotify.
 	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, csrf, handleNotify(db, sender)))
+	// Operator test-notification form (same fan-out pipeline as the API).
+	RegisterNotifyWebUIRoutes(mux, db, sender, sessions, csrf)
 	return withAuthNoStore(mux)
 }
 
@@ -41,6 +43,10 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf 
 // (used by tests to inject a temp-dir registry). A nil sessions store
 // fails closed (denyAllSessions) so widget tests need no auth fixtures.
 // Like NewMux, the returned handler carries the auth no-store pin.
+//
+// Operator surface here: dashboard + widgets preview (registry-backed).
+// The notify test form is intentionally absent: it needs a database and a
+// Sender, which this constructor does not take — use NewMux for it.
 func NewMuxWithWidgets(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CSRFProtection) http.Handler {
 	return withAuthNoStore(newBaseMux(reg, sessions, csrf))
 }
@@ -52,6 +58,14 @@ func newBaseMux(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CS
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
+
+	// Operator dashboard (login-gated home). Exact-path only inside the
+	// handler: the "GET /" pattern is a catch-all, and non-"/" paths 404.
+	if sessions == nil {
+		sessions = denyAllSessions{}
+	}
+	mux.Handle("GET /", webui.RequireAdmin(sessions, webui.HandleDashboard(webuiStoreAdapter{}, webuiWidgetAdapter{reg}, csrf)))
+	mux.Handle("GET /webui/widgets", webui.RequireAdmin(sessions, webui.HandleWidgetsPage(webuiWidgetAdapter{reg}, csrf)))
 
 	// Pairing (P2+P8): enroll + device registry + revocation + WebUI.
 	// See devices.go / pair_wire.go / webui/.
@@ -82,7 +96,10 @@ func authNoStore(path string) bool {
 	if path == "/api/v1/enroll" || path == "/api/v1/enroll-tokens" {
 		return true
 	}
-	if path == "/webui/pair" || strings.HasPrefix(path, "/webui/pair/") {
+	// Operator WebUI: the dashboard home plus every page under /webui/
+	// (pairing, widgets preview, notify form) all carry session or
+	// single-use-token state.
+	if path == "/" || strings.HasPrefix(path, "/webui/") {
 		return true
 	}
 	return false

@@ -57,25 +57,7 @@ func EnrollPayloadForRequest(r *http.Request, rawToken string) (string, error) {
 	return string(raw), nil
 }
 
-var pairPageTmpl = template.Must(template.New("pair").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pair a device — Phone Companion</title>
-<meta name="csrf-token" content="{{.CSRFToken}}">
-<style>
-body{font-family:system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
-table{border-collapse:collapse;width:100%}
-th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
-.revoked{color:#777}
-code{word-break:break-all}
-.notice{background:#f6f6f6;border:1px solid #ddd;padding:.6rem .9rem;border-radius:.4rem}
-.error{background:#fdecea;border:1px solid #e0a39e;padding:.6rem .9rem;border-radius:.4rem}
-</style>
-</head>
-<body>
-<h1>Pair a device</h1>
+var pairBodyTmpl = template.Must(template.New("pairBody").Parse(`<h1>Pair a device</h1>
 {{if .Notice}}<p class="error">{{.Notice}}</p>{{end}}
 {{if .QRDataURI}}
 <div class="notice">
@@ -103,9 +85,7 @@ code{word-break:break-all}
 </table>
 {{else}}
 <p>No devices paired yet.</p>
-{{end}}
-</body>
-</html>`))
+{{end}}`))
 
 type pairPageData struct {
 	// QRDataURI is a server-generated PNG data URI (template.URL: the
@@ -135,15 +115,20 @@ func revokeNotice(v string) string {
 	}
 }
 
-// renderPairPage executes the template with an HTML Content-Type on every
-// path (including errors), so browsers never sniff a missing type.
+// renderPairPage executes the body template inside the shared layout on
+// every path (including errors), so browsers never sniff a missing type.
 // Cache-Control is no-store throughout: the page embeds a single-use enroll
 // token and the operator device registry — both must never sit in a cache.
 func renderPairPage(w http.ResponseWriter, status int, data pairPageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = pairPageTmpl.Execute(w, data)
+	var body strings.Builder
+	_ = pairBodyTmpl.Execute(&body, data)
+	renderLayout(w, status, layoutData{
+		Title:     "Pair a device",
+		Active:    "pairing",
+		SignedIn:  true,
+		CSRFToken: data.CSRFToken,
+		Body:      template.HTML(body.String()),
+	})
 }
 
 // HandlePairPage serves GET /webui/pair: issues a fresh single-use enroll
