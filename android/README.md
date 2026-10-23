@@ -40,6 +40,17 @@ cd android
 > Not run in this docs PR's environment (no Android SDK here); run it
 > before release and report breakage.
 
+## CI
+
+PR checks (`.github/workflows/ci.yml`) run unit tests only — no emulator.
+Same commands locally (needs JDK 17 and the Android SDK, see above):
+
+```sh
+cd android
+./gradlew assembleDebug            # debug APK
+./gradlew testDebugUnitTest        # unit tests (androidTest/ NOT run in CI)
+```
+
 ## Pairing from the app
 
 1. Open the app → Pair screen.

@@ -323,4 +323,31 @@ func TestE2EDoneCriteria(t *testing.T) {
 	if n, _ := e2eHistoryRows(t, db, nidAfter, idB); n != 0 {
 		t.Fatalf("post-revoke: revoked dev-B rows = %d, want 0", n)
 	}
+
+	// --- Post-revoke targeted notify to the revoked device only: accepted 0
+	// --- with zero new history rows for either device.
+	nidRevokedOnly, accepted := e2eNotify(t, mux, cookie,
+		`{"target":{"device_ids":[`+jsonQuote(idB)+`]},"title":"Revoked only","body":"nobody"}`)
+	if accepted != 0 {
+		t.Fatalf("post-revoke revoked-only notify: accepted = %d, want 0", accepted)
+	}
+	if n, _ := e2eHistoryRows(t, db, nidRevokedOnly, idB); n != 0 {
+		t.Fatalf("post-revoke revoked-only: revoked dev-B rows = %d, want 0", n)
+	}
+	if n, _ := e2eHistoryRows(t, db, nidRevokedOnly, idA); n != 0 {
+		t.Fatalf("post-revoke revoked-only: live dev-A rows = %d, want 0", n)
+	}
+
+	// --- Post-revoke broadcast reaches the live device only.
+	nidAllAfter, accepted := e2eNotify(t, mux, cookie,
+		`{"target":{"all":true},"title":"After revoke all","body":"live only"}`)
+	if accepted != 1 {
+		t.Fatalf("post-revoke broadcast notify: accepted = %d, want 1", accepted)
+	}
+	if n, st := e2eHistoryRows(t, db, nidAllAfter, idA); n != 1 || len(st) != 1 || st[0] != notify.StatusQueued {
+		t.Fatalf("post-revoke broadcast: dev-A rows = %d %v, want 1 queued", n, st)
+	}
+	if n, _ := e2eHistoryRows(t, db, nidAllAfter, idB); n != 0 {
+		t.Fatalf("post-revoke broadcast: revoked dev-B rows = %d, want 0", n)
+	}
 }

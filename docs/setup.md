@@ -13,6 +13,9 @@ Generate once per deployment. Never commit them (`.env`, `*.token`,
 openssl rand -hex 32   # SESSION_SECRET (≥32 bytes; hex string is fine)
 htpasswd -bnBC 10 admin 'choose-a-long-password' | cut -d: -f2
 # ^ ADMIN_PASSWORD_HASH. Bcrypt only ($2a/$2b/$2y accepted).
+# Prefer the interactive form `htpasswd -nBC 10 admin` (prompts for the
+# password, so it never lands in shell history); pipe through `cut`
+# the same way. Only `-b` puts the password on the command line.
 ```
 
 Rules enforced at boot (fail closed — the process exits otherwise):
@@ -59,9 +62,24 @@ compose keeps it in the named volume `phone-companion-data`.
 
 - Named volume (default): `docker compose down` (stops writes), then copy
   the volume contents to backup storage before bringing the stack back.
+  One-liner (substitute the real volume name from `docker volume ls` if
+  your compose project prefixes it):
+
+  ```sh
+  docker compose down
+  docker run --rm -v phone-companion-data:/data:ro -v "$PWD:/backup" \
+    alpine tar -czf "/backup/phone-companion-$(date +%F).tgz" -C /data .
+  docker compose up -d
+  ```
+
 - Recommended for production: bind-mount `/data` to a host directory so
   the db file is a regular file you can snapshot with your normal backup
   tooling (stop the stack first — never copy sqlite hot).
+
+Single-file note: `OpenDB` (`backend/db.go`) sets no `journal_mode`
+pragma, so the default delete-journal keeps the database one file —
+there are no `-wal`/`-shm` sidecars to chase. That is why a
+stopped-stack file (or volume-tar) copy is a complete backup.
 
 Losing `/data` means re-pairing every phone (device keys live only there
 and in each phone's encrypted storage) and losing delivery history.

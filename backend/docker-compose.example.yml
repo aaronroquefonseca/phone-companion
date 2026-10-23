@@ -8,7 +8,17 @@
 # Reverse-proxy hint: in production put a TLS-terminating reverse proxy
 # (Caddy, nginx, Traefik) in front and only expose the proxy to the
 # internet. The app must work against the backend over the public internet,
-# so point the proxy at backend:8080 and set the public URL in the WebUI.
+# so point the proxy at the backend container port and set the public URL
+# in the WebUI via EXTERNAL_BASE_URL below. Note the distinction:
+# proxy target = where the proxy forwards (backend:${PORT:-8080});
+# EXTERNAL_BASE_URL = the public origin clients see
+# (e.g. "https://example.com"), used to build the pairing QR enroll_url.
+#
+# TLS minimums (enforce at the proxy; the backend serves plain HTTP):
+#   Caddy:  tls {
+#             protocols tls1.2 tls1.3
+#           }
+#   nginx:  ssl_protocols TLSv1.2 TLSv1.3;
 
 services:
   backend:
@@ -17,9 +27,11 @@ services:
     restart: unless-stopped
     ports:
       # Bind to localhost while testing; the reverse proxy listens publicly.
-      - "127.0.0.1:8080:8080"
+      # Single ${PORT:-8080} knob: host side and container side stay in sync
+      # with the app's $PORT below.
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
     environment:
-      PORT: "8080"
+      PORT: "${PORT:-8080}"
       # --- WebUI login (auth PR implements; placeholders only) ---
       ADMIN_USER: "CHANGEME-admin"
       # Prefer the hash; ADMIN_PASSWORD is a first-boot bootstrap fallback.
