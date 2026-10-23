@@ -314,3 +314,143 @@ func TestPruneHistoryDropsOldRows(t *testing.T) {
 		t.Fatalf("prune kept %q, want n-new", kept)
 	}
 }
+
+// addNotifyDevice inserts an active device row for notify fan-out tests.
+func addNotifyDevice(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO devices (id, name, token_hash) VALUES (?, ?, 'h')`, id, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// acceptedOf decodes the 202 {"accepted"} count from a notify response.
+func acceptedOf(t *testing.T, w *httptest.ResponseRecorder) (float64, string) {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := got["notification_id"].(string)
+	return got["accepted"].(float64), id
+}
+
+// historyDevices returns the device_ids recorded for one notification.
+func historyDevices(t *testing.T, db *sql.DB, notificationID string) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT device_id FROM notification_history WHERE notification_id = ? ORDER BY device_id`, notificationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// Revoked devices must be excluded from {"all":true} fan-out: accepted
+// counts only active devices and history rows cover only active devices.
+func TestHandleNotifySkipsRevokedInAllFanOut(t *testing.T) {
+	db := openNotifyTestDB(t)
+	addNotifyDevice(t, db, "dev-2")
+	if _, err := RevokeDevice(db, "dev-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postNotify(t, db, `{"target":{"all":true},"title":"Hi","body":"Yo"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 1 {
+		t.Fatalf("accepted %v, want 1 (revoked dev-1 excluded): %s", accepted, w.Body.String())
+	}
+	if got := historyDevices(t, db, nid); len(got) != 1 || got[0] != "dev-2" {
+		t.Fatalf("history devices %v, want [dev-2]", got)
+	}
+}
+
+// Revoked devices must be excluded from explicit device_ids fan-out: a
+// revoked-only target is a normal 202 with accepted:0 and no history rows,
+// and a mixed target fans out to active devices only.
+func TestHandleNotifySkipsRevokedInDeviceIDsFanOut(t *testing.T) {
+	db := openNotifyTestDB(t)
+	addNotifyDevice(t, db, "dev-2")
+	if _, err := RevokeDevice(db, "dev-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postNotify(t, db, `{"target":{"device_ids":["dev-1"]},"title":"Hi","body":"Yo"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("revoked-only: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 0 {
+		t.Fatalf("revoked-only: accepted %v, want 0: %s", accepted, w.Body.String())
+	}
+	if got := historyDevices(t, db, nid); len(got) != 0 {
+		t.Fatalf("revoked-only: history devices %v, want none", got)
+	}
+
+	w = postNotify(t, db, `{"target":{"device_ids":["dev-1","dev-2"]},"title":"Hi","body":"Yo"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("mixed: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	accepted, nid = acceptedOf(t, w)
+	if accepted != 1 {
+		t.Fatalf("mixed: accepted %v, want 1: %s", accepted, w.Body.String())
+	}
+	if got := historyDevices(t, db, nid); len(got) != 1 || got[0] != "dev-2" {
+		t.Fatalf("mixed: history devices %v, want [dev-2]", got)
+	}
+}
+
+// Revoke-then-target: a device that accepted before revocation accepts
+// nothing after — revocation takes effect on the notify path immediately.
+func TestHandleNotifyRevokedThenTargeted(t *testing.T) {
+	db := openNotifyTestDB(t)
+
+	w := postNotify(t, db, `{"target":{"device_ids":["dev-1"]},"title":"Hi","body":"Yo"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("before revoke: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	if accepted, _ := acceptedOf(t, w); accepted != 1 {
+		t.Fatalf("before revoke: accepted %v, want 1: %s", accepted, w.Body.String())
+	}
+
+	if _, err := RevokeDevice(db, "dev-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	w = postNotify(t, db, `{"target":{"device_ids":["dev-1"]},"title":"Hi","body":"Yo"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("after revoke: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 0 {
+		t.Fatalf("after revoke: accepted %v, want 0: %s", accepted, w.Body.String())
+	}
+	if got := historyDevices(t, db, nid); len(got) != 0 {
+		t.Fatalf("after revoke: history devices %v, want none", got)
+	}
+
+	// resolveNotifyTargets agrees at the unit level for both target forms.
+	if devs, err := resolveNotifyTargets(context.Background(), db, notify.Target{All: true}); err != nil {
+		t.Fatal(err)
+	} else if len(devs) != 0 {
+		t.Fatalf("all-form after revoke: %d devices, want 0", len(devs))
+	}
+	if devs, err := resolveNotifyTargets(context.Background(), db, notify.Target{DeviceIDs: []string{"dev-1"}}); err != nil {
+		t.Fatal(err)
+	} else if len(devs) != 0 {
+		t.Fatalf("device_ids-form after revoke: %d devices, want 0", len(devs))
+	}
+}

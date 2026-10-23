@@ -97,10 +97,12 @@ func dedupeStrings(in []string) []string {
 // resolveNotifyTargets maps a validated target onto devices with a direct
 // devices-table query owned by this file (P0-stable columns only). Unknown
 // device_ids are skipped — accepted in the 202 response reflects devices
-// actually fanned out to.
+// actually fanned out to. Revoked devices (revoked_at NOT NULL) are always
+// excluded: revocation must stop pushes, not just device polling (which
+// already 401s via AuthenticateDevice).
 func resolveNotifyTargets(ctx context.Context, db *sql.DB, t notify.Target) ([]notify.Device, error) {
 	if t.All {
-		return queryDevices(ctx, db, `SELECT id, name FROM devices ORDER BY id`)
+		return queryDevices(ctx, db, `SELECT id, name FROM devices WHERE revoked_at IS NULL ORDER BY id`)
 	}
 	args := make([]any, 0, len(t.DeviceIDs))
 	placeholders := make([]string, 0, len(t.DeviceIDs))
@@ -109,7 +111,7 @@ func resolveNotifyTargets(ctx context.Context, db *sql.DB, t notify.Target) ([]n
 		placeholders = append(placeholders, "?")
 	}
 	return queryDevices(ctx, db,
-		`SELECT id, name FROM devices WHERE id IN (`+strings.Join(placeholders, ",")+`) ORDER BY id`,
+		`SELECT id, name FROM devices WHERE revoked_at IS NULL AND id IN (`+strings.Join(placeholders, ",")+`) ORDER BY id`,
 		args...)
 }
 
