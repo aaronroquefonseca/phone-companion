@@ -20,7 +20,10 @@ Wire contract lives in `docs/api-contract.md` (frozen); this file explains
   pairing in encrypted storage. Never sees the admin session.
 - **FCM transport**: untrusted for confidentiality of secret-bearing
   content (payloads are E2E-encrypted per device; see crypto package).
-- **Widget source files**: mounted read-only; never carry secrets.
+- **Widget source files**: mounted read-only; secret widgets carry
+  operator-authored plaintext (`payload.json` = `{"secret": "..."}`),
+  never committed, never logged — volume filesystem permissions are the
+  v1 control (see "Secret widgets" below).
 
 ## Secrets inventory
 
@@ -32,6 +35,53 @@ Wire contract lives in `docs/api-contract.md` (frozen); this file explains
 | Enroll token | QR PNG + `enroll_tokens.token_hash` (SHA-256 of raw) | Single-use, 15 min TTL (`EnrollTokenTTL`, single constant) |
 | Device Bearer token | app storage; only `token_hash` in `devices` | Revocable per device; never in lists/logs |
 | Per-device `secret_key` | `devices.secret_key` (32 bytes), app encrypted storage | Returned ONCE at enroll as `device_key`; never again |
+
+## Secret widgets (P10 round-trip)
+
+What is encrypted where:
+
+- **At rest (server volume)**: operator-authored plaintext
+  (`payload.json` = `{"secret": "<utf-8 string>"}`), strict shape
+  (`secret` only, empty string legal). The snapshot holds these bytes in
+  memory; they are never served verbatim and never logged. Trust = the
+  mounted volume (read-only, operator-controlled, never committed).
+- **At serve (per-device)**: for `type == secret` the handler encrypts the
+  plaintext with the requesting device's `secret_key` via `backend/crypto`
+  (AES-256-GCM, fresh 96-bit nonce per response), emitting the P5 wire
+  envelope `{alg,kid,nonce,ciphertext}` as the widget payload with
+  `kid == secret_ref == device_id` and `binding == widget id`
+  (`AAD = UTF-8(kid) || 0x00 || UTF-8(binding)`, byte-identical
+  cross-platform). Non-secrets are served verbatim. The envelope `kid` is
+  a key selector, not secret material.
+- **In transit**: TLS (reverse proxy terminator) plus the per-device layer
+  above (defense in depth: proxy logs, caches, and ETag validators never
+  see plaintext for secrets). Widget polling is HTTPS `GET`; the same
+  crypto package serves notify fan-out where FCM is the untrusted leg.
+- **At rest (app)**: the Room widget cache stores the encrypted envelope
+  exactly as received (never decrypted-at-cache); the per-device
+  `device_key` lives in `EncryptedSharedPreferences`. Decryption happens
+  in memory per Glance render; plaintext is never cached or logged.
+
+Oracle policy (single needs-refresh outcome):
+
+- Missing/revoked/unknown device credential → `401 unauthorized` (same
+  for all callers; no token material in logs).
+- Foreign secret id (authenticated device B asking for device A's
+  `secret_ref`) → `404 widget_not_found`, byte-identical to an unknown
+  id (no existence oracle). The list omits foreign secrets entirely.
+- Own secret that cannot be encrypted (NULL/malformed `secret_key`,
+  RNG/crypto failure, nil DB) → `500 needs_refresh` on single fetch;
+  the list omits that widget (fail closed, never plaintext, never a
+  crash). Server logs note only the widget id, never key/nonce/plaintext.
+- App decrypt: `kid`/binding mismatch, unknown `alg`, bad base64, wrong
+  nonce length, auth-tag failure, and non-UTF-8 output ALL map to the one
+  masked `•••••• needs refresh` UI state with no log distinction
+  (kid-mismatch is indistinguishable from auth failure on screen and in
+  logcat).
+- Rotation (re-pair overwrites `secret_key`, no key history): old
+  ciphertexts fail closed under the new key on both sides; the next poll
+  fetches a freshly-encrypted envelope that decrypts. Cached pre-rotation
+  envelopes show needs-refresh until then.
 
 ## Enroll-token lifecycle (P8)
 

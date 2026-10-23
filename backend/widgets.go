@@ -1,10 +1,11 @@
-// Package main — widget definitions loader (P3 WIDGET DEFINITIONS).
+// Package main — widget definitions loader (P3 WIDGET DEFINITIONS + P10
+// SECRET ROUND-TRIP).
 //
 // On-disk contract: $WIDGET_DIR holds one directory per widget, named by
 // widget id. Each widget directory contains:
 //
-//	widget.toml  — metadata: id, type, title (+ optional secret_ref for
-//	               secret-type widgets; unknown keys are ignored).
+//	widget.toml  — metadata: id, type, title (+ secret_ref for secret-type
+//	               widgets, the target device_id; unknown keys are ignored).
 //	body.md      — content for text-type widgets; served as payload
 //	               {"body": "<raw file content>"}.
 //	payload.json — content for list/status/secret widgets (see below).
@@ -22,21 +23,31 @@
 //	         served verbatim.
 //	status: payload.json → {"state": "ok|warn|alert|unknown", "detail": "..."},
 //	         validated then served verbatim.
-//	secret: payload.json is the P5 encrypted envelope ({alg,kid,nonce,
-//	         ciphertext}), passed through byte-for-byte WITHOUT decryption.
-//	         No crypto is implemented here by design (P5 owns it). The loader
-//	         is strict about the envelope SHAPE (rejects unknown fields,
-//	         requires a non-empty kid) and enforces secret_ref == kid at load
-//	         (P5 triple equality, first leg). The second leg (kid ==
-//	         authenticated device_id) is enforced at SERVE time: secret
-//	         widgets whose kid differs from the caller are omitted from the
-//	         list and 404 on single fetch (fail closed, no existence oracle).
-//	         Under the P3 stub authenticator (device "stub-device") this means
-//	         only kid "stub-device" secrets serve — effectively fail-closed
-//	         until real per-device auth lands (Wave-2 P10). Secret payload
-//	         bytes are never logged. Unknown fields in widget.toml and in
-//	         list/status payloads are TOLERATED (additive v1 versioning);
-//	         strictness applies only to the secret envelope shape.
+//	secret: payload.json is OPERATOR-AUTHORED PLAINTEXT
+//	         {"secret": "<utf-8 string>"} (strict: exactly this field,
+//	         nothing else), stored in memory as plaintext bytes and NEVER
+//	         served verbatim. At SERVE time the handler encrypts the
+//	         plaintext per-device with the requesting device's secret_key
+//	         via backend/crypto, emitting the P5 wire envelope
+//	         {alg,kid,nonce,ciphertext} as the widget payload with
+//	         kid == secret_ref == authenticated device_id and binding ==
+//	         widget id (AAD = UTF-8(kid)||0x00||UTF-8(binding)). Secret
+//	         payload bytes at rest in the snapshot are plaintext operator
+//	         content (mounted volume trust); secret bytes are never logged.
+//	         Unknown fields in widget.toml and in list/status payloads are
+//	         TOLERATED (additive v1 versioning); strictness applies to the
+//	         secret PLAINTEXT shape on disk (fail fast on malformed operator
+//	         input).
+//
+// Triple equality (P5, enforced across load + serve): the static
+// secret_ref MUST equal the authenticated device_id at serve time, and the
+// emitted envelope kid MUST equal that same device_id. Secrets keyed to
+// another device are omitted from the list and 404 on single fetch (fail
+// closed, no existence oracle). Encryption failures (unknown device, NULL
+// or malformed secret_key, RNG/crypto error) fail closed: single fetch
+// returns 500 {"error":"needs_refresh"} and list omits the widget — never
+// plaintext, never a crash, never a key-oracle distinction for foreign ids
+// (those stay 404).
 //
 // updated_at is the last backend-observed change: the newest mtime among
 // widget.toml, the payload file(s), and the widget directory itself,
@@ -61,17 +72,24 @@
 //
 //	GET /api/v1/widgets      → {"widgets": [<envelope>, ...]} (id-sorted,
 //	                          empty array when no widgets load; secret
-//	                          widgets filtered to the caller's kid)
+//	                          widgets filtered to the caller's device and
+//	                          encrypted per-device with a fresh nonce per
+//	                          request, so the list ETag changes whenever
+//	                          secrets are present — clients always refetch)
 //	GET /api/v1/widgets/{id} → single <envelope>; 404 {"error":
 //	                          "widget_not_found"} for unknown ids (or secrets
-//	                          keyed to another device)
+//	                          keyed to another device); 500
+//	                          {"error":"needs_refresh"} when the caller's
+//	                          own secret cannot be encrypted (missing key) —
+//	                          never plaintext
 //
-// Both require device Bearer auth and support conditional polling via ETag /
-// If-None-Match (304). The list ETag is computed per response over exactly
-// the envelopes served, so it stays correct once per-device filtering varies
-// the set (forward-compat for P5/P10). Cache-Control is intentionally short
-// (private, max-age=60, must-revalidate): the app polls manually + ~hourly,
-// so a minute of client caching is safe and saves rescans.
+// Both require device Bearer auth (real AuthenticateDevice; revoked/unknown
+// → 401) and support conditional polling via ETag / If-None-Match (304).
+// Non-secret ETags are stable; secret envelopes carry a fresh random nonce
+// per request so a secret's ETag is fresh per response by design
+// (rotation-safe: the next poll after a re-pair always fetches a
+// newly-encrypted envelope). Cache-Control is intentionally short
+// (private, max-age=60, must-revalidate).
 //
 // Hardening: widget file reads are capped (~1MB) and symlinked widget files
 // are refused (fail closed with a skip warning); symlinked directories are
@@ -97,6 +115,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/aaronroquefonseca/phone-companion/backend/crypto"
 )
 
 // widgetTypes is the closed v1 set from docs/api-contract.md. Unknown types
@@ -124,10 +144,14 @@ type widgetEnvelope struct {
 	SecretRef string          `json:"secret_ref,omitempty"`
 }
 
-// widgetRecord pairs an envelope with its ETag validator.
+// widgetRecord pairs an envelope with its ETag validator. For secret
+// widgets the envelope Payload is never served directly: secretPlaintext
+// holds the operator-authored plaintext bytes and the handler encrypts them
+// per-device at serve time (fresh nonce per request, P10).
 type widgetRecord struct {
-	envelope widgetEnvelope
-	etag     string
+	envelope        widgetEnvelope
+	etag            string
+	secretPlaintext []byte
 }
 
 // widgetMeta is the parsed subset of widget.toml P3 understands.
@@ -399,6 +423,7 @@ func loadOneWidget(parentDir, dirname string) (widgetRecord, time.Time, error) {
 
 	var payload json.RawMessage
 	var payloadFiles []string
+	var secretPlaintext []byte
 	switch meta.Type {
 	case "text":
 		body, err := readCappedFile(filepath.Join(wdir, "body.md"))
@@ -411,27 +436,38 @@ func loadOneWidget(parentDir, dirname string) (widgetRecord, time.Time, error) {
 		}
 		payload = encoded
 		payloadFiles = []string{"body.md"}
-	case "list", "status", "secret":
+	case "list", "status":
 		raw, err := readCappedFile(filepath.Join(wdir, "payload.json"))
 		if err != nil {
 			return fail(fmt.Errorf("read payload.json: %w", err))
 		}
-		kid, err := validateWidgetPayload(meta.Type, raw)
+		if err := validateWidgetPayload(meta.Type, raw); err != nil {
+			return fail(err)
+		}
+		payload = bytes.TrimSpace(raw)
+		payloadFiles = []string{"payload.json"}
+	case "secret":
+		raw, err := readCappedFile(filepath.Join(wdir, "payload.json"))
+		if err != nil {
+			return fail(fmt.Errorf("read payload.json: %w", err))
+		}
+		plain, err := parseSecretPlaintextPayload(raw)
 		if err != nil {
 			return fail(err)
 		}
-		if meta.Type == "secret" {
-			// P5 triple-equality, first leg (load time): the static
-			// secret_ref MUST equal the envelope kid. No decryption —
-			// kid is a plaintext key selector, not secret material.
-			if meta.SecretRef == "" {
-				return fail(fmt.Errorf("secret widget %q must declare secret_ref (must equal payload kid)", dirname))
-			}
-			if meta.SecretRef != kid {
-				return fail(fmt.Errorf("secret_ref %q != payload kid %q", meta.SecretRef, kid))
-			}
+		// P10 triple-equality, first leg (load time): a secret widget
+		// MUST declare its target device. secret_ref IS the kid the
+		// serve path encrypts for; no decryption happens here and no
+		// secret bytes are logged.
+		if meta.SecretRef == "" {
+			return fail(fmt.Errorf("secret widget %q must declare secret_ref (target device_id)", dirname))
 		}
-		payload = bytes.TrimSpace(raw)
+		secretPlaintext = plain
+		// Payload is intentionally left empty in the snapshot: the serve
+		// path encrypts secretPlaintext per-device with a fresh nonce.
+		// Storing no envelope bytes guarantees we never serve stale or
+		// cross-device ciphertext.
+		payload = nil
 		payloadFiles = []string{"payload.json"}
 	}
 
@@ -446,21 +482,28 @@ func loadOneWidget(parentDir, dirname string) (widgetRecord, time.Time, error) {
 		Payload:   payload,
 		SecretRef: meta.SecretRef,
 	}
-	rec := widgetRecord{envelope: env}
-	rec.etag = computeWidgetETag([]widgetEnvelope{env})
+	rec := widgetRecord{envelope: env, secretPlaintext: secretPlaintext}
+	if meta.Type == "secret" {
+		// Stable ETag over metadata only (never served): single GET
+		// computes a fresh ETag over the fresh envelope per request.
+		rec.etag = computeWidgetETag([]widgetEnvelope{{
+			ID: env.ID, Type: env.Type, Title: env.Title,
+			UpdatedAt: env.UpdatedAt, SecretRef: env.SecretRef,
+		}})
+	} else {
+		rec.etag = computeWidgetETag([]widgetEnvelope{env})
+	}
 	return rec, updatedAt, nil
 }
 
 // validateWidgetPayload checks the structural shape of list/status payloads
-// (unknown fields TOLERATED — additive v1 versioning) and the strict shape
-// of secret payloads (unknown envelope fields REJECTED, kid required).
-// Secret bytes are NEVER decrypted or logged here — P5 owns the envelope;
-// kid is a plaintext key selector, and reading it is not crypto.
-// Returns the envelope kid for secret widgets, "" otherwise.
-func validateWidgetPayload(typ string, raw []byte) (string, error) {
+// (unknown fields TOLERATED — additive v1 versioning). Secret payloads are
+// validated separately by parseSecretPlaintextPayload (strict plaintext
+// shape on disk, NOT the wire envelope).
+func validateWidgetPayload(typ string, raw []byte) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
-		return "", fmt.Errorf("payload.json is empty")
+		return fmt.Errorf("payload.json is empty")
 	}
 	switch typ {
 	case "list":
@@ -472,68 +515,78 @@ func validateWidgetPayload(typ string, raw []byte) (string, error) {
 			} `json:"items"`
 		}
 		if err := json.Unmarshal(trimmed, &v); err != nil {
-			return "", fmt.Errorf("invalid list payload.json: %w", err)
+			return fmt.Errorf("invalid list payload.json: %w", err)
 		}
 		if v.Items == nil {
-			return "", fmt.Errorf("invalid list payload.json: missing \"items\" array")
+			return fmt.Errorf("invalid list payload.json: missing \"items\" array")
 		}
 		for i, it := range v.Items {
 			if it.ID == "" || it.Text == "" {
-				return "", fmt.Errorf("invalid list payload.json: item %d needs id and text", i)
+				return fmt.Errorf("invalid list payload.json: item %d needs id and text", i)
 			}
 		}
-		return "", nil
+		return nil
 	case "status":
 		var v struct {
 			State  string `json:"state"`
 			Detail string `json:"detail"`
 		}
 		if err := json.Unmarshal(trimmed, &v); err != nil {
-			return "", fmt.Errorf("invalid status payload.json: %w", err)
+			return fmt.Errorf("invalid status payload.json: %w", err)
 		}
 		switch v.State {
 		case "ok", "warn", "alert", "unknown":
 		default:
-			return "", fmt.Errorf("invalid status payload.json: state %q (want ok|warn|alert|unknown)", v.State)
+			return fmt.Errorf("invalid status payload.json: state %q (want ok|warn|alert|unknown)", v.State)
 		}
-		return "", nil
-	case "secret":
-		// Strict envelope shape: exactly the P5 fields, nothing else, so a
-		// malformed or foreign envelope fails fast at load instead of being
-		// served to a device that would fail closed on it anyway.
-		if trimmed[0] != '{' {
-			return "", fmt.Errorf("invalid secret payload.json: must be a JSON object (P5 envelope)")
-		}
-		var v map[string]json.RawMessage
-		if err := json.Unmarshal(trimmed, &v); err != nil {
-			return "", fmt.Errorf("invalid secret payload.json: %w", err)
-		}
-		for k := range v {
-			if !secretEnvelopeKeys[k] {
-				return "", fmt.Errorf("invalid secret payload.json: unknown envelope field %q", k)
-			}
-		}
-		rawKid, ok := v["kid"]
-		if !ok {
-			return "", fmt.Errorf("invalid secret payload.json: missing \"kid\"")
-		}
-		var kid string
-		if err := json.Unmarshal(rawKid, &kid); err != nil || kid == "" {
-			return "", fmt.Errorf("invalid secret payload.json: \"kid\" must be a non-empty string")
-		}
-		return kid, nil
+		return nil
 	}
-	return "", fmt.Errorf("unknown widget type %q", typ)
+	return fmt.Errorf("unknown widget type %q", typ)
 }
 
-// secretEnvelopeKeys is the closed P5 envelope field set. Unknown fields are
-// rejected at load (strict); list/status payloads and widget.toml stay
-// tolerant per additive v1 versioning.
-var secretEnvelopeKeys = map[string]bool{
-	"alg":        true,
-	"kid":        true,
-	"nonce":      true,
-	"ciphertext": true,
+// secretPlaintextKeys is the closed on-disk shape for secret widgets:
+// exactly {"secret": "<plaintext string>"}. Unknown fields are rejected at
+// load (strict, fail fast on operator typos); the wire envelope shape
+// (alg/kid/nonce/ciphertext) is produced at SERVE time by encrypting this
+// plaintext per-device and is defined by docs/api-contract.md (frozen).
+var secretPlaintextKeys = map[string]bool{
+	"secret": true,
+}
+
+// parseSecretPlaintextPayload validates the operator-authored secret payload
+// on disk and returns the plaintext bytes (UTF-8 of the secret string).
+// The empty string is legal (zero-length plaintext per the crypto contract).
+// Secret bytes are never logged by callers.
+func parseSecretPlaintextPayload(raw []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("invalid secret payload.json: empty")
+	}
+	if trimmed[0] != '{' {
+		return nil, fmt.Errorf("invalid secret payload.json: must be a JSON object {\"secret\": \"...\"}")
+	}
+	var v map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &v); err != nil {
+		return nil, fmt.Errorf("invalid secret payload.json: %w", err)
+	}
+	for k := range v {
+		if !secretPlaintextKeys[k] {
+			return nil, fmt.Errorf("invalid secret payload.json: unknown field %q (want only \"secret\")", k)
+		}
+	}
+	rawSecret, ok := v["secret"]
+	if !ok {
+		return nil, fmt.Errorf("invalid secret payload.json: missing \"secret\"")
+	}
+	var secret string
+	if err := json.Unmarshal(rawSecret, &secret); err != nil {
+		return nil, fmt.Errorf("invalid secret payload.json: \"secret\" must be a string")
+	}
+	// Empty plaintext is legal; non-empty must already be valid UTF-8
+	// (JSON strings are), but crypto.Encrypt re-checks anyway at serve.
+	out := make([]byte, len(secret))
+	copy(out, secret)
+	return out, nil
 }
 
 // newestMtime returns the newest mtime among dir itself and the named files
@@ -726,16 +779,34 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
-// listForDevice returns the sorted envelopes visible to deviceID. Secret
-// widgets keyed to another device are omitted (P5 triple-equality, second
-// leg: kid == authenticated device_id, fail closed).
-func (r *WidgetRegistry) listForDevice(deviceID string) []widgetEnvelope {
+// visibleRecordsForDevice returns the sorted records visible to deviceID.
+// Secret widgets keyed to another device are omitted (P10 triple-equality,
+// second leg: secret_ref == authenticated device_id, fail closed).
+func (r *WidgetRegistry) visibleRecordsForDevice(deviceID string) []widgetRecord {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]widgetEnvelope, 0, len(r.snap.order))
+	out := make([]widgetRecord, 0, len(r.snap.order))
 	for _, id := range r.snap.order {
 		rec := r.snap.widgets[id]
 		if rec.envelope.Type == "secret" && rec.envelope.SecretRef != deviceID {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// listForDevice returns the sorted envelopes visible to deviceID, encrypting
+// secrets with a stub that fails closed. Production handlers do NOT use this:
+// they encrypt via encryptSecretRecord with the caller's real secret_key
+// (see handleWidgetsList). This helper exists so non-HTTP callers get the
+// same fail-closed shape (secrets omitted without a key) without logging
+// secret bytes.
+func (r *WidgetRegistry) listForDevice(deviceID string) []widgetEnvelope {
+	recs := r.visibleRecordsForDevice(deviceID)
+	out := make([]widgetEnvelope, 0, len(recs))
+	for _, rec := range recs {
+		if rec.envelope.Type == "secret" {
 			continue
 		}
 		out = append(out, rec.envelope)
@@ -795,28 +866,77 @@ func DefaultWidgetRegistry() *WidgetRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Device auth (stub) + HTTP handlers
+// Device auth + per-device secret encryption (P10) + HTTP handlers
 // ---------------------------------------------------------------------------
 
-// authenticateDeviceWidgetsStub is a P3 placeholder for device Bearer auth.
-// It accepts any well-formed `Authorization: Bearer <token>` header so the
-// endpoints are exercisable standalone on P0 (curl with any opaque token;
-// 401 without one).
-//
-// TODO (Wave-2 P10): replace with the real AuthenticateDevice from
-// backend/devices.go — verify the bearer token against the stored
-// token_hash, enforce per-device revocation, and return the device_id.
-func authenticateDeviceWidgetsStub(r *http.Request) (deviceID string, ok bool) {
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
+// authenticateDeviceWidgets verifies the device Bearer token against the
+// stored token_hash (real P8 auth, revocation-enforcing). Unknown/missing
+// tokens fail closed with ok=false (caller maps to 401); a nil deviceDB
+// fails closed with ok=false as well (caller maps to 500 — see handlers).
+func authenticateDeviceWidgets(r *http.Request) (deviceID string, ok bool) {
+	if deviceDB == nil {
 		return "", false
 	}
-	scheme, token, found := strings.Cut(auth, " ")
-	if !found || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
+	dev, err := AuthenticateDevice(deviceDB, r)
+	if err != nil || dev == nil {
 		return "", false
 	}
-	// Intentionally a constant: never echo token material back or log it.
-	return "stub-device", true
+	return dev.ID, true
+}
+
+// lookupDeviceSecretKey returns the 32-byte per-device key for deviceID, or
+// an error when the row is missing/revoked or the key is absent/malformed.
+// Secret material is never logged by callers.
+func lookupDeviceSecretKey(deviceID string) ([crypto.KeySize]byte, error) {
+	var zero [crypto.KeySize]byte
+	if deviceDB == nil {
+		return zero, fmt.Errorf("widgets: device DB not wired")
+	}
+	var keyBytes []byte
+	err := deviceDB.QueryRow(
+		`SELECT secret_key FROM devices WHERE id = ? AND revoked_at IS NULL`,
+		deviceID).Scan(&keyBytes)
+	if err != nil {
+		return zero, fmt.Errorf("widgets: no key for device: %w", err)
+	}
+	if len(keyBytes) != crypto.KeySize {
+		return zero, fmt.Errorf("widgets: bad key length %d", len(keyBytes))
+	}
+	var key [crypto.KeySize]byte
+	copy(key[:], keyBytes)
+	return key, nil
+}
+
+// encryptSecretRecord encrypts rec's plaintext for deviceID, emitting the P5
+// wire envelope as the widget payload (kid == deviceID, binding == widget
+// id, AAD = UTF-8(kid)||0x00||UTF-8(binding) via backend/crypto). The
+// secret_ref == deviceID check is re-verified here (defense in depth);
+// mismatches and key/encrypt failures are fail-closed errors — callers map
+// them to needs_refresh (own device) and never serve plaintext.
+func encryptSecretRecord(rec widgetRecord, deviceID string) (widgetEnvelope, error) {
+	if rec.envelope.Type != "secret" {
+		return rec.envelope, nil
+	}
+	if rec.envelope.SecretRef != deviceID {
+		return widgetEnvelope{}, fmt.Errorf("widgets: secret not visible to device")
+	}
+	key, err := lookupDeviceSecretKey(deviceID)
+	if err != nil {
+		return widgetEnvelope{}, err
+	}
+	env, err := crypto.Encrypt(key, deviceID, rec.envelope.ID, rec.secretPlaintext)
+	// Best-effort key hygiene: the stack copy dies with this call; the
+	// package keeps no key state (see crypto package note).
+	if err != nil {
+		return widgetEnvelope{}, err
+	}
+	payloadBytes, err := json.Marshal(env)
+	if err != nil {
+		return widgetEnvelope{}, err
+	}
+	out := rec.envelope
+	out.Payload = payloadBytes
+	return out, nil
 }
 
 func writeWidgetError(w http.ResponseWriter, status int, code string) {
@@ -827,15 +947,36 @@ func writeWidgetError(w http.ResponseWriter, status int, code string) {
 
 // handleWidgetsList serves GET /api/v1/widgets: {"widgets": [<envelope>]}.
 func (r *WidgetRegistry) handleWidgetsList(w http.ResponseWriter, req *http.Request) {
-	deviceID, ok := authenticateDeviceWidgetsStub(req)
+	if deviceDB == nil {
+		writeWidgetError(w, http.StatusInternalServerError, "server misconfigured")
+		return
+	}
+	deviceID, ok := authenticateDeviceWidgets(req)
 	if !ok {
 		writeWidgetError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	r.maybeReload()
-	// ETag is computed over exactly the envelopes served, so it stays
-	// correct per caller once per-device secret filtering varies the set.
-	widgets := r.listForDevice(deviceID)
+	// Per-device serve: non-secrets verbatim, secrets encrypted with the
+	// caller's secret_key (fresh nonce per request). Unencryptable own
+	// secrets are omitted here (single GET reports needs_refresh); foreign
+	// secrets were already filtered by visibleRecordsForDevice (no oracle).
+	recs := r.visibleRecordsForDevice(deviceID)
+	widgets := make([]widgetEnvelope, 0, len(recs))
+	for _, rec := range recs {
+		if rec.envelope.Type != "secret" {
+			widgets = append(widgets, rec.envelope)
+			continue
+		}
+		env, err := encryptSecretRecord(rec, deviceID)
+		if err != nil {
+			log.Printf("widgets: encrypt secret %q failed (no key material logged)", rec.envelope.ID)
+			continue
+		}
+		widgets = append(widgets, env)
+	}
+	// ETag is computed over exactly the envelopes served (fresh ciphertext
+	// included), so secrets naturally bust the cache per request.
 	etag := computeWidgetETag(widgets)
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, max-age=60, must-revalidate")
@@ -849,7 +990,11 @@ func (r *WidgetRegistry) handleWidgetsList(w http.ResponseWriter, req *http.Requ
 
 // handleWidgetsGet serves GET /api/v1/widgets/{id}: a single envelope.
 func (r *WidgetRegistry) handleWidgetsGet(w http.ResponseWriter, req *http.Request) {
-	deviceID, ok := authenticateDeviceWidgetsStub(req)
+	if deviceDB == nil {
+		writeWidgetError(w, http.StatusInternalServerError, "server misconfigured")
+		return
+	}
+	deviceID, ok := authenticateDeviceWidgets(req)
 	if !ok {
 		writeWidgetError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -860,12 +1005,33 @@ func (r *WidgetRegistry) handleWidgetsGet(w http.ResponseWriter, req *http.Reque
 		writeWidgetError(w, http.StatusNotFound, "widget_not_found")
 		return
 	}
-	w.Header().Set("ETag", rec.etag)
+	if rec.envelope.Type != "secret" {
+		w.Header().Set("ETag", rec.etag)
+		w.Header().Set("Cache-Control", "private, max-age=60, must-revalidate")
+		if req.Header.Get("If-None-Match") == rec.etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rec.envelope)
+		return
+	}
+	// Secret: encrypt per-device with a fresh nonce. Any failure (missing
+	// key, crypto error) is fail-closed needs_refresh — never plaintext.
+	// Foreign ids never reach here (getForDevice 404s them, no oracle).
+	env, err := encryptSecretRecord(rec, deviceID)
+	if err != nil {
+		log.Printf("widgets: encrypt secret %q failed (no key material logged)", rec.envelope.ID)
+		writeWidgetError(w, http.StatusInternalServerError, "needs_refresh")
+		return
+	}
+	etag := computeWidgetETag([]widgetEnvelope{env})
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, max-age=60, must-revalidate")
-	if req.Header.Get("If-None-Match") == rec.etag {
+	if req.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(rec.envelope)
+	_ = json.NewEncoder(w).Encode(env)
 }

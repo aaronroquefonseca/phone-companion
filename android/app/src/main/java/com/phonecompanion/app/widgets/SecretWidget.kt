@@ -9,25 +9,26 @@ import androidx.glance.layout.Column
 import androidx.glance.text.Text
 import androidx.room.Room
 import com.phonecompanion.app.data.AppDatabase
+import com.phonecompanion.app.data.SecureStorage
 
 /**
- * Secret widget: fail-closed masked rendering.
+ * Secret widget: fail-closed masked rendering (P10 SECRET ROUND-TRIP).
  *
- * Distinct rendering: masked placeholder column — never plaintext on auth
- * failure. Decryption itself is Wave-2 (P10); this file only exposes the
- * [decryptSecretStub] hook with that TODO.
+ * Distinct rendering: plaintext column on decrypt success, otherwise the
+ * single masked placeholder — never plaintext on auth failure, never a
+ * crash. Decryption is AES-256-GCM via [SecretCrypto] using the stored
+ * per-device key selected by kid; ALL failures map to the one masked
+ * "needs refresh" state (no oracle: the widget never distinguishes
+ * kid-mismatch from auth-tag failure on screen or in logs). Rotation
+ * (re-pair) makes cached envelopes undecryptable until the next poll
+ * fetches freshly-encrypted ones.
  */
 class SecretWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val title = loadTitle(context)
-        // Fail closed by design: without Wave-2 crypto the widget shows the
-        // masked state, never plaintext, never a crash.
-        val visible = decryptSecretStub(
-            ciphertextEnvelopeJson = null,
-            kid = null,
-            widgetId = "secret",
-        )
+        // Fail closed: any decrypt failure shows the masked state.
+        val visible = loadVisibleSecret(context)
         provideContent {
             Column {
                 Text(title)
@@ -51,26 +52,69 @@ class SecretWidget : GlanceAppWidget() {
         }
     }
 
+    private suspend fun loadVisibleSecret(context: Context): String? {
+        return try {
+            val storage = SecureStorage.getInstance(context)
+            val deviceId = storage.deviceId
+            val deviceKey = storage.deviceKey
+            if (deviceId.isNullOrBlank() || deviceKey.isNullOrBlank()) return null
+            val db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
+                .fallbackToDestructiveMigration()
+                .build()
+            try {
+                val row = db.widgetCacheDao().getByType("secret").firstOrNull()
+                    ?: return null
+                // Triple equality (client leg): cached secret_ref must agree
+                // with the stored device id and the envelope kid (checked
+                // inside SecretCrypto). Any mismatch fails closed to null.
+                if (row.secretRef != null && row.secretRef != deviceId) return null
+                SecretCrypto.decryptSecretEnvelope(
+                    envelopeJson = row.payloadJson,
+                    deviceKeyBase64 = deviceKey,
+                    expectedKid = deviceId,
+                    widgetId = row.id,
+                )
+            } finally {
+                db.close()
+            }
+        } catch (e: Exception) {
+            // Single masked outcome: never leak failure details.
+            null
+        }
+    }
+
     companion object {
         private const val DB_NAME = "phone-companion.db"
         private const val FALLBACK_TITLE = "Secret"
-        private const val MASKED = "•••••• needs refresh"
+        internal const val MASKED = "•••••• needs refresh"
     }
 }
 
 /**
- * Decrypt hook stub for Wave-2 (P10).
+ * Decrypt hook (P10): real AES-256-GCM decrypt of the secret envelope,
+ * kept as a top-level function for tests and legacy callers.
  *
- * TODO (Wave-2 P10): implement AES-256-GCM decrypt of the secret envelope
- * (alg/kid/nonce/ciphertext, AAD kid+widget id) using the stored per-device
- * key selected by [kid]; fail closed (null) on mismatch/auth failure.
- * Do NOT cache or log plaintext.
+ * Prefer [SecretCrypto.decryptSecretEnvelope] (takes the device key
+ * explicitly). This wrapper keeps the original P7 signature and fails
+ * closed to null on every failure — including the missing-key case, which
+ * the widget maps to the single needs-refresh UI state.
+ *
+ * @param ciphertextEnvelopeJson the widget payload JSON (P5 envelope).
+ * @param kid the expected device id (must match envelope kid).
+ * @param widgetId the widget id used as the AAD binding.
+ * @param deviceKeyBase64 base64 per-device key; null (no key) fails closed.
  */
 fun decryptSecretStub(
     ciphertextEnvelopeJson: String?,
     kid: String?,
     widgetId: String,
-): String? = null
+    deviceKeyBase64: String? = null,
+): String? = SecretCrypto.decryptSecretEnvelope(
+    envelopeJson = ciphertextEnvelopeJson,
+    deviceKeyBase64 = deviceKeyBase64,
+    expectedKid = kid,
+    widgetId = widgetId,
+)
 
 class SecretWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = SecretWidget()
