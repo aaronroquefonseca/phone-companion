@@ -2,4 +2,32 @@
 <resources>
     <string name="app_name">Phone Companion</string>
     <string name="skeleton_notice">Skeleton build — pairing, widgets, and notifications land in later PRs.</string>
+
+    <string name="main_paired">Paired\nDevice: %1$s\nServer: %2$s</string>
+    <string name="main_not_paired">Not paired yet — open Pair to scan the WebUI QR.</string>
+    <string name="main_last_notification">Last notification\n%1$s — %2$s</string>
+
+    <string name="pair_title">Pair with server</string>
+    <string name="pair_intro">Scan the pairing QR shown in the server WebUI. The server URL and enroll token fill in automatically; you can also enter them by hand.</string>
+    <string name="pair_server_url_hint">Server URL, e.g. https://example.com</string>
+    <string name="pair_device_name_hint">Device name</string>
+    <string name="pair_enroll_token_hint">Enroll token (filled by scan)</string>
+    <string name="pair_scan">Scan QR</string>
+    <string name="pair_enroll">Enroll</string>
+    <string name="pair_status_idle">Not enrolled yet.</string>
+    <string name="pair_opening_scanner">Opening scanner…</string>
+    <string name="pair_scanned_tap_enroll">QR scanned. Check the server URL, then tap Enroll.</string>
+    <string name="pair_scan_cancelled">Scan cancelled.</string>
+    <string name="pair_invalid_qr">That QR code is not a pairing code: %1$s</string>
+    <string name="pair_scanner_unavailable">Scanner unavailable: %1$s</string>
+    <string name="pair_enrolling">Enrolling…</string>
+    <string name="pair_success">Paired as %1$s.</string>
+    <string name="pair_error_expired">This QR code is expired or already used. Generate a new one in the WebUI and scan again.</string>
+    <string name="pair_error_conflict">The server reports this device is already enrolled. Generate a fresh pairing code to re-pair (this rotates credentials).</string>
+    <string name="pair_error_url">Server URL problem: %1$s</string>
+    <string name="pair_error_network">Network error: %1$s</string>
+    <string name="pair_error_network_default">check the server URL and connection.</string>
+    <string name="pair_error_server">Server error (HTTP %1$d: %2$s).</string>
+    <string name="pair_error_unexpected">Unexpected error: %1$s</string>
+    <string name="pair_error_unknown">unknown</string>
 </resources>
