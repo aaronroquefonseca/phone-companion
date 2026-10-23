@@ -38,14 +38,28 @@ object NotificationKinds {
 
     fun isKnown(kind: String): Boolean = kind in KNOWN_KINDS
 
-    fun displayName(kind: String): String =
-        if (isKnown(kind)) kind.replaceFirstChar { it.uppercase() } + " notifications"
-        else "General notifications"
+    fun displayName(kind: String): String = when (kind) {
+        NOTE -> "Notes"
+        ALERT -> "Important alerts"
+        else -> "General notifications"
+    }
 
     fun description(kind: String): String = when (kind) {
         NOTE -> "Notes from your server."
         ALERT -> "Important alerts from your server."
         else -> "All other notifications."
+    }
+
+    /**
+     * Humanizes an explicit backend channel id for the system settings UI
+     * ("ops-alerts_2" → "Ops alerts 2"). The id itself (lowercased,
+     * validated) stays the channel id — only the display name is derived.
+     */
+    fun humanizeChannelId(id: String): String {
+        val words = id.split(Regex("[_\\-]+")).filter { it.isNotEmpty() }
+        if (words.isEmpty()) return "General notifications"
+        return words.mapIndexed { i, w -> if (i == 0) w.replaceFirstChar { it.uppercase() } else w }
+            .joinToString(" ")
     }
 }
 
@@ -100,10 +114,21 @@ data class NotificationPayload(
      * channels — never rewrite an existing channel's importance here.
      */
     fun channelId(): String {
-        val explicit = channel?.trim()?.lowercase()?.take(MAX_CHANNEL_CHARS)
-        if (!explicit.isNullOrEmpty() && CHANNEL_REGEX.matches(explicit)) return explicit
+        val explicit = explicitChannelId()
+        if (explicit != null) return explicit
         if (isKnownKind) return sanitize("pc_$kind").ifEmpty { GENERAL_CHANNEL_ID }
         return GENERAL_CHANNEL_ID
+    }
+
+    /**
+     * The validated explicit backend channel id, or null when the payload
+     * carries none (or it fails [CHANNEL_REGEX]). Single owner so the
+     * channel id, display name, and legacy-cleanup check cannot disagree.
+     */
+    fun explicitChannelId(): String? {
+        val explicit = channel?.trim()?.lowercase()?.take(MAX_CHANNEL_CHARS)
+        if (explicit.isNullOrEmpty() || !CHANNEL_REGEX.matches(explicit)) return null
+        return explicit
     }
 
     /**
@@ -116,15 +141,36 @@ data class NotificationPayload(
      */
     fun legacyChannelIdForCleanup(): String? {
         if (isKnownKind) return null
-        val explicit = channel?.trim()?.lowercase()?.take(MAX_CHANNEL_CHARS)
-        if (!explicit.isNullOrEmpty() && CHANNEL_REGEX.matches(explicit)) return null
+        if (explicitChannelId() != null) return null
         val legacy = sanitize("pc_$kind").ifEmpty { GENERAL_CHANNEL_ID }
         return if (legacy != GENERAL_CHANNEL_ID) legacy else null
     }
 
-    fun channelName(): String = NotificationKinds.displayName(kind)
+    /**
+     * Names the channel after its id: an explicit backend channel shows the
+     * humanized id (so the operator-chosen channel is recognizable in
+     * system settings); otherwise the kind name. Distinct per kind (see
+     * [NotificationKinds.displayName]).
+     */
+    fun channelName(): String {
+        val explicit = explicitChannelId()
+        if (explicit != null) return NotificationKinds.humanizeChannelId(explicit)
+        return NotificationKinds.displayName(kind)
+    }
 
-    fun channelDescription(): String = NotificationKinds.description(kind)
+    /**
+     * Kind description, or — for an explicit backend channel — a line naming
+     * the channel id it came from. Android keeps a channel's user settings
+     * once created: a later priority change only affects newly created
+     * channels, never rewrites an existing channel's importance (see the
+     * in-app notification explainer for the full importance-once note and
+     * the legacy-channel deletion notice).
+     */
+    fun channelDescription(): String {
+        val explicit = explicitChannelId()
+        if (explicit != null) return "Server channel \"$explicit\"."
+        return NotificationKinds.description(kind)
+    }
 
     fun importance(): Int = when (priority.lowercase()) {
         "min" -> NotificationManager.IMPORTANCE_MIN

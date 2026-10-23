@@ -5,16 +5,14 @@
     <!-- Backend reachability for enroll/poll. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Targeted notifications (runtime request on first notify, later PR). -->
+    <!-- Targeted notifications: requested only after a successful pairing
+        (see MainActivity), never on the unpaired launcher. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- QR pairing scan (runtime request in PairActivity, pairing PR). -->
-    <uses-permission android:name="android.permission.CAMERA" />
-    <!-- Hourly poll worker reschedule after reboot (widgets PR). -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <uses-feature
-        android:name="android.hardware.camera"
-        android:required="false" />
+    <!-- No CAMERA permission: pairing scans with the Play services code
+        scanner (GmsBarcodeScanning), which runs Google's own scanner
+        activity and needs no app-side camera permission or boilerplate. -->
+    <!-- No RECEIVE_BOOT_COMPLETED: WorkManager persists the hourly poll
+        across reboots on its own; no boot receiver is promised or needed. -->
 
     <application
         android:allowBackup="false"
@@ -38,6 +36,12 @@
         <activity
             android:name=".ui.WidgetsActivity"
             android:exported="false" />
+        <!-- Transparent tap router for Glance widgets (paired → Widgets,
+             unpaired → Pair). Exported=false: explicit in-app intents only. -->
+        <activity
+            android:name=".ui.WidgetTapRouterActivity"
+            android:exported="false"
+            android:theme="@style/Theme.PhoneCompanion.TapRouter" />
 
         <!-- Push receiver (P9: per-kind channels, up to 3 action buttons,
              BigPictureStyle image attachments, extensible kinds registry). -->

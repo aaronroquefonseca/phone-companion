@@ -3,29 +3,39 @@ package com.phonecompanion.app.ui
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
-import com.google.firebase.messaging.FirebaseMessaging
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.phonecompanion.app.R
 import com.phonecompanion.app.data.EnrollRepository
 import com.phonecompanion.app.data.QrParse
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.parsePairingQr
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Pairing screen: scans the WebUI pairing QR (ML Kit code scanner, no
- * camera boilerplate), POSTs `/api/v1/enroll` over HTTPS, and persists the
- * issued credentials to [SecureStorage]. All failure modes surface as
- * status text — nothing crashes, nothing is logged with secrets.
+ * Pairing screen: scans the WebUI pairing QR (Play services code scanner —
+ * Google's own scanner activity, so this app needs no CAMERA permission and
+ * no camera boilerplate), POSTs `/api/v1/enroll` over HTTPS, and persists
+ * the issued credentials to [SecureStorage]. All failure modes surface as
+ * action-oriented status text with next steps — nothing crashes, nothing is
+ * logged with secrets (raw backend details go to logcat only).
+ *
+ * Rotation-safe: [PairViewModel] holds the enroll job and the latest status,
+ * so rotating mid-enroll neither duplicates the request nor loses feedback.
+ * On success the app navigates to [MainActivity] with
+ * [MainActivity.EXTRA_JUST_PAIRED], which renders the human confirmation
+ * (device name + server, never the raw device id) behind an explicit
+ * Continue.
  */
 class PairActivity : AppCompatActivity() {
 
@@ -34,9 +44,21 @@ class PairActivity : AppCompatActivity() {
     private lateinit var deviceNameEdit: EditText
     private lateinit var enrollTokenEdit: EditText
     private lateinit var scanButton: Button
-    private lateinit var enrollButton: Button
+    private lateinit var pairButton: Button
     private lateinit var statusView: TextView
-    private var busy = false
+
+    private val model: PairViewModel by viewModels {
+        object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val repo = EnrollRepository(storage)
+                return PairViewModel(
+                    repository = repo,
+                    fcmTokenProvider = { fetchFcmToken() },
+                ) as T
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,20 +69,43 @@ class PairActivity : AppCompatActivity() {
         deviceNameEdit = findViewById(R.id.deviceNameEdit)
         enrollTokenEdit = findViewById(R.id.enrollTokenEdit)
         scanButton = findViewById(R.id.scanButton)
-        enrollButton = findViewById(R.id.enrollButton)
+        pairButton = findViewById(R.id.pairButton)
         statusView = findViewById(R.id.pairStatus)
 
-        baseUrlEdit.setText(storage.baseUrl.orEmpty())
-        if (deviceNameEdit.text.isBlank()) {
-            deviceNameEdit.setText(Build.MODEL)
+        if (savedInstanceState == null) {
+            // Fresh open only: view state (and the ViewModel status flow)
+            // restore everything across rotation.
+            baseUrlEdit.setText(storage.baseUrl.orEmpty())
+            if (deviceNameEdit.text.isBlank()) {
+                deviceNameEdit.setText(Build.MODEL)
+            }
         }
 
         scanButton.setOnClickListener { startScan() }
-        enrollButton.setOnClickListener { startEnroll() }
+        pairButton.setOnClickListener {
+            model.startEnroll(
+                baseUrlEdit.text.toString(),
+                enrollTokenEdit.text.toString(),
+                deviceNameEdit.text.toString(),
+            )
+        }
+
+        lifecycleScope.launch {
+            model.state.collect { state ->
+                pairButton.isEnabled = !state.busy
+                scanButton.isEnabled = !state.busy
+                state.messageKey?.let { statusView.text = resolveMessage(it, state.messageArgs) }
+                state.debugDetail?.let { Log.d(TAG, it) }
+                state.enrolled?.let { enrolled ->
+                    model.consumeEnrolled()
+                    onEnrolled(enrolled)
+                }
+            }
+        }
     }
 
     private fun startScan() {
-        setStatus(getString(R.string.pair_opening_scanner))
+        model.onOpeningScanner()
         GmsBarcodeScanning.getClient(this)
             .startScan()
             .addOnSuccessListener { barcode ->
@@ -70,73 +115,59 @@ class PairActivity : AppCompatActivity() {
                             baseUrlEdit.setText(parsed.payload.baseUrl)
                         }
                         enrollTokenEdit.setText(parsed.payload.enrollToken)
-                        setStatus(getString(R.string.pair_scanned_tap_enroll))
+                        model.onQrScanned(parsed.payload.baseUrl.isBlank())
                     }
-                    is QrParse.Invalid ->
-                        setStatus(getString(R.string.pair_invalid_qr, parsed.reason))
+                    is QrParse.Invalid -> model.onQrInvalid(parsed.reason)
                 }
             }
-            .addOnCanceledListener { setStatus(getString(R.string.pair_scan_cancelled)) }
+            .addOnCanceledListener { model.onScanCancelled() }
             .addOnFailureListener { e ->
-                setStatus(getString(R.string.pair_scanner_unavailable, e.message ?: e.toString()))
+                Log.d(TAG, "scanner failure: ${e.message}", e)
+                model.onScannerFailed(e.message)
             }
     }
 
-    private fun startEnroll() {
-        if (busy) return
-        busy = true
-        setButtonsEnabled(false)
-        setStatus(getString(R.string.pair_enrolling))
+    private fun onEnrolled(enrolled: PairViewModel.Enrolled) {
+        // CLEAR_TOP | SINGLE_TOP reuses the existing MainActivity instead of
+        // stacking a second launcher (see MainActivity.onNewIntent).
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(MainActivity.EXTRA_JUST_PAIRED, true)
+            .putExtra(MainActivity.EXTRA_JUST_PAIRED_NAME, enrolled.deviceName)
+            .putExtra(MainActivity.EXTRA_JUST_PAIRED_SERVER, enrolled.serverUrl)
+        startActivity(intent)
+        finish()
+    }
 
-        val rawBaseUrl = baseUrlEdit.text.toString()
-        val token = enrollTokenEdit.text.toString()
-        val deviceName = deviceNameEdit.text.toString().ifBlank { Build.MODEL }
-
-        lifecycleScope.launch {
-            val fcmToken = fetchFcmToken()
-            val result = withContext(Dispatchers.IO) {
-                EnrollRepository(storage).enroll(rawBaseUrl, token, deviceName, fcmToken)
-            }
-            busy = false
-            setButtonsEnabled(true)
-            when (result) {
-                is EnrollRepository.Result.Success -> {
-                    setStatus(getString(R.string.pair_success, result.deviceId))
-                    startActivity(Intent(this@PairActivity, MainActivity::class.java))
-                    finish()
-                }
-                is EnrollRepository.Result.ExpiredOrUsed ->
-                    setStatus(getString(R.string.pair_error_expired))
-                is EnrollRepository.Result.AlreadyEnrolled ->
-                    setStatus(getString(R.string.pair_error_conflict))
-                is EnrollRepository.Result.InvalidUrl ->
-                    setStatus(getString(R.string.pair_error_url, result.reason))
-                is EnrollRepository.Result.InvalidInput ->
-                    setStatus(result.reason)
-                is EnrollRepository.Result.NetworkError ->
-                    setStatus(
-                        getString(
-                            R.string.pair_error_network,
-                            result.message ?: getString(R.string.pair_error_network_default),
-                        ),
-                    )
-                is EnrollRepository.Result.ServerError ->
-                    setStatus(
-                        getString(
-                            R.string.pair_error_server,
-                            result.httpCode,
-                            result.error ?: getString(R.string.pair_error_unknown),
-                        ),
-                    )
-                is EnrollRepository.Result.Unexpected ->
-                    setStatus(
-                        getString(
-                            R.string.pair_error_unexpected,
-                            result.message ?: getString(R.string.pair_error_unknown),
-                        ),
-                    )
-            }
-        }
+    private fun resolveMessage(key: String, args: List<String>): CharSequence = when (key) {
+        PairMessages.SCANNED_CHECK_URL -> getString(R.string.pair_scanned_tap_enroll)
+        PairMessages.SCANNED_ENTER_URL -> getString(R.string.pair_scanned_enter_url)
+        PairMessages.SCAN_CANCELLED -> getString(R.string.pair_scan_cancelled)
+        PairMessages.SCANNER_UNAVAILABLE -> getString(R.string.pair_scanner_unavailable)
+        PairMessages.INVALID_QR_NO_TOKEN -> getString(R.string.pair_invalid_qr_no_token)
+        PairMessages.INVALID_QR_UNRECOGNIZED -> getString(R.string.pair_invalid_qr_unrecognized)
+        PairMessages.INVALID_QR_EMPTY -> getString(R.string.pair_invalid_qr_empty)
+        PairMessages.EMPTY_TOKEN -> getString(R.string.pair_error_empty_token)
+        PairMessages.INVALID_URL ->
+            getString(R.string.pair_error_url, args.firstOrNull().orEmpty())
+        PairMessages.EXPIRED -> getString(R.string.pair_error_expired)
+        PairMessages.CONFLICT -> getString(R.string.pair_error_conflict)
+        PairMessages.VALIDATION -> getString(R.string.pair_error_validation)
+        PairMessages.PERSIST_FAILED -> getString(R.string.pair_error_persist)
+        PairMessages.NETWORK -> getString(
+            R.string.pair_error_network,
+            args.firstOrNull().ifNullOrBlank(getString(R.string.pair_error_network_default)),
+        )
+        PairMessages.SERVER -> getString(
+            R.string.pair_error_server,
+            args.firstOrNull()?.toIntOrNull() ?: 0,
+        )
+        PairMessages.ENROLLING -> getString(R.string.pair_pairing)
+        PairMessages.OPENING_SCANNER -> getString(R.string.pair_opening_scanner)
+        else -> getString(
+            R.string.pair_error_unexpected,
+            args.firstOrNull().ifNullOrBlank(getString(R.string.pair_error_unknown)),
+        )
     }
 
     /**
@@ -147,23 +178,18 @@ class PairActivity : AppCompatActivity() {
     private suspend fun fetchFcmToken(): String? {
         return try {
             withTimeoutOrNull(FCM_TOKEN_TIMEOUT_MS) {
-                FirebaseMessaging.getInstance().token.await()
-            }?.also { storage.fcmToken = it } ?: storage.fcmToken
+                com.google.firebase.messaging.FirebaseMessaging.getInstance().token.await()
+            }
         } catch (_: Exception) {
-            storage.fcmToken
-        }
-    }
-
-    private fun setStatus(text: CharSequence) {
-        statusView.text = text
-    }
-
-    private fun setButtonsEnabled(enabled: Boolean) {
-        scanButton.isEnabled = enabled
-        enrollButton.isEnabled = enabled
+            null
+        }?.also { storage.fcmToken = it } ?: storage.fcmToken
     }
 
     companion object {
+        private const val TAG = "PairActivity"
         private const val FCM_TOKEN_TIMEOUT_MS = 10_000L
     }
 }
+
+private fun String?.ifNullOrBlank(default: String): String =
+    if (this.isNullOrBlank()) default else this

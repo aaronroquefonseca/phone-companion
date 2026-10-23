@@ -65,6 +65,7 @@ dependencies {
     // --- Background poll: ~hourly, screen-on aware, no exact alarms ---
     // TODO (widgets PR): PeriodicWorkRequest + constraints.
     implementation 'androidx.work:work-runtime-ktx:2.9.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.6'
 
     // --- Home-screen widgets (Glance) ---
     // TODO (widgets PR): one implementation per widget type (text/secret/

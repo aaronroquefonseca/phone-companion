@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.PhoneCompanion" parent="Theme.Material3.DayNight.NoActionBar" />
+    <!-- Transparent tap-router activity: no flash when routing widget taps. -->
+    <style name="Theme.PhoneCompanion.TapRouter" parent="Theme.PhoneCompanion">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
 </resources>
