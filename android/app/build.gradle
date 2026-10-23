@@ -1,0 +1,87 @@
+// Phone Companion app module (P0 BASE skeleton).
+//
+// Declares the full dependency surface later PRs build on — networking,
+// storage, background poll, widgets, push, QR scan — but contains no logic:
+// activities navigate, workers/senders are TODO stubs.
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'kotlin-kapt'
+}
+
+android {
+    namespace 'com.phonecompanion.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.phonecompanion.app'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0-skeleton'
+    }
+
+    buildTypes {
+        debug {}
+        release {
+            // TODO (later PR): wire signing config; never commit keystores.
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    // --- UI / core ---
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.activity:activity-ktx:1.9.2'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.6'
+
+    // --- Networking (pairing enroll, widget poll, notify plumbing) ---
+    // TODO (pairing/widgets PRs): base URL config + pinning policy.
+    implementation 'com.squareup.retrofit2:retrofit:2.11.0'
+    implementation 'com.squareup.retrofit2:converter-moshi:2.11.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.okhttp3:logging-interceptor:4.12.0'
+
+    // --- Local storage (device credentials, widget cache) ---
+    // TODO (pairing PR): entities + encrypted store for secrets.
+    implementation 'androidx.room:room-runtime:2.6.1'
+    implementation 'androidx.room:room-ktx:2.6.1'
+    kapt 'androidx.room:room-compiler:2.6.1'
+
+    // --- Background poll: ~hourly, screen-on aware, no exact alarms ---
+    // TODO (widgets PR): PeriodicWorkRequest + constraints.
+    implementation 'androidx.work:work-runtime-ktx:2.9.0'
+
+    // --- Home-screen widgets (Glance) ---
+    // TODO (widgets PR): one implementation per widget type (text/secret/
+    // list/status) — shared polling plumbing, no fully-generic renderer.
+    implementation 'androidx.glance:glance:1.1.1'
+    implementation 'androidx.glance:glance-appwidget:1.1.1'
+
+    // --- Push (FCM) ---
+    // NOTE: google-services plugin intentionally NOT applied: no
+    // google-services.json in the skeleton. The notifications PR wires
+    // sender config + documents setup.
+    implementation platform('com.google.firebase:firebase-bom:33.2.0')
+    implementation 'com.google.firebase:firebase-messaging'
+
+    // --- QR pairing scan (ML Kit barcode) ---
+    // TODO (pairing PR): camera scan flow in PairActivity.
+    implementation 'com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.0'
+
+    // --- Tests ---
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}

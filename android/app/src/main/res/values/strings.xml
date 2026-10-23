@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Phone Companion</string>
+    <string name="skeleton_notice">Skeleton build — pairing, widgets, and notifications land in later PRs.</string>
+</resources>

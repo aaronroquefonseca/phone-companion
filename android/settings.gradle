@@ -1,0 +1,18 @@
+// P0 BASE skeleton: Gradle settings. Plugin versions are the contract;
+// feature modules (widgets per type, pairing, notify) arrive in later PRs.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "Phone Companion"
+include(":app")

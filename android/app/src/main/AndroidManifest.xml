@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P0 BASE skeleton manifest: permissions + component declarations only. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Backend reachability for enroll/poll. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Targeted notifications (runtime request on first notify, later PR). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- QR pairing scan (runtime request in PairActivity, pairing PR). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Hourly poll worker reschedule after reboot (widgets PR). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.PhoneCompanion"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.PairActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.WidgetsActivity"
+            android:exported="false" />
+
+        <!-- Push receiver. TODO (notifications PR): channels, kinds, actions. -->
+        <service
+            android:name=".notify.CompanionMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Glance widget receiver. TODO (widgets PR): per-type widgets. -->
+        <receiver
+            android:name=".widgets.HelloWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/hello_widget_info" />
+        </receiver>
+    </application>
+</manifest>
