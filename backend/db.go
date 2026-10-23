@@ -50,6 +50,8 @@ func OpenDB(path string) (*sql.DB, error) {
 // here; each change must be additive and reviewed.
 func Migrate(db *sql.DB) error {
 	// TODO (pairing PR): migration version tracking table.
-	_, err := db.Exec(schemaDevicesV1)
-	return err
+	if _, err := db.Exec(schemaDevicesV1); err != nil {
+		return err
+	}
+	return migrateSessions(db)
 }
