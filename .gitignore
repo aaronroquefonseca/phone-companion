@@ -1,0 +1,28 @@
+# Android
+android/.gradle/
+android/local.properties
+android/.idea/
+android/app/build/
+android/build/
+*.apk
+*.aab
+
+# Backend (stack decided during implementation; ignore the usual)
+node_modules/
+__pycache__/
+*.pyc
+target/
+dist/
+.venv/
+venv/
+
+# Secrets and local config — never commit
+.env
+*.token
+secrets/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
