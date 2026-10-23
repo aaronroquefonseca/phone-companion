@@ -6,12 +6,15 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
+
+	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 )
 
 // NewMux builds the HTTP router.
-func NewMux() *http.ServeMux {
+func NewMux(db *sql.DB, sender notify.Sender) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
@@ -21,8 +24,8 @@ func NewMux() *http.ServeMux {
 	RegisterPairingRoutes(mux)
 	// TODO (widgets PR): GET /api/v1/widgets
 	mux.HandleFunc("GET /api/v1/widgets", notImplemented("widgets"))
-	// TODO (notifications PR): POST /api/v1/notify
-	mux.HandleFunc("POST /api/v1/notify", notImplemented("notify"))
+	// Implemented (notifications P4): POST /api/v1/notify
+	mux.HandleFunc("POST /api/v1/notify", requireAdminNotifyStub(handleNotify(db, sender)))
 
 	return mux
 }
