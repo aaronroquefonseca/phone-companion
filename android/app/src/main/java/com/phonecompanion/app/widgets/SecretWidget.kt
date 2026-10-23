@@ -2,14 +2,16 @@ package com.phonecompanion.app.widgets
 
 import android.content.Context
 import androidx.glance.GlanceId
+import androidx.glance.appwidget.AppWidgetId
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.provideContent
 import androidx.glance.layout.Column
 import androidx.glance.text.Text
-import androidx.room.Room
-import com.phonecompanion.app.data.AppDatabase
+import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
+import com.phonecompanion.app.data.WidgetCacheEntity
+import kotlinx.coroutines.CancellationException
 
 /**
  * Secret widget: fail-closed masked rendering (P10 SECRET ROUND-TRIP).
@@ -22,13 +24,33 @@ import com.phonecompanion.app.data.SecureStorage
  * kid-mismatch from auth-tag failure on screen or in logs). Rotation
  * (re-pair) makes cached envelopes undecryptable until the next poll
  * fetches freshly-encrypted ones.
+ *
+ * Per-instance content: the row whose id matches this Glance instance is
+ * shown; when nothing matches (or the cache is empty) the first cached
+ * secret is used so a single widget still renders. Database access is one
+ * shared open via [DatabaseHolder] — never a per-call builder, never
+ * closed here.
  */
 class SecretWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val title = loadTitle(context)
+        var title = FALLBACK_TITLE
         // Fail closed: any decrypt failure shows the masked state.
-        val visible = loadVisibleSecret(context)
+        var visible: String? = null
+        try {
+            val db = DatabaseHolder.get(context)
+            val rows = db.widgetCacheDao().getByType("secret")
+            val row = selectRowForGlance(rows, glanceKey(id))
+            title = row?.title ?: FALLBACK_TITLE
+            val storage = SecureStorage.getInstance(context)
+            visible = resolveVisibleSecret(storage.deviceId, storage.deviceKey, row)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Single masked outcome: never leak failure details.
+            title = FALLBACK_TITLE
+            visible = null
+        }
         provideContent {
             Column {
                 Text(title)
@@ -37,57 +59,52 @@ class SecretWidget : GlanceAppWidget() {
         }
     }
 
-    private suspend fun loadTitle(context: Context): String {
-        return try {
-            val db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-                .fallbackToDestructiveMigration()
-                .build()
-            try {
-                db.widgetCacheDao().getByType("secret").firstOrNull()?.title ?: FALLBACK_TITLE
-            } finally {
-                db.close()
-            }
-        } catch (e: Exception) {
-            FALLBACK_TITLE
-        }
-    }
-
-    private suspend fun loadVisibleSecret(context: Context): String? {
-        return try {
-            val storage = SecureStorage.getInstance(context)
-            val deviceId = storage.deviceId
-            val deviceKey = storage.deviceKey
-            if (deviceId.isNullOrBlank() || deviceKey.isNullOrBlank()) return null
-            val db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-                .fallbackToDestructiveMigration()
-                .build()
-            try {
-                val row = db.widgetCacheDao().getByType("secret").firstOrNull()
-                    ?: return null
-                // Triple equality (client leg): cached secret_ref must agree
-                // with the stored device id and the envelope kid (checked
-                // inside SecretCrypto). Any mismatch fails closed to null.
-                if (row.secretRef != null && row.secretRef != deviceId) return null
-                SecretCrypto.decryptSecretEnvelope(
-                    envelopeJson = row.payloadJson,
-                    deviceKeyBase64 = deviceKey,
-                    expectedKid = deviceId,
-                    widgetId = row.id,
-                )
-            } finally {
-                db.close()
-            }
-        } catch (e: Exception) {
-            // Single masked outcome: never leak failure details.
-            null
-        }
-    }
-
     companion object {
-        private const val DB_NAME = "phone-companion.db"
         private const val FALLBACK_TITLE = "Secret"
         internal const val MASKED = "•••••• needs refresh"
     }
+}
+
+/**
+ * Derives the cache key for one Glance instance. App-widget instances
+ * expose their numeric id; anything else falls back to the id string.
+ */
+internal fun glanceKey(id: GlanceId): String =
+    (id as? AppWidgetId)?.appWidgetId?.toString() ?: id.toString()
+
+/**
+ * Per-instance row selection: exact id match wins, otherwise the first
+ * cached secret (single-widget fallback). Null when the cache is empty.
+ */
+internal fun selectRowForGlance(
+    rows: List<WidgetCacheEntity>,
+    key: String,
+): WidgetCacheEntity? = rows.find { it.id == key } ?: rows.firstOrNull()
+
+/**
+ * Fail-closed secret resolution for one selected row. Returns null for
+ * EVERY failure mode — missing credentials (post-[clearCredentials][com.phonecompanion.app.data.SecureStorage.clearCredentials]
+ * unpaired state), empty cache, `secret_ref`/kid mismatch, and auth-tag
+ * failure — which the widget renders as the single [SecretWidget.MASKED]
+ * "needs refresh" state (no oracle).
+ */
+internal fun resolveVisibleSecret(
+    deviceId: String?,
+    deviceKey: String?,
+    row: WidgetCacheEntity?,
+): String? {
+    if (deviceId.isNullOrBlank() || deviceKey.isNullOrBlank()) return null
+    if (row == null) return null
+    // Triple equality (client leg): cached secret_ref must agree
+    // with the stored device id and the envelope kid (checked
+    // inside SecretCrypto). Any mismatch fails closed to null.
+    if (row.secretRef != null && row.secretRef != deviceId) return null
+    return SecretCrypto.decryptSecretEnvelope(
+        envelopeJson = row.payloadJson,
+        deviceKeyBase64 = deviceKey,
+        expectedKid = deviceId,
+        widgetId = row.id,
+    )
 }
 
 /**

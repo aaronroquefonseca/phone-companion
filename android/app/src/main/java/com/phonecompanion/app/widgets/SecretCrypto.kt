@@ -9,6 +9,7 @@ import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlinx.coroutines.CancellationException
 
 /**
  * Per-device secret decryption (P10 SECRET ROUND-TRIP, P11 NOTIFY SECRECY).
@@ -163,18 +164,34 @@ object SecretCrypto {
             val keySpec = SecretKeySpec(keyBytes, "AES")
             val gcmSpec = GCMParameterSpec(GCM_TAG_BITS, nonce)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-            cipher.updateAAD(buildAad(kid, binding))
-            val plainBytes = try {
-                cipher.doFinal(sealed)
-            } catch (e: Exception) {
-                // AEADBadTagException (wrong key, transplanted ciphertext,
-                // tampered bytes) and any provider error: single null.
-                return null
-            }
+            cipher.updateAAD(buildAad(kid, widgetId))
+            val plainBytes = runCipherOrNull { cipher.doFinal(sealed) }
+                ?: return null
             return strictUtf8(plainBytes) ?: return null
+        } catch (e: CancellationException) {
+            // Coroutine cancellation is never a decrypt failure: rethrow so
+            // structured concurrency keeps working (no oracle change — this
+            // path never maps to the masked state, it unwinds the caller).
+            throw e
         } catch (e: Exception) {
             // Any unexpected failure (bad Cipher provider, etc.): same null.
             return null
+        }
+    }
+
+    /**
+     * Runs a single cipher operation, mapping EVERY failure to null — except
+     * coroutine cancellation, which is rethrown. Covers `doFinal`
+     * (AEADBadTagException on wrong key / transplanted ciphertext / tampered
+     * bytes, plus any provider error): the single needs-refresh outcome.
+     */
+    internal fun runCipherOrNull(block: () -> ByteArray): ByteArray? {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
         }
     }
 

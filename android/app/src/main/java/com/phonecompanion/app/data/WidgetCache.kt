@@ -44,4 +44,7 @@ interface WidgetCacheDao {
 
     @Query("SELECT * FROM widget_cache WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): WidgetCacheEntity?
+
+    @Query("DELETE FROM widget_cache")
+    suspend fun clearAll()
 }
