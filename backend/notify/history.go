@@ -48,6 +48,32 @@ func Migrate(db *sql.DB) error {
 	return err
 }
 
+// Retention bounds for notification_history (P4 follow-up, P9). History is
+// diagnostic, not a ledger: rows older than HistoryRetentionDays are
+// dropped, and the table is capped at HistoryMaxRows rows (newest kept).
+// Pruning runs best-effort from the notify handler — a prune failure is
+// logged and never fails the request.
+const (
+	HistoryRetentionDays = 90
+	HistoryMaxRows       = 20000
+)
+
+// PruneHistory deletes rows older than HistoryRetentionDays and trims the
+// table to the HistoryMaxRows newest rows. Plain DELETEs, no schema change;
+// safe to run alongside RecordDelivery.
+func PruneHistory(ctx context.Context, db *sql.DB, now time.Time) error {
+	cutoff := now.UTC().AddDate(0, 0, -HistoryRetentionDays).Format(time.RFC3339)
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM notification_history WHERE created_at < ?`, cutoff); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM notification_history WHERE id NOT IN
+		(SELECT id FROM notification_history ORDER BY id DESC LIMIT ?)`, HistoryMaxRows); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RecordDelivery appends one history row for a single send attempt.
 func RecordDelivery(ctx context.Context, db *sql.DB, notificationID, deviceID, kind, status, errMsg string, at time.Time) error {
 	_, err := db.ExecContext(ctx,

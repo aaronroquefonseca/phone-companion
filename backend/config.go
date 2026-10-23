@@ -38,8 +38,12 @@ type Config struct {
 	// $WIDGET_DIR, default /widgets.
 	WidgetDir string
 
-	// FCM settings are optional until push is implemented.
-	// TODO (notifications PR): document service-account wiring.
+	// FCM settings (notifications P9). The FCM driver is still a skeleton
+	// that fails closed until the Wave-2 push implementation lands; the
+	// default LogSender needs no credentials. When push is wired, the
+	// service-account JSON is mounted at runtime (e.g. a compose secret)
+	// and pointed to from here — it is never committed, baked into the
+	// image, or logged. See README "Notifications".
 	FCMProjectID   string // $FCM_PROJECT_ID
 	FCMCredentials string // $FCM_CREDENTIALS_FILE (path to mounted service-account JSON)
 

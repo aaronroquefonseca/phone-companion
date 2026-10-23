@@ -172,3 +172,22 @@ func TestDriversSend(t *testing.T) {
 		t.Fatal("fcm skeleton: expected not-implemented error")
 	}
 }
+
+func TestDataPayloadActions(t *testing.T) {
+	p := validMessage().DataPayload("nid-1")
+	if p["v"] != PayloadVersion || p["notification_id"] != "nid-1" || p["kind"] == "" {
+		t.Fatalf("missing versioned keys: %v", p)
+	}
+	if p["action_0_id"] != "ack" || p["action_0_title"] != "ACK" {
+		t.Fatalf("action pair missing: %v", p)
+	}
+
+	m := validMessage()
+	m.Actions = nil
+	p = m.DataPayload("nid-2")
+	for k := range p {
+		if len(k) > 7 && k[:7] == "action_" {
+			t.Fatalf("empty actions must emit no action_* keys, got %q", k)
+		}
+	}
+}

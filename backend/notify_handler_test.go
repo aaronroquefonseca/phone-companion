@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,8 +10,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
+	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 	_ "modernc.org/sqlite"
 )
 
@@ -161,24 +164,153 @@ func TestHandleNotifyRejects(t *testing.T) {
 	}
 }
 
-func TestRequireAdminNotifyStubGate(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+func openAuthedMux(t *testing.T, db *sql.DB) (*http.ServeMux, *SessionStore) {
+	t.Helper()
+	store := NewSessionStore(db, strings.Repeat("s", 32))
+	return NewMux(db, notify.NoopSender{}, store, webui.NewCSRFProtection(strings.Repeat("s", 32))), store
+}
 
-	t.Run("closed by default", func(t *testing.T) {
-		t.Setenv("NOTIFY_UNAUTHENTICATED", "")
-		w := httptest.NewRecorder()
-		requireAdminNotifyStub(next)(w, httptest.NewRequest(http.MethodPost, "/api/v1/notify", nil))
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("status %d, want 403", w.Code)
+func loginCookie(t *testing.T, store *SessionStore) *http.Cookie {
+	t.Helper()
+	w := httptest.NewRecorder()
+	if err := store.CreateSession(w, httptest.NewRequest("POST", "/login", nil)); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			return c
 		}
-	})
+	}
+	t.Fatal("no session cookie issued")
+	return nil
+}
 
-	t.Run("flag opens gate", func(t *testing.T) {
-		t.Setenv("NOTIFY_UNAUTHENTICATED", "1")
-		w := httptest.NewRecorder()
-		requireAdminNotifyStub(next)(w, httptest.NewRequest(http.MethodPost, "/api/v1/notify", nil))
-		if w.Code != http.StatusTeapot {
-			t.Fatalf("status %d, want passthrough", w.Code)
-		}
-	})
+func postNotifyMux(mux *http.ServeMux, body string, cookie *http.Cookie, authHeader string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notify", strings.NewReader(body))
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("non-JSON error body: %q", w.Body.String())
+	}
+	return got["error"]
+}
+
+// P9: the NOTIFY_UNAUTHENTICATED bypass is gone. Without a WebUI session the
+// endpoint answers 401; device Bearer tokens never authorize it (403).
+func TestNotifyRequiresWebUISession(t *testing.T) {
+	db := openNotifyTestDB(t)
+	mux, _ := openAuthedMux(t, db)
+	w := postNotifyMux(mux, `{"target":{"all":true},"title":"Hi","body":"Yo"}`, nil, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401 (%s)", w.Code, w.Body.String())
+	}
+	if code := errorCode(t, w); code != "unauthorized" {
+		t.Fatalf("error %q, want unauthorized", code)
+	}
+}
+
+func TestNotifyRejectsDeviceBearer(t *testing.T) {
+	db := openNotifyTestDB(t)
+	mux, store := openAuthedMux(t, db)
+	body := `{"target":{"all":true},"title":"Hi","body":"Yo"}`
+
+	// Device credential alone: 403, not 401 — a valid device token on an
+	// operator endpoint is "valid credential, not allowed".
+	w := postNotifyMux(mux, body, nil, "Bearer device-token-x")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("bearer alone: status %d, want 403 (%s)", w.Code, w.Body.String())
+	}
+	if code := errorCode(t, w); code != "forbidden" {
+		t.Fatalf("bearer alone: error %q, want forbidden", code)
+	}
+
+	// A device credential never upgrades into operator auth, even next to
+	// a live session.
+	w = postNotifyMux(mux, body, loginCookie(t, store), "Bearer device-token-x")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("bearer+session: status %d, want 403 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// P9: authed operator send keeps the P4 contract — 202 with accepted counts,
+// including the accepted:0 case (no devices matched is not an error).
+func TestNotifyAuthedSend(t *testing.T) {
+	db := openNotifyTestDB(t)
+	mux, store := openAuthedMux(t, db)
+	cookie := loginCookie(t, store)
+
+	w := postNotifyMux(mux, `{"target":{"all":true},"title":"Hi","body":"Yo"}`, cookie, "")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("all: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["accepted"] != float64(1) || got["notification_id"] == "" {
+		t.Fatalf("unexpected 202 payload: %s", w.Body.String())
+	}
+
+	// Unknown device_ids match nothing: still 202, accepted 0.
+	w = postNotifyMux(mux, `{"target":{"device_ids":["nope"]},"title":"Hi","body":"Yo"}`, cookie, "")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("unknown ids: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	got = nil
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["accepted"] != float64(0) || got["notification_id"] == "" {
+		t.Fatalf("accepted:0 must still be 202 with an id: %s", w.Body.String())
+	}
+
+	// Validation still applies behind auth.
+	w = postNotifyMux(mux, `{"target":{},"title":"Hi","body":"Yo"}`, cookie, "")
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("empty target: status %d, want 422 (%s)", w.Code, w.Body.String())
+	}
+	if code := errorCode(t, w); code != "empty_target" {
+		t.Fatalf("empty target: error %q, want empty_target", code)
+	}
+}
+
+func TestPruneHistoryDropsOldRows(t *testing.T) {
+	db := openNotifyTestDB(t)
+	ctx := context.Background()
+	old := time.Now().AddDate(0, 0, -(notify.HistoryRetentionDays + 1))
+	if err := notify.RecordDelivery(ctx, db, "n-old", "dev-1", "note", notify.StatusQueued, "", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.RecordDelivery(ctx, db, "n-new", "dev-1", "note", notify.StatusQueued, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.PruneHistory(ctx, db, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notification_history`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("want 1 row after prune, got %d", n)
+	}
+	var kept string
+	if err := db.QueryRow(`SELECT notification_id FROM notification_history`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept != "n-new" {
+		t.Fatalf("prune kept %q, want n-new", kept)
+	}
 }

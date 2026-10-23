@@ -14,13 +14,19 @@ import (
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
-// NewMux builds the HTTP router. sessions gates the operator-only
-// pairing routes (see pair_wire.go); POST /api/v1/enroll stays on
-// enroll-token auth and never touches sessions.
+// NewMux builds the HTTP router. sessions backs the operator gates for
+// pairing (see pair_wire.go) and POST /api/v1/notify (WebUI session via
+// webui.RequireAdmin, 401 without one; device Bearer tokens are rejected
+// with 403 before auth runs — see notify_auth.go). POST /api/v1/enroll
+// stays on enroll-token auth and never touches sessions.
 func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
 	mux := NewMuxWithWidgets(DefaultWidgetRegistry(), sessions, csrf)
-	// Implemented (notifications P4): POST /api/v1/notify
-	mux.HandleFunc("POST /api/v1/notify", requireAdminNotifyStub(handleNotify(db, sender)))
+	// Implemented (notifications P9): POST /api/v1/notify is operator-only
+	// (WebUI session). 202 {"notification_id","accepted"}: accepted counts
+	// successful per-device sends; accepted:0 still returns 202 and means
+	// no devices matched (unknown device_ids, or an empty registry) — not
+	// an error. See handleNotify.
+	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, handleNotify(db, sender)))
 	return mux
 }
 
