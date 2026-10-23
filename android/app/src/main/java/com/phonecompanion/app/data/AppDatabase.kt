@@ -7,22 +7,26 @@ import androidx.room.PrimaryKey
 import androidx.room.RoomDatabase
 
 /**
- * Local storage stub.
- * TODO (pairing PR): device credential storage with revocation support.
- * TODO (widgets PR): widget cache entities.
- * Secret-bearing material must use encrypted storage (threat-model doc).
+ * Local storage: the widget cache.
+ *
+ * Device credentials live in [EnrollmentStore]/[SecureStorage] (encrypted
+ * shared preferences) — this database never holds secret-bearing material
+ * (see docs/threat-model.md). The legacy `devices` entity below is kept only
+ * as a Room schema placeholder and is not read or written at v1.
  */
 @Entity(tableName = "devices")
 data class DeviceEntity(
     @PrimaryKey val id: String,
     val name: String,
-    // TODO: never store raw tokens; hash + encrypted key material only.
+    // Not read or written at v1: raw tokens must never be stored here —
+    // only hashes plus encrypted key material (see SecureStorage and
+    // docs/threat-model.md). Kept so the v1 schema stays stable.
     val tokenHash: String,
 )
 
 @Dao
 interface DeviceDao {
-    // TODO (pairing PR): insert/find/revoke queries.
+    // No queries at v1: pairing state is owned by SecureStorage.
 }
 
 @Database(entities = [DeviceEntity::class, WidgetCacheEntity::class], version = 2, exportSchema = false)

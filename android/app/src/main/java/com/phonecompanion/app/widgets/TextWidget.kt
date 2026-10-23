@@ -1,50 +1,83 @@
 package com.phonecompanion.app.widgets
 
 import android.content.Context
+import androidx.compose.ui.unit.dp
 import androidx.glance.GlanceId
+import androidx.glance.GlanceModifier
+import androidx.glance.action.actionStartActivity
+import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.provideContent
 import androidx.glance.layout.Column
+import androidx.glance.layout.padding
 import androidx.glance.text.Text
 import com.phonecompanion.app.data.DatabaseHolder
+import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetPayloadParser
 import com.phonecompanion.app.data.loadOrFallback
+import com.phonecompanion.app.ui.WidgetTapRouterActivity
 
 /**
  * Text widget: title + markdown/plain body.
  * Distinct rendering: two-line column (title over body), no masking.
  * Content is per instance (see [WidgetInstancePicker]) and only parsed
  * payload fields are rendered — never the raw envelope JSON.
+ *
+ * Tapping the widget opens the app ([WidgetTapRouterActivity] routes to the
+ * Widgets screen when paired, Pair when unpaired). Fallback copy is the
+ * shared [WidgetFallbackCopy] vocabulary, reason-aware where the reason is
+ * known locally (never-paired vs load-failed).
  */
 class TextWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val (title, body) = loadText(context, id)
+        val reason = WidgetFallbackCopy.reasonFor(isPairedNow(context))
+        val (title, body) = loadText(context, id, reason)
         provideContent {
-            Column {
-                Text(title)
-                Text(body)
+            Column(
+                modifier = GlanceModifier.padding(12.dp).clickable(
+                    actionStartActivity<WidgetTapRouterActivity>(),
+                ),
+            ) {
+                Text(WidgetFallbackCopy.ellipsize(title, TITLE_MAX_CHARS))
+                Text(WidgetFallbackCopy.ellipsize(body, BODY_MAX_CHARS))
             }
         }
     }
 
-    private suspend fun loadText(context: Context, id: GlanceId): Pair<String, String> =
-        loadOrFallback(FALLBACK_TITLE to FALLBACK_BODY) {
-            val rows = DatabaseHolder.get(context).widgetCacheDao().getByType("text")
-            val row = WidgetInstancePicker.pick(
-                rows,
-                WidgetInstancePicker.boundIndex(context, TextWidget::class.java, id),
-            ) ?: return@loadOrFallback FALLBACK_TITLE to FALLBACK_BODY
-            val body = WidgetPayloadParser.parseTextBody(row.payloadJson) ?: FALLBACK_BODY
-            WidgetPayloadParser.sanitizeTitle(row.title) to body
-        }
+    private suspend fun loadText(
+        context: Context,
+        id: GlanceId,
+        reason: WidgetFallbackCopy.Reason,
+    ): Pair<String, String> = loadOrFallback(fallbackFor(reason)) {
+        val rows = DatabaseHolder.get(context).widgetCacheDao().getByType("text")
+        val row = WidgetInstancePicker.pick(
+            rows,
+            WidgetInstancePicker.boundIndex(context, TextWidget::class.java, id),
+        ) ?: return@loadOrFallback fallbackFor(reason)
+        val body = WidgetPayloadParser.parseTextBody(row.payloadJson)
+            ?: return@loadOrFallback fallbackFor(reason)
+        WidgetPayloadParser.sanitizeTitle(row.title) to body
+    }
 
     companion object {
-        private const val FALLBACK_TITLE = "Phone Companion"
-        private const val FALLBACK_BODY = "Nothing to show yet."
+        private const val TITLE_MAX_CHARS = 80
+        private const val BODY_MAX_CHARS = 240
+
+        fun fallbackFor(reason: WidgetFallbackCopy.Reason): Pair<String, String> =
+            WidgetFallbackCopy.titleFor("Phone Companion", reason) to
+                WidgetFallbackCopy.bodyFor(reason)
     }
 }
+
+/** Local pairing check for reason-aware fallbacks; read failure fails closed to paired. */
+internal fun isPairedNow(context: Context): Boolean =
+    try {
+        SecureStorage.getInstance(context).isPaired
+    } catch (_: Exception) {
+        true
+    }
 
 class TextWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = TextWidget()
