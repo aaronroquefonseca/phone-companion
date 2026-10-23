@@ -1,8 +1,8 @@
-// Package main — HTTP routes (P0 BASE skeleton).
+// Package main — HTTP routes (P0 BASE skeleton + P3 widgets).
 //
-// Only GET /healthz is implemented. The /api/v1/* routes from
-// docs/api-contract.md are registered as 501 stubs so the URL contract is
-// pinned early; implementations land in later PRs.
+// Only GET /healthz and the widgets endpoints are implemented. The remaining
+// /api/v1/* routes from docs/api-contract.md are registered as 501 stubs so
+// the URL contract is pinned early; implementations land in later PRs.
 package main
 
 import (
@@ -19,6 +19,19 @@ import (
 // one; device Bearer tokens are rejected with 403 before auth runs — see
 // notify_auth.go).
 func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore) *http.ServeMux {
+	mux := NewMuxWithWidgets(DefaultWidgetRegistry())
+	// Implemented (notifications P9): POST /api/v1/notify is operator-only
+	// (WebUI session). 202 {"notification_id","accepted"}: accepted counts
+	// successful per-device sends; accepted:0 still returns 202 and means
+	// no devices matched (unknown device_ids, or an empty registry) — not
+	// an error. See handleNotify.
+	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, handleNotify(db, sender)))
+	return mux
+}
+
+// NewMuxWithWidgets builds the HTTP router backed by a specific registry
+// (used by tests to inject a temp-dir registry).
+func NewMuxWithWidgets(reg *WidgetRegistry) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
@@ -26,14 +39,10 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore) *http
 	// Pairing (P2): enroll + device registry + revocation + WebUI.
 	// See devices.go / pair_wire.go / webui/.
 	RegisterPairingRoutes(mux)
-	// TODO (widgets PR): GET /api/v1/widgets
-	mux.HandleFunc("GET /api/v1/widgets", notImplemented("widgets"))
-	// Implemented (notifications P9): POST /api/v1/notify is operator-only
-	// (WebUI session). 202 {"notification_id","accepted"}: accepted counts
-	// successful per-device sends; accepted:0 still returns 202 and means
-	// no devices matched (unknown device_ids, or an empty registry) — not
-	// an error. See handleNotify.
-	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, handleNotify(db, sender)))
+	// P3 widgets: poll endpoint (device Bearer auth) + single-widget fetch
+	// (additive v1 extension; envelope per docs/api-contract.md).
+	mux.HandleFunc("GET /api/v1/widgets", reg.handleWidgetsList)
+	mux.HandleFunc("GET /api/v1/widgets/{id}", reg.handleWidgetsGet)
 
 	return mux
 }
