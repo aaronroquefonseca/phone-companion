@@ -13,13 +13,17 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/aaronroquefonseca/phone-companion/backend/crypto"
 )
 
 // PayloadVersion is stamped into every data payload so the app can evolve
@@ -50,6 +54,19 @@ const (
 	MaxImageURLLen    = 2048
 	MaxActionIDLen    = 64
 	MaxActionTitleLen = 200
+	// MaxDataPayloadBytes caps the worst-case marshaled FCM data payload.
+	// FCM data messages are limited to ~4KB; AES-256-GCM envelopes expand
+	// secret title/body (base64 + nonce + 16-byte tag + envelope JSON), so
+	// Validate measures the worst case including that expansion and leaves
+	// headroom for transport framing. Over-cap messages fail closed with
+	// payload_too_long — the operator shortens the text, the app never
+	// sees a truncated ciphertext.
+	MaxDataPayloadBytes = 3500
+	// MaxSecretKidLen bounds the kid length assumed when estimating a
+	// secret payload for {"all":true} targets (explicit device_ids use
+	// their real lengths). Server-issued device ids are 32 hex chars; 64
+	// keeps the estimate conservative without rejecting real traffic.
+	MaxSecretKidLen = 64
 )
 
 // ValidPriorities is the closed priority vocabulary (contract:
@@ -83,7 +100,10 @@ type Target struct {
 }
 
 // Message is a validated enqueue request: one logical notification fanned
-// out to every resolved Device.
+// out to every resolved Device. Secret marks operator-declared
+// secret-bearing content: when true the server per-device encrypts title
+// and body (see SecretDataPayload) and the fan-out payload carries P5
+// envelopes instead of plaintext. Non-secret messages are unchanged.
 type Message struct {
 	Target   Target
 	Kind     string
@@ -93,6 +113,7 @@ type Message struct {
 	Channel  string
 	Actions  []Action
 	ImageURL string
+	Secret   bool
 }
 
 // ValidationError carries a stable machine-readable Code for the
@@ -177,7 +198,55 @@ func (m Message) Validate() error {
 			return validationError("invalid_image_url", "image_url must be an https URL with a host")
 		}
 	}
+	if size := m.estimatedPayloadBytes(); size > MaxDataPayloadBytes {
+		return validationError("payload_too_large", "data payload exceeds the FCM size budget: shorten title/body")
+	}
 	return nil
+}
+
+// estimatedPayloadBytes measures the worst-case marshaled data payload for
+// this message, including secret-envelope expansion when Secret is set. It
+// uses a fixed 32-char placeholder notification id (the length
+// newNotificationID mints) and, for secret messages, envelope sizes
+// computed from the real plaintext lengths with the longest known kid
+// (explicit targets) or MaxSecretKidLen ({"all":true}). JSON escaping can
+// only shrink the estimate (base64/hex need no escaping), so the real
+// per-device payload never exceeds this by more than a few bytes — the
+// 3500-vs-4096 headroom absorbs that slack.
+func (m Message) estimatedPayloadBytes() int {
+	const placeholderID = "0123456789abcdef0123456789abcdef"
+	payload := m.DataPayload(placeholderID)
+	if m.Secret {
+		kidLen := MaxSecretKidLen
+		if !m.Target.All {
+			for _, id := range m.Target.DeviceIDs {
+				if len(id) > kidLen {
+					kidLen = len(id)
+				}
+			}
+		}
+		payload["title_env"] = strings.Repeat("A", secretEnvelopeSize(kidLen, len(m.Title)))
+		payload["body_env"] = strings.Repeat("A", secretEnvelopeSize(kidLen, len(m.Body)))
+		delete(payload, "title")
+		delete(payload, "body")
+		payload["secret"] = "true"
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return MaxDataPayloadBytes + 1
+	}
+	return len(raw)
+}
+
+// secretEnvelopeSize predicts the JSON length of one P5 envelope produced
+// by SecretDataPayload for plaintextLen bytes under a kid of kidLen bytes:
+// {"alg":"AES-256-GCM","kid":"<kid>","nonce":"<16>","ciphertext":"<b64>"}
+// with b64 = 4*ceil((plaintext+tag)/3) and a 16-char nonce field.
+func secretEnvelopeSize(kidLen, plaintextLen int) int {
+	ctB64Len := 4 * ((plaintextLen + crypto.TagSize + 2) / 3)
+	return len(`{"alg":"AES-256-GCM","kid":"`) + kidLen +
+		len(`","nonce":"`) + 16 +
+		len(`","ciphertext":"`) + ctB64Len + len(`"}`)
 }
 
 // DataPayload renders the versioned data payload shipped alongside the
@@ -187,6 +256,13 @@ func (m Message) Validate() error {
 // action_<i>_id / action_<i>_title pairs (i = 0..2, at most MaxActions, so
 // no JSON parsing is needed on the app); absent entirely when empty so old
 // readers see no new keys beyond the documented version "v".
+//
+// Secret messages (Message.Secret) MUST NOT use this method for fan-out:
+// use SecretDataPayload, which replaces plaintext title/body with per-device
+// P5 envelopes under "title_env"/"body_env" plus "secret":"true". Shipping
+// a secret message through DataPayload would put operator plaintext on the
+// FCM leg, in sender logs, and in any transport-level retention — the exact
+// leak this package exists to prevent.
 func (m Message) DataPayload(notificationID string) map[string]string {
 	payload := map[string]string{
 		"v":               PayloadVersion,
@@ -205,9 +281,70 @@ func (m Message) DataPayload(notificationID string) map[string]string {
 	return payload
 }
 
-// Sender delivers one Message to one resolved Device.
+// Secret payload keys: a secret fan-out payload carries P5 envelopes here
+// (not plaintext) plus the "secret":"true" flag so the app knows to
+// decrypt. Old app versions ignore these unknown keys and render the
+// blank-fallback (app-name title) — never plaintext, never a crash.
+const (
+	SecretFlagKey = "secret"
+	TitleEnvKey   = "title_env"
+	BodyEnvKey    = "body_env"
+)
+
+// SecretDataPayload renders the per-device data payload for a secret
+// message: title and body are each sealed with backend/crypto under the
+// target device's key (kid == deviceID, binding =
+// NotifyBinding(notificationID, "title"|"body"), fresh random nonce per
+// field via Encrypt) and shipped as P5 envelope JSON strings. Kind,
+// priority, channel, image_url, and actions ride in the clear exactly as in
+// DataPayload — only title/body are secret-bearing. Any encrypt or binding
+// failure returns an error and the caller must record a failed delivery
+// (the app maps undecryptable secrets to its needs-refresh UI with no
+// oracle — see SecretCrypto on Android).
+func (m Message) SecretDataPayload(notificationID, deviceID string, key [crypto.KeySize]byte) (map[string]string, error) {
+	payload := m.DataPayload(notificationID)
+	delete(payload, "title")
+	delete(payload, "body")
+	for field, plaintext := range map[string]string{"title": m.Title, "body": m.Body} {
+		binding, err := crypto.NotifyBinding(notificationID, field)
+		if err != nil {
+			return nil, err
+		}
+		env, err := crypto.Encrypt(key, deviceID, binding, []byte(plaintext))
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(env)
+		if err != nil {
+			return nil, err
+		}
+		if field == "title" {
+			payload[TitleEnvKey] = string(raw)
+		} else {
+			payload[BodyEnvKey] = string(raw)
+		}
+	}
+	payload[SecretFlagKey] = "true"
+	return payload, nil
+}
+
+// Sender delivers one precomputed data payload to one resolved Device. The
+// handler builds the payload (DataPayload or SecretDataPayload) before
+// calling Send, so drivers only ever handle the wire form: for secret
+// messages the sender never sees title/body plaintext — not in FCM posts,
+// not in logs. Senders MUST NOT log payload values beyond notification_id
+// and kind (see LogSender); full content dumps are gated behind
+// NOTIFY_DEBUG=1 at the handler layer, never in drivers.
 type Sender interface {
-	Send(ctx context.Context, device Device, msg Message) error
+	Send(ctx context.Context, device Device, payload map[string]string) error
+}
+
+// DebugEnabled reports whether NOTIFY_DEBUG=1. When set, the handler may
+// log full notify content for local debugging; drivers stay metadata-only
+// regardless. Never set in production: it re-enables the plaintext logging
+// this package otherwise forbids.
+func DebugEnabled() bool {
+	return os.Getenv("NOTIFY_DEBUG") == "1"
 }
 
 // NoopSender drops every delivery successfully. Used for local dev, CI,
@@ -215,16 +352,21 @@ type Sender interface {
 type NoopSender struct{}
 
 // Send implements Sender.
-func (NoopSender) Send(_ context.Context, _ Device, _ Message) error { return nil }
+func (NoopSender) Send(_ context.Context, _ Device, _ map[string]string) error { return nil }
 
 // LogSender records deliveries to the process log and succeeds. It is the
 // default driver: visible behavior with no credentials or network.
+//
+// Secrecy: logs carry ONLY notification_id, device id, and kind — never
+// title/body/image_url or envelope contents, for secret and non-secret
+// messages alike. Operators needing content visibility set NOTIFY_DEBUG=1,
+// which enables full dumps at the handler layer (never here).
 type LogSender struct{}
 
 // Send implements Sender.
-func (LogSender) Send(_ context.Context, device Device, msg Message) error {
-	log.Printf("notify: kind=%q priority=%s channel=%q device=%q title=%q body=%q actions=%d",
-		msg.Kind, msg.Priority, msg.Channel, device.ID, msg.Title, msg.Body, len(msg.Actions))
+func (LogSender) Send(_ context.Context, device Device, payload map[string]string) error {
+	log.Printf("notify: notification_id=%q device=%q kind=%q",
+		payload["notification_id"], device.ID, payload["kind"])
 	return nil
 }
 
@@ -250,7 +392,9 @@ func NewFCMSender(projectID, credentialsFile string) *FCMSender {
 
 // Send implements Sender. Always returns an error until Wave-2 implements
 // the HTTPv1 call, so misconfiguration can never silently drop pushes.
-func (s *FCMSender) Send(_ context.Context, device Device, _ Message) error {
+// The payload (not operator plaintext) is what will be POSTed, so the
+// secret fan-out shape is already safe to pass through here.
+func (s *FCMSender) Send(_ context.Context, device Device, _ map[string]string) error {
 	if s.ProjectID == "" || s.CredentialsFile == "" {
 		return errors.New("notify: FCM driver unconfigured (need FCM_PROJECT_ID and FCM_CREDENTIALS_FILE)")
 	}

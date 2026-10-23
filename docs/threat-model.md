@@ -19,7 +19,11 @@ Wire contract lives in `docs/api-contract.md` (frozen); this file explains
 - **Android app**: holds one `device_token` + one `device_key` per
   pairing in encrypted storage. Never sees the admin session.
 - **FCM transport**: untrusted for confidentiality of secret-bearing
-  content (payloads are E2E-encrypted per device; see crypto package).
+  content. Secret notification title/body are E2E-encrypted per device
+  (P5 envelopes, `secret:true` fan-out — see "Secret notifications"
+  below); non-secret notifications are plaintext on this leg by operator
+  choice. Either way FCM sees routing metadata (destination tokens,
+  timing, sizes) — hiding that is a non-goal (see below).
 - **Widget source files**: mounted read-only; secret widgets carry
   operator-authored plaintext (`payload.json` = `{"secret": "..."}`),
   never committed, never logged — volume filesystem permissions are the
@@ -88,6 +92,46 @@ Oracle policy (single needs-refresh outcome):
   fetches a freshly-encrypted envelope that decrypts. Cached pre-rotation
   envelopes show needs-refresh until then.
 
+## Secret notifications (notify fan-out)
+
+The `POST /api/v1/notify` request body stays operator plaintext (over
+TLS), but the per-device fan-out copies obey an optional `"secret": true`
+flag with the same envelope discipline as secret widgets:
+
+- **At fan-out (per-device)**: when the flag is set, the server encrypts
+  `title` and `body` separately with the target device's `secret_key` via
+  `backend/crypto` (AES-256-GCM, fresh 96-bit nonce per field), with
+  `kid == device_id` and `binding == "notify/<notification_id>/<field>"`
+  (`NotifyBinding`; `AAD = UTF-8(kid) || 0x00 || UTF-8(binding)`,
+  byte-identical cross-platform). The data payload carries the two P5
+  envelopes as `title_env`/`body_env` plus `secret: "true"` — the plaintext
+  `title`/`body` keys are absent, so Sender/FCM/logs never see them. Kind,
+  priority, channel, image_url, and actions ride in the clear (not
+  secret-bearing). Without the flag the payload is the plaintext
+  `DataPayload` exactly as before.
+- **Size budget**: the request validator measures the worst-case marshaled
+  data payload (~3500B cap, FCM fits ~4KB) including envelope expansion,
+  and rejects over-cap messages with `payload_too_long` — a truncated
+  ciphertext must never ship.
+- **In transit**: FCM is the untrusted leg (same posture as widgets): proxy
+  logs, FCM retention, and transport caches see envelopes only. The app
+  decrypts via the generalized `SecretCrypto` against its stored
+  `device_key`; EVERY failure (missing key, kid/binding mismatch, bad
+  envelope, auth failure) renders the existing blank-notification fallback
+  (app-name title, no body) — one outcome, no oracle, nothing logged.
+- **At rest (server)**: delivery history stores notification_id, device,
+  kind, status, and sanitized error text only — driver error strings pass
+  an allowlist + 500-rune truncation before storage, so transport output
+  can never smuggle secrets or control bytes into the table. History
+  pruning is COUNT-gated (skipped under 1000 rows) so quiet servers pay no
+  scan cost.
+- **Driver honesty**: stub drivers (`log`, `noop`) deliver nothing, so
+  with real targets they answer `500 driver_unavailable` instead of lying
+  with `accepted > 0`; a fully failing real driver (e.g. misconfigured
+  FCM) does the same. `202 accepted: 0` is reserved for genuinely zero
+  targets (unknown device_ids, empty registry). The default `LogSender`
+  logs only notification_id/device/kind — full content dumps exist only
+  behind an explicit `NOTIFY_DEBUG=1` (local debugging, never production).
 Multi-secret cardinality (v1): one widget directory targets exactly one
 device — `secret_ref` is a single `device_id`, required at load and
 re-verified at serve. To show the same secret on N phones, duplicate the

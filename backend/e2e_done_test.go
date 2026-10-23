@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -30,6 +31,16 @@ import (
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
+
+// e2eNullSender is the harness delivery driver: records nothing, succeeds
+// always. It is deliberately a distinct type from notify.NoopSender — stub
+// drivers fail closed in handleNotify, while the harness needs delivery
+// success to assert history rows.
+type e2eNullSender struct{}
+
+func (e2eNullSender) Send(_ context.Context, _ notify.Device, _ map[string]string) error {
+	return nil
+}
 
 // e2eOperatorLogin performs a real WebUI login (POST /login with operator
 // credentials) and returns the session cookie that RequireAdmin accepts.
@@ -177,10 +188,12 @@ func TestE2EDoneCriteria(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := newBaseMux(reg, sessions, csrf)
-	// Same operator notify wiring as production NewMux (NoopSender keeps
-	// the harness hermetic: rows still land in notification_history).
+	// Same operator notify wiring as production NewMux. The harness uses a
+	// hermetic recording driver (captureSender records deliveries; stub
+	// Log/NoopSender fail closed in the handler now): rows still land in
+	// notification_history.
 	base.Handle("POST /api/v1/notify",
-		notifyAdminChain(sessions, handleNotify(db, notify.NoopSender{})))
+		notifyAdminChain(sessions, handleNotify(db, &captureSender{})))
 	webui.RegisterRoutes(base, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",

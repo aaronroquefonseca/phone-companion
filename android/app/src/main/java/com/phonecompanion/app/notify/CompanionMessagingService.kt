@@ -10,33 +10,75 @@ import com.google.firebase.messaging.RemoteMessage
 import com.phonecompanion.app.R
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.ui.MainActivity
+import com.phonecompanion.app.widgets.SecretCrypto
 
 /**
  * FCM receiver: renders data messages per [NotificationPayload] — one
- * channel per kind (or explicit backend channel), tap opens [MainActivity],
- * up to 3 action buttons re-open the app with the tapped action id, and an
- * `image_url` attachment renders BigPictureStyle on successful HTTPS
- * download. Unknown kinds and unknown payload versions render generically
- * (never crash); image download failures fall back to text (never crash).
+ * channel per known kind (or explicit backend channel, else pc_general),
+ * tap opens [MainActivity], up to 3 action buttons re-open the app with
+ * the tapped action id.
+ *
+ * Posting never waits on the network: the text notification posts FIRST
+ * and an `image_url` attachment upgrades it to BigPictureStyle after the
+ * fetch completes (same id, so the upgrade replaces rather than stacks).
+ * Unknown kinds and unknown payload versions render generically (never
+ * crash); image download failures keep the text post (never crash).
+ *
+ * Secret fan-out (`secret: "true"` with `title_env`/`body_env` P5
+ * envelopes) decrypts per-device via [SecretCrypto] against the stored
+ * device key. ANY decrypt failure renders the existing blank-notification
+ * fallback (app-name title, no body) — the single needs-refresh outcome
+ * with no oracle: a rotated key is indistinguishable from a tampered
+ * envelope on screen and in logcat. Envelopes are never logged and never
+ * forwarded into activity extras.
  */
 class CompanionMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
+        try {
+            onMessageReceivedInternal(message)
+        } catch (_: Throwable) {
+            // Last-resort chrome: a blank fallback post must never itself
+            // crash (OOM and framework errors included).
+            try {
+                val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                manager.notify(
+                    (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
+                    NotificationCompat.Builder(this, NotificationPayload.GENERAL_CHANNEL_ID)
+                        .setSmallIcon(R.drawable.ic_notification)
+                        .setContentTitle(getString(R.string.app_name))
+                        .setAutoCancel(true)
+                        .build(),
+                )
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun onMessageReceivedInternal(message: RemoteMessage) {
         val payload = NotificationPayload.from(message)
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         ensureChannel(manager, payload)
+        cleanupLegacyChannel(manager, payload)
+
+        val (title, body) = resolveText(payload)
+        // Re-key the resolved text through the payload so display
+        // fallbacks (blank title → app name, blank body → null) apply
+        // uniformly to plain and decrypted-secret text.
+        val shown = payload.copy(title = title, body = body)
+        val shownTitle = shown.displayTitle(getString(R.string.app_name))
 
         val tapIntent = PendingIntent.getActivity(
             this,
             payload.notifyId(),
-            appIntent(payload, actionId = null),
+            appIntent(payload, title, body, actionId = null),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
         val builder = NotificationCompat.Builder(this, payload.channelId())
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(payload.title.ifBlank { getString(R.string.app_name) })
-            .setContentText(payload.body.ifBlank { null })
+            .setContentTitle(shownTitle)
+            .setContentText(shown.displayBody())
             .setPriority(payload.compatPriority())
             .setContentIntent(tapIntent)
             .setAutoCancel(true)
@@ -48,39 +90,70 @@ class CompanionMessagingService : FirebaseMessagingService() {
             val actionIntent = PendingIntent.getActivity(
                 this,
                 actionRequestCode(payload.notifyId(), index),
-                appIntent(payload, actionId = action.id),
+                appIntent(payload, title, body, actionId = action.id),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             builder.addAction(0, action.title, actionIntent)
         }
 
-        // Image attachment: BigPictureStyle on success, BigTextStyle
-        // fallback on any download/decode failure (fail-closed).
+        if (body.isNotBlank()) {
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(body))
+        }
+
+        // Post FIRST: the user sees text immediately even if the image
+        // fetch stalls or fails. No network on the critical path.
+        manager.notify(payload.notifyId(), builder.build())
+
+        // Upgrade after fetch: BigPictureStyle replaces the text post on
+        // success; any failure keeps the text post (fail-closed).
         val bitmap = payload.imageUrl?.let(NotificationImages::download)
         if (bitmap != null) {
             builder.setStyle(
                 NotificationCompat.BigPictureStyle()
                     .bigPicture(bitmap)
-                    .setSummaryText(payload.body.ifBlank { null }),
+                    .setSummaryText(shown.displayBody()),
             )
-        } else if (payload.body.isNotBlank()) {
-            builder.setStyle(NotificationCompat.BigTextStyle().bigText(payload.body))
+            manager.notify(payload.notifyId(), builder.build())
         }
-
-        manager.notify(payload.notifyId(), builder.build())
     }
 
-    override fun onNewToken(token: String) {
-        // Cached for the next enroll; already-paired devices re-send it on
-        // the next widgets poll (widgets PR) — never logged.
-        SecureStorage.getInstance(this).fcmToken = token
+    /**
+     * Resolves display text: secret payloads decrypt title/body
+     * per-device; every failure (missing key, kid mismatch, bad envelope,
+     * auth failure) falls back to blank — the existing
+     * blank-notification rendering, indistinguishable from a genuinely
+     * empty notification. Plaintext envelopes are never logged.
+     */
+    private fun resolveText(payload: NotificationPayload): Pair<String, String> {
+        if (!payload.isSecret) return payload.title to payload.body
+        val storage = SecureStorage.getInstance(this)
+        val title = SecretCrypto.decryptNotifyField(
+            envelopeJson = payload.titleEnvelope,
+            deviceKeyBase64 = storage.deviceKey,
+            expectedKid = storage.deviceId,
+            notificationId = payload.notificationId,
+            field = "title",
+        )?.take(NotificationPayload.MAX_TITLE_CHARS).orEmpty()
+        val body = SecretCrypto.decryptNotifyField(
+            envelopeJson = payload.bodyEnvelope,
+            deviceKeyBase64 = storage.deviceKey,
+            expectedKid = storage.deviceId,
+            notificationId = payload.notificationId,
+            field = "body",
+        )?.take(NotificationPayload.MAX_BODY_CHARS).orEmpty()
+        return title to body
     }
 
-    private fun appIntent(payload: NotificationPayload, actionId: String?): Intent =
+    private fun appIntent(
+        payload: NotificationPayload,
+        title: String,
+        body: String,
+        actionId: String?,
+    ): Intent =
         Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra(MainActivity.EXTRA_NOTIFICATION_TITLE, payload.title)
-            .putExtra(MainActivity.EXTRA_NOTIFICATION_BODY, payload.body)
+            .putExtra(MainActivity.EXTRA_NOTIFICATION_TITLE, title)
+            .putExtra(MainActivity.EXTRA_NOTIFICATION_BODY, body)
             .putExtra(MainActivity.EXTRA_NOTIFICATION_ID, payload.notificationId)
             .putExtra(MainActivity.EXTRA_NOTIFY_INT_ID, payload.notifyId())
             .putExtra(MainActivity.EXTRA_NOTIFICATION_ACTION_ID, actionId)
@@ -90,6 +163,19 @@ class CompanionMessagingService : FirebaseMessagingService() {
         manager.createNotificationChannel(
             NotificationChannel(payload.channelId(), payload.channelName(), payload.importance()),
         )
+    }
+
+    /**
+     * Deletes the pre-allowlist per-kind channel for unknown kinds (older
+     * builds minted `pc_<kind>` for any kind). Explicit channels are never
+     * deleted; known-kind channels are never deleted.
+     */
+    private fun cleanupLegacyChannel(manager: NotificationManager, payload: NotificationPayload) {
+        val legacy = payload.legacyChannelIdForCleanup() ?: return
+        try {
+            manager.deleteNotificationChannel(legacy)
+        } catch (_: Throwable) {
+        }
     }
 
     companion object {
