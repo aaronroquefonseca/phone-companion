@@ -54,7 +54,7 @@ func e2eOperatorLogin(t *testing.T, mux *http.ServeMux, username, password strin
 // e2eIssueEnrollToken mints a single-use pairing token via the operator API.
 func e2eIssueEnrollToken(t *testing.T, mux *http.ServeMux, cookie *http.Cookie) string {
 	t.Helper()
-	w := doReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
+	w := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("issue enroll token: got %d (%s), want 201", w.Code, w.Body.String())
 	}
@@ -93,7 +93,9 @@ func e2eEnrollDevice(t *testing.T, mux *http.ServeMux, token, name, fcm string) 
 // e2eNotify posts a notify request and returns the 202 id + accepted count.
 func e2eNotify(t *testing.T, mux *http.ServeMux, cookie *http.Cookie, body string) (notificationID string, accepted int) {
 	t.Helper()
-	w := doReq(t, mux, "POST", "/api/v1/notify", body, "application/json", cookie)
+	// Operator write marker for forward-compat with the API write guard
+	// (parallel auth batch owns POST /api/v1/notify hardening).
+	w := doOperatorWriteReq(t, mux, "POST", "/api/v1/notify", body, "application/json", cookie)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("notify %s: got %d (%s), want 202", body, w.Code, w.Body.String())
 	}

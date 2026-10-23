@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,11 +16,16 @@ import (
 //
 //   - POST /api/v1/enroll stays on enroll-token auth ONLY (single-use QR
 //     token consumed atomically). It MUST NOT require the admin session —
-//     the phone has no session cookie.
+//     the phone has no session cookie, and MUST NOT require the API write
+//     guard below for the same reason.
 //   - Every other route here is operator-only behind webui.RequireAdmin:
 //     POST /api/v1/enroll-tokens (issue), GET /api/v1/devices (list),
 //     DELETE /api/v1/devices/{id} (revoke), GET /webui/pair,
 //     POST /webui/pair/revoke (CSRF-guarded form).
+//   - POST /api/v1/enroll-tokens additionally requires explicit
+//     non-browser intent via requireAPIWriteGuard (X-Requested-With or
+//     session-bound CSRF token) so a bare session cookie alone cannot mint
+//     tokens cross-site. Missing proof fails closed with 403 JSON.
 //
 // Unauthenticated callers get 401 JSON on /api/* and a 302 to /login on
 // /webui/*, per docs/api-contract.md.
@@ -28,12 +34,12 @@ func RegisterPairingRoutes(mux *http.ServeMux, sessions webui.SessionStore, csrf
 		sessions = denyAllSessions{}
 	}
 	mux.Handle("POST /api/v1/enroll", http.HandlerFunc(HandleEnroll))
-	mux.Handle("POST /api/v1/enroll-tokens", webui.RequireAdmin(sessions, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/enroll-tokens", webui.RequireAdmin(sessions, requireAPIWriteGuard(csrf, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowEnrollIssue(w, r) {
 			return
 		}
 		HandleIssueEnrollToken(w, r)
-	})))
+	}))))
 	mux.Handle("GET /api/v1/devices", webui.RequireAdmin(sessions, http.HandlerFunc(HandleListDevices)))
 	mux.Handle("DELETE /api/v1/devices/{id}", webui.RequireAdmin(sessions, http.HandlerFunc(HandleRevokeDevice)))
 
@@ -99,15 +105,64 @@ func (webuiStoreAdapter) RevokeDevice(_ context.Context, id string) (bool, error
 	return RevokeDevice(deviceDB, id)
 }
 
+// apiWriteHeader is the conventional non-browser marker required on
+// state-changing operator API POSTs. Fetch/XHR clients send it; a
+// cross-site form cannot set it without a CORS preflight, which browsers
+// block without explicit opt-in. The session-bound CSRF token is accepted
+// as an alternative so non-fetch operator tooling with access to the
+// WebUI token still works.
+const (
+	apiWriteHeader      = "X-Requested-With"
+	apiWriteHeaderValue = "XMLHttpRequest"
+)
+
+// validAPIWriteRequest reports whether a state-changing operator API
+// request carries explicit intent: either the X-Requested-With header or
+// a session-bound CSRF token (webui VerifyRequest: csrf_token form field
+// or X-CSRF-Token header). Local on purpose: webui.VerifyRequest's
+// signature is owned by the parallel auth batch — DO NOT move this into
+// webui or change webui.VerifyRequest.
+func validAPIWriteRequest(r *http.Request, csrf *webui.CSRFProtection) bool {
+	if r == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get(apiWriteHeader)), apiWriteHeaderValue) {
+		return true
+	}
+	if csrf != nil && csrf.VerifyRequest(r) {
+		return true
+	}
+	return false
+}
+
+// requireAPIWriteGuard fails closed with 403 JSON when neither proof is
+// present. It runs INSIDE webui.RequireAdmin so unauthenticated callers
+// still get 401 (auth first, CSRF second).
+func requireAPIWriteGuard(csrf *webui.CSRFProtection, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !validAPIWriteRequest(r, csrf) {
+			writeAPIError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // enrollIssueLimiter bounds token issuance (both the JSON API and the
 // WebUI page mint single-use tokens): maxEnrollIssuesPerWindow per client
 // IP per window. In-memory only — a restart clears it, which is safe
 // because outstanding tokens live in the DB, not the limiter. The limit
 // exists to stop QR-refresh loops and token-spray from filling the
 // enroll_tokens table; legitimate pairing needs ~1 token per scan.
+//
+// The map itself is bounded (maxEnrollLimiterIPs): entries whose stamps
+// all expired are deleted on sight, and a full map is swept then
+// LRU-evicted (oldest last activity) so a distinct-IP spray cannot grow
+// memory without bound while a live bucket still limits.
 const (
 	maxEnrollIssuesPerWindow = 30
 	enrollIssueWindow        = time.Minute
+	maxEnrollLimiterIPs      = 10000
 )
 
 var enrollIssueMu sync.Mutex
@@ -130,6 +185,16 @@ func allowEnrollIssue(w http.ResponseWriter, r *http.Request) bool {
 			kept = append(kept, t)
 		}
 	}
+	_, exists := enrollIssueByIP[ip]
+	if len(kept) == 0 {
+		// No live stamps: drop the empty bucket so idle IPs do not
+		// linger. The current request re-creates the entry below.
+		if exists {
+			delete(enrollIssueByIP, ip)
+			exists = false
+		}
+		kept = nil
+	}
 	if len(kept) >= maxEnrollIssuesPerWindow {
 		enrollIssueByIP[ip] = kept
 		enrollIssueMu.Unlock()
@@ -140,9 +205,66 @@ func allowEnrollIssue(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return false
 	}
+	if !exists {
+		// New bucket: make room first so the map stays bounded under
+		// distinct-IP spray.
+		if len(enrollIssueByIP) >= maxEnrollLimiterIPs {
+			evictEnrollLimiterLocked(now)
+		}
+		if len(enrollIssueByIP) >= maxEnrollLimiterIPs {
+			// Sweep found nothing expirable (all buckets live): evict
+			// one entry to preserve the bound; correctness (per-IP
+			// limiting for live buckets) is unaffected.
+			for k := range enrollIssueByIP {
+				delete(enrollIssueByIP, k)
+				break
+			}
+		}
+	}
 	enrollIssueByIP[ip] = append(kept, now)
 	enrollIssueMu.Unlock()
 	return true
+}
+
+// evictEnrollLimiterLocked frees one slot. Caller must hold enrollIssueMu.
+// It first sweeps expired stamps (deleting buckets that go empty), then —
+// only if still at cap — evicts the bucket with the oldest last activity
+// (LRU-ish: legitimate bursty IPs keep recent stamps, spray IPs are old).
+func evictEnrollLimiterLocked(now time.Time) {
+	for ip, stamps := range enrollIssueByIP {
+		kept := stamps[:0]
+		for _, t := range stamps {
+			if now.Sub(t) < enrollIssueWindow {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(enrollIssueByIP, ip)
+		} else if len(kept) != len(stamps) {
+			enrollIssueByIP[ip] = kept
+		}
+	}
+	if len(enrollIssueByIP) < maxEnrollLimiterIPs {
+		return
+	}
+	var oldestIP string
+	var oldestLast time.Time
+	first := true
+	for ip, stamps := range enrollIssueByIP {
+		last := time.Time{}
+		for _, t := range stamps {
+			if t.After(last) {
+				last = t
+			}
+		}
+		if first || last.Before(oldestLast) {
+			oldestIP, oldestLast = ip, last
+			first = false
+		}
+	}
+	if oldestIP != "" {
+		delete(enrollIssueByIP, oldestIP)
+	}
 }
 
 func enrollClientIP(r *http.Request) string {
