@@ -164,9 +164,9 @@ class CompanionMessagingService : FirebaseMessagingService() {
 
     private fun ensureChannel(manager: NotificationManager, payload: NotificationPayload) {
         if (manager.getNotificationChannel(payload.channelId()) != null) return
-        manager.createNotificationChannel(
-            NotificationChannel(payload.channelId(), payload.channelName(), payload.importance()),
-        )
+        val channel = NotificationChannel(payload.channelId(), payload.channelName(), payload.importance())
+        channel.description = payload.channelDescription()
+        manager.createNotificationChannel(channel)
     }
 
     /**
@@ -176,13 +176,13 @@ class CompanionMessagingService : FirebaseMessagingService() {
     private fun ensureGeneralChannel(manager: NotificationManager) {
         try {
             if (manager.getNotificationChannel(NotificationPayload.GENERAL_CHANNEL_ID) != null) return
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    NotificationPayload.GENERAL_CHANNEL_ID,
-                    "General notifications",
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ),
+            val channel = NotificationChannel(
+                NotificationPayload.GENERAL_CHANNEL_ID,
+                "General notifications",
+                NotificationManager.IMPORTANCE_DEFAULT,
             )
+            channel.description = "All other notifications."
+            manager.createNotificationChannel(channel)
         } catch (_: Throwable) {
         }
     }

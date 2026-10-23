@@ -3,5 +3,7 @@
     android:minWidth="180dp"
     android:minHeight="110dp"
     android:updatePeriodMillis="0"
-    android:widgetCategory="home_screen" />
+    android:widgetCategory="home_screen"
+    android:label="@string/widget_text_label"
+    android:description="@string/widget_text_desc" />
 <!-- updatePeriodMillis=0: the app drives refresh via WorkManager. -->

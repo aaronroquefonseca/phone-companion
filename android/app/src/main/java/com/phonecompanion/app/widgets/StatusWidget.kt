@@ -45,8 +45,8 @@ class StatusWidget : GlanceAppWidget() {
         }
 
     companion object {
-        private const val FALLBACK_STATE = "unknown"
-        private const val FALLBACK_DETAIL = "Status — pull to refresh."
+        private const val FALLBACK_STATE = "No status"
+        private const val FALLBACK_DETAIL = "Nothing to show yet."
     }
 }
 
