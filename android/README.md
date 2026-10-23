@@ -1,71 +1,90 @@
-# Android app (skeleton)
+# Android app
 
-Native Kotlin app: QR pairing, widget polling, FCM notifications. P0 BASE
-declares the dependency surface and component stubs; no logic.
+Native Kotlin app: QR pairing, widget polling + home-screen widgets, FCM
+notifications. Contract: `docs/api-contract.md`.
 
 ## Layout
 
-- `ui/` — `MainActivity` (launcher, navigation only), `PairActivity`
-  (QR scan stub), `WidgetsActivity` (list stub).
-- `data/` — `ApiService`/`ApiClient` (Retrofit stubs), `AppDatabase`
-  (Room stub: `devices` table placeholder).
-- `notify/` — `CompanionMessagingService` (FCM stub).
-- `widgets/` — `HelloWidget` (Glance wiring stub).
-- `work/` — `RefreshWorker` (hourly poll stub).
+- `ui/` — `MainActivity` (launcher/navigation), `PairActivity` (QR scan
+  + manual enroll), `WidgetsActivity` (cached list + manual refresh).
+- `data/` — `ApiService`/`ApiClient` (Retrofit/Moshi), `AppDatabase`
+  (Room widget cache), `EnrollRepository`, `PairingQr` (QR parse),
+  `SecureStorage` (`EncryptedSharedPreferences`: base URL, device_id,
+  device_token, device_key, FCM token — credentials only, never logged).
+- `notify/` — `CompanionMessagingService` (FCM entry), `NotificationPayload`
+  (kinds registry: `note`/`alert`, generic fallback for unknown kinds),
+  `NotificationImages` (HTTPS `BigPictureStyle`, fails closed to
+  `BigTextStyle`).
+- `widgets/` — one Glance implementation per type (`HelloWidget`,
+  `TextWidget`, `ListWidget`, `StatusWidget`, `SecretWidget` + `SecretCrypto`
+  for per-device decrypt), never fully-generic.
+- `work/` — `RefreshWorker` (hourly `WorkManager` poll: needs network +
+  battery-not-low; screen-off returns retry, no exact alarms),
+  `WidgetPoller` (shared fetch plumbing).
 
 `minSdk 26`, `compileSdk/targetSdk 34`. Key deps: Retrofit/OkHttp/Moshi,
-Room, WorkManager, Glance, FCM (via BoM), ML Kit barcode scanning.
+Room, WorkManager, Glance, FCM (via BoM), ML Kit code scanner,
+`security-crypto` for encrypted storage.
 
 ## Build
-
-```sh
-cd android
-./gradlew assembleDebug
-```
 
 Needs JDK 17 and the Android SDK (`ANDROID_HOME` or `local.properties`
 with `sdk.dir` — never commit `local.properties`).
 
-## Notifications (P9)
+```sh
+cd android
+./gradlew assembleDebug            # debug APK
+./gradlew installDebug             # install on an attached device/emulator
+```
 
-`notify/` renders FCM data messages per `docs/api-contract.md`
-(`POST /api/v1/notify` fan-out fields as the message's data map):
+> Not run in this docs PR's environment (no Android SDK here); run it
+> before release and report breakage.
 
-- **Kinds registry** (`NotificationKinds`): `note`/`alert` render with
-  kind-specific channels; unknown kinds and unknown payload versions (`v`)
-  render generically so new server kinds never need an app update. To add a
-  kind, extend `KNOWN_KINDS` (+ `displayName`); branch rendering only if it
-  needs more than title/body.
-- **Channels**: one channel per kind (`pc_<kind>`), or the backend's
-  explicit `channel` when sent (sanitized). Per-kind channels stay
-  independently mutable by the user; Android keeps an existing channel's
-  settings, so priority changes only affect newly created channels.
-- **Actions**: up to 3 buttons from `action_<i>_id`/`action_<i>_title`
-  pairs. Tap and action-button taps open `MainActivity` with the
-  notification/action ids; action taps also dismiss the notification
-  (buttons don't auto-dismiss).
-- **Images**: `image_url` (HTTPS-only) downloads and renders
-  `BigPictureStyle`; any download/decode failure fails closed to
-  `BigTextStyle` — a bad attachment never crashes or blocks the
-  notification.
+## Pairing from the app
 
-## FCM wiring
+1. Open the app → Pair screen.
+2. Tap scan: the ML Kit code scanner reads the WebUI `/webui/pair` QR
+   (`{"enroll_url","enroll_token"}`) and fills base URL + token; or type
+   them manually (plus a device name, prefilled with the model).
+3. Tap Enroll: `POST {enroll_url}` with `enroll_token`, `device_name`,
+   and the FCM token (best-effort — enroll proceeds without push).
+4. On `201`, credentials persist to encrypted storage (re-pair overwrites
+   them: the per-device key rotates, old secret ciphertexts stop
+   decrypting by design).
 
-Push needs two pieces, both secret-bearing and never committed:
+Use the public origin (`https://<your-host>`) as base URL in production
+— the same origin the QR encodes via `EXTERNAL_BASE_URL`. Failure text:
+expired/used token, bad URL, network/server errors — nothing crashes,
+nothing logs secrets. (The app also maps a 409 already-enrolled status,
+but the server never emits it at v1 — reserved for future dedup; re-pair
+returns `201`.) Detail: `docs/pairing.md`.
 
-1. **App side**: place the Firebase console's `google-services.json` at
-   `android/app/google-services.json` (gitignored). The `google-services`
-   Gradle plugin is intentionally NOT applied yet, so debug builds work
-   without the file; enabling full sender wiring applies the plugin per the
-   Firebase docs.
-2. **Backend side**: `FCM_PROJECT_ID` plus the service-account JSON mounted
-   at `FCM_CREDENTIALS_FILE` (compose secret, never committed or baked into
-   the image). The FCM driver is still a skeleton that fails closed until
-   the Wave-2 push implementation; the default `log` driver needs no
-   credentials.
+## Push (FCM)
 
-## TODOs (later PRs)
+Place the Firebase console's `google-services.json` at
+`android/app/google-services.json` — it is gitignored and never
+committed. The `google-services` Gradle plugin is intentionally NOT
+applied yet, so debug builds work without the file; without it, FCM token
+fetch is best-effort and pairing/notification polling still work. Backend
+side: `FCM_PROJECT_ID` + service-account JSON at `FCM_CREDENTIALS_FILE`
+(see `backend/README.md`).
 
-Camera QR scan + `POST /api/v1/enroll`, Bearer-token storage, widget poll +
-per-type renderers, `google-services` plugin apply once sender wiring lands.
-Contract: `docs/api-contract.md`.
+## Adding widgets
+
+- Phone screen: open Widgets (refreshes from cache on open; "Refresh
+  now" button; hourly background poll when the screen is on).
+- Home screen: long-press → Widgets → Phone Companion → place per-type
+  widget. Secret widgets render `•••••• needs refresh` whenever decrypt
+  fails (wrong key after re-pair, corrupt payload) — never plaintext,
+  never a crash; the next poll after a re-pair fetches a freshly
+  encrypted envelope.
+
+## F-Droid compatibility notes
+
+No proprietary files are committed: `google-services.json` is gitignored,
+no keystores ship, and the build works without them. Proprietary SDKs
+(Google Play services ML Kit scanner, FCM) arrive only as Gradle
+dependencies — full F-Droid inclusion would need review/replacement of
+those deps, which is out of scope at v1. Reproducible build pointer:
+tagged source + the pinned Gradle wrapper (`gradle-8.9`) + `compileSdk 34`
++ JDK 17; `./gradlew assembleDebug` with no local files beyond the SDK.
