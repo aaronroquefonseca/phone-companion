@@ -151,7 +151,16 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req notifyRequestJSON
+		// Cap the body before decode: this endpoint is unauthenticated until
+		// Wave-2 P9, so bound the storage/CPU amplifier (history INSERTs +
+		// log lines per device) up front.
+		r.Body = http.MaxBytesReader(w, r.Body, notify.MaxRequestBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) || strings.Contains(err.Error(), "request body too large") {
+				writeNotifyError(w, http.StatusRequestEntityTooLarge, "body_too_large")
+				return
+			}
 			writeNotifyError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}

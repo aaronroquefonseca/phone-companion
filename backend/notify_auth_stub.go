@@ -7,15 +7,31 @@
 // operator session, never a device token.
 package main
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+)
 
 // requireAdminNotifyStub guards the notify handler until Wave-2 P9 provides
 // real session auth. Uniquely named so the swap is a clean delete.
+//
+// Fail-closed default: requests are rejected with 403 unless the explicit
+// escape hatch NOTIFY_UNAUTHENTICATED=1 is set (dev/CI/verification only —
+// P9 real session auth must land before/with any real FCM send, and this
+// flag must never be set in production).
 func requireAdminNotifyStub(next http.Handler) http.HandlerFunc {
+	open := os.Getenv("NOTIFY_UNAUTHENTICATED") == "1"
 	return func(w http.ResponseWriter, r *http.Request) {
 		// TODO (Wave-2 P9): enforce WebUI admin session here; reject
 		// missing/invalid credentials with 401 and valid-but-not-admin
 		// with 403 per docs/api-contract.md auth schemes.
+		if !open {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden"})
+			return
+		}
 		next.ServeHTTP(w, r)
 	}
 }

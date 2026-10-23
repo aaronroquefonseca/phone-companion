@@ -14,9 +14,12 @@ package notify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
-	"os"
+	"net/url"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // PayloadVersion is stamped into every data payload so the app can evolve
@@ -31,6 +34,22 @@ const (
 	DefaultChannel  = "general"
 	// MaxActions caps the actions array (contract: max 3).
 	MaxActions = 3
+	// MaxDeviceIDs caps an explicit device_ids target so the lookup never
+	// builds an unbounded SQL IN list (sqlite SQLITE_MAX_VARIABLE_NUMBER).
+	MaxDeviceIDs = 500
+	// MaxRequestBodyBytes caps the notify request body (handler enforces via
+	// http.MaxBytesReader); 1 MiB is orders of magnitude above a legitimate
+	// notify request and bounds the storage/CPU amplifier of fan-out.
+	MaxRequestBodyBytes = 1 << 20
+	// Field length caps (runes): long enough for real notifications, short
+	// enough to bound history rows and log lines.
+	MaxKindLen        = 64
+	MaxTitleLen       = 500
+	MaxBodyLen        = 4096
+	MaxChannelLen     = 64
+	MaxImageURLLen    = 2048
+	MaxActionIDLen    = 64
+	MaxActionTitleLen = 200
 )
 
 // ValidPriorities is the closed priority vocabulary (contract:
@@ -105,6 +124,8 @@ func (m *Message) ApplyDefaults() {
 
 // Validate enforces the contract. Kind stays open-vocabulary by design:
 // any non-empty kind passes so new kinds render generically on the app.
+// Note: Channel has a contract default (ApplyDefaults), so by the time
+// Validate runs it is always non-empty — no missing_channel check needed.
 func (m Message) Validate() error {
 	if m.Target.All && len(m.Target.DeviceIDs) > 0 {
 		return validationError("ambiguous_target", `target must be exactly one of {"all":true} or {"device_ids":[...]}`)
@@ -112,29 +133,48 @@ func (m Message) Validate() error {
 	if !m.Target.All && len(m.Target.DeviceIDs) == 0 {
 		return validationError("empty_target", `target must be exactly one of {"all":true} or non-empty {"device_ids":[...]}`)
 	}
+	if len(m.Target.DeviceIDs) > MaxDeviceIDs {
+		return validationError("too_many_targets", "device_ids supports at most 500 entries")
+	}
+	if utf8.RuneCountInString(m.Kind) > MaxKindLen {
+		return validationError("kind_too_long", "kind must be at most 64 characters")
+	}
 	if m.Title == "" {
 		return validationError("missing_title", "title must be non-empty")
+	}
+	if utf8.RuneCountInString(m.Title) > MaxTitleLen {
+		return validationError("title_too_long", "title must be at most 500 characters")
 	}
 	if m.Body == "" {
 		return validationError("missing_body", "body must be non-empty")
 	}
+	if utf8.RuneCountInString(m.Body) > MaxBodyLen {
+		return validationError("body_too_long", "body must be at most 4096 characters")
+	}
 	if !ValidPriorities[m.Priority] {
 		return validationError("invalid_priority", "priority must be one of min|low|default|high|max")
 	}
-	if m.Channel == "" {
-		return validationError("missing_channel", "channel must be non-empty")
+	if utf8.RuneCountInString(m.Channel) > MaxChannelLen {
+		return validationError("channel_too_long", "channel must be at most 64 characters")
 	}
 	if len(m.Actions) > MaxActions {
 		return validationError("too_many_actions", "actions supports at most 3 entries")
 	}
 	for i, a := range m.Actions {
 		if a.ID == "" || a.Title == "" {
-			return validationError("invalid_action", "actions["+itoa(i)+"] needs non-empty id and title")
+			return validationError("invalid_action", "actions["+strconv.Itoa(i)+"] needs non-empty id and title")
+		}
+		if utf8.RuneCountInString(a.ID) > MaxActionIDLen || utf8.RuneCountInString(a.Title) > MaxActionTitleLen {
+			return validationError("action_too_long", "actions["+strconv.Itoa(i)+"] id must be at most 64 and title at most 200 characters")
 		}
 	}
 	if m.ImageURL != "" {
-		if !strings.HasPrefix(strings.ToLower(m.ImageURL), "https://") {
-			return validationError("invalid_image_url", "image_url must be an https URL")
+		if utf8.RuneCountInString(m.ImageURL) > MaxImageURLLen {
+			return validationError("invalid_image_url", "image_url must be at most 2048 characters")
+		}
+		u, err := url.Parse(m.ImageURL)
+		if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+			return validationError("invalid_image_url", "image_url must be an https URL with a host")
 		}
 	}
 	return nil
@@ -210,38 +250,25 @@ func (s *FCMSender) Send(_ context.Context, device Device, _ Message) error {
 	return errors.New("notify: FCM HTTPv1 driver not implemented yet (TODO Wave-2 push)")
 }
 
-// Driver selection. NOTIFY_DRIVER picks the driver:
+// SenderFromEnv resolves the driver from caller-provided config (main wires
+// Config's FCM fields through here; driver comes from NOTIFY_DRIVER).
+// Selection:
 //
-//	(empty or "log") LogSender — the default, no credentials needed
-//	"noop"           NoopSender — silent success for dev/CI/verification
-//	"fcm"            FCMSender skeleton — reads FCM_PROJECT_ID and
-//	                 FCM_CREDENTIALS_FILE; fails closed until Wave-2
+//	(""/"log") LogSender — the default, no credentials needed
+//	"noop"     NoopSender — silent success for dev/CI/verification
+//	"fcm"      FCMSender skeleton — fails closed until Wave-2 push
 //
-// Unknown values fall back to the log driver with a warning so a typo can
-// never silently become a black hole.
-func SenderFromEnv() Sender {
-	switch d := strings.ToLower(strings.TrimSpace(os.Getenv("NOTIFY_DRIVER"))); d {
+// An unknown driver is an error so startup fails fast — a typo must never
+// silently become a black hole.
+func SenderFromEnv(driver, projectID, credentialsFile string) (Sender, error) {
+	switch d := strings.ToLower(strings.TrimSpace(driver)); d {
 	case "", "log":
-		return LogSender{}
+		return LogSender{}, nil
 	case "noop":
-		return NoopSender{}
+		return NoopSender{}, nil
 	case "fcm":
-		return NewFCMSender(os.Getenv("FCM_PROJECT_ID"), os.Getenv("FCM_CREDENTIALS_FILE"))
+		return NewFCMSender(projectID, credentialsFile), nil
 	default:
-		log.Printf("notify: unknown NOTIFY_DRIVER %q, falling back to log driver", d)
-		return LogSender{}
+		return nil, fmt.Errorf("notify: unknown NOTIFY_DRIVER %q (want log|noop|fcm)", d)
 	}
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [8]byte
-	p := len(b)
-	for n := i; n > 0; n /= 10 {
-		p--
-		b[p] = byte('0' + n%10)
-	}
-	return string(b[p:])
 }
