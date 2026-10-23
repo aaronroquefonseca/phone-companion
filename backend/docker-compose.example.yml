@@ -1,0 +1,50 @@
+# Phone Companion — example compose file. Copy to docker-compose.yml and fill
+# in the placeholders. NEVER commit the filled-in file (it holds secrets).
+#
+#   cp backend/docker-compose.example.yml docker-compose.yml
+#   # edit ADMIN_* / SESSION_SECRET, then:
+#   docker compose up --build -d
+#
+# Reverse-proxy hint: in production put a TLS-terminating reverse proxy
+# (Caddy, nginx, Traefik) in front and only expose the proxy to the
+# internet. The app must work against the backend over the public internet,
+# so point the proxy at backend:8080 and set the public URL in the WebUI.
+
+services:
+  backend:
+    build: ./backend
+    image: phone-companion-backend:local
+    restart: unless-stopped
+    ports:
+      # Bind to localhost while testing; the reverse proxy listens publicly.
+      - "127.0.0.1:8080:8080"
+    environment:
+      PORT: "8080"
+      # --- WebUI login (auth PR implements; placeholders only) ---
+      ADMIN_USER: "CHANGEME-admin"
+      # Prefer the hash; ADMIN_PASSWORD is a first-boot bootstrap fallback.
+      ADMIN_PASSWORD_HASH: "CHANGEME-bcrypt-hash"
+      # ADMIN_PASSWORD: "CHANGEME-bootstrap-only"
+      SESSION_SECRET: "CHANGEME-long-random-secret-min-32-bytes"
+      DB_PATH: "/data/phone-companion.db"
+      WIDGET_DIR: "/widgets"
+      # --- Push (notifications PR; leave unset until then) ---
+      # FCM_PROJECT_ID: ""
+      # FCM_CREDENTIALS_FILE: "/run/secrets/fcm.json"
+    volumes:
+      # sqlite state (survives rebuilds).
+      - phone-companion-data:/data
+      # Folder-per-widget definitions (see backend/widgets/example/).
+      # Mount your own directory here, e.g.:
+      # - /srv/phone-companion/widgets:/widgets:ro
+      - ./backend/widgets:/widgets:ro
+    # Example secret mount for the FCM service-account JSON (unused stub):
+    # secrets:
+    #   - fcm-service-account
+
+volumes:
+  phone-companion-data:
+
+# secrets:
+#   fcm-service-account:
+#     file: ./secrets/fcm-service-account.json
