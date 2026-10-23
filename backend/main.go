@@ -21,6 +21,7 @@ func main() {
 	if err := Migrate(db); err != nil {
 		log.Fatalf("migrate database: %v", err)
 	}
+	SetDeviceDB(db)
 
 	addr := ":" + cfg.Port
 	log.Printf("phone-companion backend listening on %s (widgets: %s)", addr, cfg.WidgetDir)
