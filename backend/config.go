@@ -7,9 +7,13 @@ package main
 
 import (
 	"errors"
+	"log"
+	"net"
 	"net/url"
 	"os"
 	"strings"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Config holds all backend runtime settings. Secrets must come from the
@@ -54,6 +58,12 @@ type Config struct {
 	// (Host headers are client-controlled and spoofable behind a
 	// misconfigured proxy). Production must set EXTERNAL_BASE_URL.
 	ExternalBaseURL string // $EXTERNAL_BASE_URL
+	// ExternalBaseURLAllowHTTP is the dev-only override for the fail-closed
+	// http rule below. $EXTERNAL_BASE_URL_ALLOW_HTTP=1 permits plain http
+	// to a non-loopback host (local LAN testing behind no TLS). Never
+	// enable in production; enroll tokens and device credentials must ride
+	// TLS. See backend/README.md.
+	ExternalBaseURLAllowHTTP bool // $EXTERNAL_BASE_URL_ALLOW_HTTP
 }
 
 // Fail-closed bounds for auth secrets. These are deliberately strict: the
@@ -74,16 +84,30 @@ const (
 // shares one policy; see main.go.
 func LoadConfig() Config {
 	return Config{
-		Port:              getenv("PORT", "8080"),
-		AdminUser:         os.Getenv("ADMIN_USER"),
-		AdminPasswordHash: os.Getenv("ADMIN_PASSWORD_HASH"),
-		AdminPassword:     os.Getenv("ADMIN_PASSWORD"),
-		SessionSecret:     os.Getenv("SESSION_SECRET"),
-		DBPath:            getenv("DB_PATH", "/data/phone-companion.db"),
-		WidgetDir:         getenv("WIDGET_DIR", "/widgets"),
-		FCMProjectID:      os.Getenv("FCM_PROJECT_ID"),
-		FCMCredentials:    os.Getenv("FCM_CREDENTIALS_FILE"),
-		ExternalBaseURL:   normalizeBaseURL(os.Getenv("EXTERNAL_BASE_URL")),
+		Port:                     getenv("PORT", "8080"),
+		AdminUser:                os.Getenv("ADMIN_USER"),
+		AdminPasswordHash:        os.Getenv("ADMIN_PASSWORD_HASH"),
+		AdminPassword:            os.Getenv("ADMIN_PASSWORD"),
+		SessionSecret:            os.Getenv("SESSION_SECRET"),
+		DBPath:                   getenv("DB_PATH", "/data/phone-companion.db"),
+		WidgetDir:                getenv("WIDGET_DIR", "/widgets"),
+		FCMProjectID:             os.Getenv("FCM_PROJECT_ID"),
+		FCMCredentials:           os.Getenv("FCM_CREDENTIALS_FILE"),
+		ExternalBaseURL:          normalizeBaseURL(os.Getenv("EXTERNAL_BASE_URL")),
+		ExternalBaseURLAllowHTTP: allowHTTPExbase(os.Getenv("EXTERNAL_BASE_URL_ALLOW_HTTP")),
+	}
+}
+
+// allowHTTPExbase parses the dev-only EXTERNAL_BASE_URL_ALLOW_HTTP override.
+// Only explicit opt-ins ("1", "true", "yes") enable it; anything else,
+// including empty, keeps the fail-closed default (reject http to
+// non-loopback hosts).
+func allowHTTPExbase(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -136,8 +160,56 @@ func (c Config) Validate() error {
 		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			return errors.New("EXTERNAL_BASE_URL must be a bare origin with no path, query, or fragment")
 		}
+		if u.User != nil {
+			return errors.New("EXTERNAL_BASE_URL must not contain userinfo")
+		}
+		if u.Opaque != "" {
+			return errors.New("EXTERNAL_BASE_URL must be a bare origin, not an opaque URL")
+		}
+		// Fail closed on plain http to non-loopback hosts: enroll_url,
+		// enroll tokens, and device credentials must ride TLS in
+		// production. Loopback http (localhost, 127/8, ::1) stays allowed
+		// for dev; anything else needs the dev-only
+		// EXTERNAL_BASE_URL_ALLOW_HTTP=1 override (documented on the Config
+		// field and in backend/README.md), which still logs a warning.
+		if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+			if !c.ExternalBaseURLAllowHTTP {
+				return errors.New("EXTERNAL_BASE_URL http to a non-loopback host is rejected (fail closed); use https, a loopback host for dev, or set EXTERNAL_BASE_URL_ALLOW_HTTP=1 (dev-only, see backend/README.md)")
+			}
+			log.Printf("WARNING: EXTERNAL_BASE_URL uses plain http to a non-loopback host via EXTERNAL_BASE_URL_ALLOW_HTTP=1 (dev-only; never enable in production)")
+		}
+	}
+	if c.AdminPasswordHash != "" && c.AdminPassword != "" {
+		// Both schemes configured: the hash wins for verification (see
+		// webui verify), the plaintext is ignored. Log which scheme is
+		// active so operators are never surprised about which credential
+		// actually gates /login.
+		log.Printf("WARNING: both ADMIN_PASSWORD_HASH and ADMIN_PASSWORD are set; ADMIN_PASSWORD_HASH wins and ADMIN_PASSWORD is ignored")
+	}
+	if c.AdminPasswordHash != "" {
+		// Bcrypt cost floor: warn (do not reject) when the configured hash
+		// is cheaper than bcrypt.DefaultCost. Production hashes should use
+		// cost >= DefaultCost; bcrypt.MinCost is a TEST-ONLY exception
+		// (unit tests mint MinCost hashes for speed — never copy those
+		// into production config).
+		if cost, err := bcrypt.Cost([]byte(c.AdminPasswordHash)); err == nil && cost < bcrypt.DefaultCost {
+			log.Printf("WARNING: ADMIN_PASSWORD_HASH cost %d is below bcrypt.DefaultCost (%d); use cost >= %d in production (bcrypt.MinCost is a test-only exception)", cost, bcrypt.DefaultCost, bcrypt.DefaultCost)
+		}
 	}
 	return nil
+}
+
+// isLoopbackHost reports whether host is a loopback name or address
+// (localhost, 127/8, ::1), tolerating a trailing dot on DNS names.
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if h == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // normalizeBaseURL trims whitespace and trailing slashes so

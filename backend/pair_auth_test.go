@@ -24,7 +24,7 @@ import (
 
 const pairTestSecret = "test-secret-0123456789abcdef-test"
 
-func setupPairingMux(t *testing.T) (*http.ServeMux, *SessionStore, *webui.CSRFProtection, *http.Cookie) {
+func setupPairingMux(t *testing.T) (http.Handler, *SessionStore, *webui.CSRFProtection, *http.Cookie) {
 	t.Helper()
 	db := openDevicesTestDB(t)
 	oldDB := deviceDB
@@ -36,7 +36,10 @@ func setupPairingMux(t *testing.T) (*http.ServeMux, *SessionStore, *webui.CSRFPr
 	t.Cleanup(func() { webui.ExternalBaseURL = oldBase })
 	resetEnrollIssueLimiter()
 
-	sessions := NewSessionStore(db, pairTestSecret)
+	sessions, err := NewSessionStore(db, pairTestSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
 	csrf := webui.NewCSRFProtection(pairTestSecret)
 	mux := NewMux(db, notify.NoopSender{}, sessions, csrf)
 
@@ -57,7 +60,7 @@ func setupPairingMux(t *testing.T) (*http.ServeMux, *SessionStore, *webui.CSRFPr
 	return mux, sessions, csrf, cookie
 }
 
-func doReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+func doReq(t *testing.T, mux http.Handler, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader
 	if body == "" {
@@ -83,7 +86,7 @@ func doReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType s
 // (X-Requested-With: XMLHttpRequest). All legitimate enroll-tokens
 // callers in tests use this; the missing-header 403 path is pinned by
 // constructing a header-less request via doReq directly.
-func doOperatorWriteReq(t *testing.T, mux *http.ServeMux, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
+func doOperatorWriteReq(t *testing.T, mux http.Handler, method, target, body, contentType string, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader
 	if body == "" {
@@ -345,7 +348,10 @@ func TestPairingWebUIPageAndCSRFRevoke(t *testing.T) {
 
 	// Cross-session CSRF: token minted for another session is rejected.
 	other := httptest.NewRecorder()
-	sess2 := NewSessionStore(deviceDB, pairTestSecret)
+	sess2, err := NewSessionStore(deviceDB, pairTestSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := sess2.CreateSession(other, httptest.NewRequest("POST", "/login", nil)); err != nil {
 		t.Fatal(err)
 	}
