@@ -59,3 +59,67 @@ func TestConfigValidateErrorsLeakNoSecrets(t *testing.T) {
 		t.Errorf("error message echoes secret material: %q", err)
 	}
 }
+
+func TestConfigExternalBaseURLHardening(t *testing.T) {
+	c := validTestConfig()
+
+	// https anywhere stays allowed.
+	c.ExternalBaseURL = "https://example.com"
+	if err := c.Validate(); err != nil {
+		t.Errorf("https origin: unexpected error %v", err)
+	}
+
+	// Loopback http stays allowed for dev (no override needed).
+	for _, loopback := range []string{
+		"http://localhost:8080",
+		"http://localhost",
+		"http://127.0.0.1:8080",
+		"http://[::1]:8080",
+	} {
+		c.ExternalBaseURL = loopback
+		if err := c.Validate(); err != nil {
+			t.Errorf("loopback %s: unexpected error %v", loopback, err)
+		}
+	}
+
+	// Reject userinfo, opaque URLs, and paths/query/fragments.
+	for _, bad := range []string{
+		"https://user@example.com",
+		"https://user:pass@example.com",
+		"http://localhost/enroll",
+		"https://example.com?x=1",
+	} {
+		c.ExternalBaseURL = bad
+		if err := c.Validate(); err == nil {
+			t.Errorf("base %q: expected rejection", bad)
+		}
+	}
+
+	// Plain http to a non-loopback host is fail-closed by default ...
+	c.ExternalBaseURL = "http://192.168.1.10:8080"
+	c.ExternalBaseURLAllowHTTP = false
+	if err := c.Validate(); err == nil {
+		t.Error("non-loopback http without override: expected rejection")
+	} else if !strings.Contains(err.Error(), "EXTERNAL_BASE_URL_ALLOW_HTTP") {
+		t.Errorf("rejection should name the override flag, got %q", err)
+	}
+
+	// ... and allowed only with the explicit dev override.
+	c.ExternalBaseURLAllowHTTP = true
+	if err := c.Validate(); err != nil {
+		t.Errorf("non-loopback http with override: unexpected error %v", err)
+	}
+}
+
+func TestAllowHTTPExbaseParsing(t *testing.T) {
+	for _, v := range []string{"1", "true", "TRUE", "yes", " Yes "} {
+		if !allowHTTPExbase(v) {
+			t.Errorf("allowHTTPExbase(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "no", "2"} {
+		if allowHTTPExbase(v) {
+			t.Errorf("allowHTTPExbase(%q) = true, want false", v)
+		}
+	}
+}

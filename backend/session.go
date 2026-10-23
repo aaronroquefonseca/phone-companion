@@ -19,6 +19,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -30,20 +31,29 @@ const SessionCookieName = "pc_session"
 // SessionTTL is the absolute lifetime of a WebUI session.
 const SessionTTL = 24 * time.Hour
 
-// schemaSessionsV1 holds one row per live WebUI session. Only the token
+// schemaSessionsV1Table holds one row per live WebUI session. Only the token
 // hash is stored — never the raw token from the cookie.
-const schemaSessionsV1 = `
+const schemaSessionsV1Table = `
 CREATE TABLE IF NOT EXISTS sessions (
 	token_hash TEXT PRIMARY KEY,
 	created_at TEXT NOT NULL,
 	expires_at TEXT NOT NULL
 );
+`
+
+// schemaSessionsV1Index speeds expiry sweeps and lookups. Kept as a separate
+// statement from the table DDL: some drivers reject multi-statement Exec, so
+// each statement gets its own Exec call below.
+const schemaSessionsV1Index = `
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 `
 
 // migrateSessions creates the sessions table. Called from Migrate in db.go.
 func migrateSessions(db *sql.DB) error {
-	_, err := db.Exec(schemaSessionsV1)
+	if _, err := db.Exec(schemaSessionsV1Table); err != nil {
+		return err
+	}
+	_, err := db.Exec(schemaSessionsV1Index)
 	return err
 }
 
@@ -56,13 +66,43 @@ type SessionStore struct {
 }
 
 // NewSessionStore returns a store backed by db, signing cookies with
-// sessionSecret. The secret must already have passed Config.Validate.
-func NewSessionStore(db *sql.DB, sessionSecret string) *SessionStore {
-	return &SessionStore{db: db, secret: []byte(sessionSecret), ttl: SessionTTL, now: time.Now}
+// sessionSecret. The secret must already have passed Config.Validate; this
+// constructor re-checks (nil db, secret shorter than 32 bytes) and fails
+// closed with an error so a miswired server never serves with a weak or
+// missing signer. Callers must refuse to boot on error.
+func NewSessionStore(db *sql.DB, sessionSecret string) (*SessionStore, error) {
+	if db == nil {
+		return nil, errors.New("session: nil database (fail closed)")
+	}
+	if len(sessionSecret) < minSessionSecretBytes {
+		return nil, errors.New("session: secret must be at least 32 bytes long")
+	}
+	return &SessionStore{db: db, secret: []byte(sessionSecret), ttl: SessionTTL, now: time.Now}, nil
 }
 
 // CreateSession mints a session, persists its hash, and sets the cookie.
-func (s *SessionStore) CreateSession(w http.ResponseWriter, _ *http.Request) error {
+//
+// Rotation-invalidates-all: the presented session (if the request carries a
+// live cookie) is destroyed BEFORE the new row is minted, so every login
+// supersedes the credential it replaces — a stolen pre-login cookie dies on
+// the victim's next login. Rotating SESSION_SECRET likewise invalidates every
+// outstanding session at once (old HMACs stop verifying; orphaned rows are
+// swept below and can never authenticate without a valid signature).
+func (s *SessionStore) CreateSession(w http.ResponseWriter, r *http.Request) error {
+	if s == nil || s.db == nil || len(s.secret) < minSessionSecretBytes {
+		return errors.New("session: store not wired (fail closed)")
+	}
+	// Destroy the prior presented session first (rotation).
+	if r != nil {
+		if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
+			if raw, ok := decodeSessionValue(c.Value, s.secret); ok {
+				_, _ = s.db.Exec(`DELETE FROM sessions WHERE token_hash = ?`, hashToken(raw))
+			}
+		}
+		// Sweep expired rows on the write path so the table cannot grow
+		// without bound when ValidateSession is never hit for them.
+		_, _ = s.db.Exec(`DELETE FROM sessions WHERE expires_at <= ?`, s.now().UTC().Format(time.RFC3339))
+	}
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return err
@@ -90,9 +130,11 @@ func (s *SessionStore) ValidateSession(r *http.Request) bool {
 	if !ok {
 		return false
 	}
+	// Single hash per request: reused for the lookup and the expiry delete.
+	tokenHash := hashToken(raw)
 	var expires string
 	err = s.db.QueryRow(
-		`SELECT expires_at FROM sessions WHERE token_hash = ?`, hashToken(raw),
+		`SELECT expires_at FROM sessions WHERE token_hash = ?`, tokenHash,
 	).Scan(&expires)
 	if err != nil {
 		return false
@@ -102,7 +144,7 @@ func (s *SessionStore) ValidateSession(r *http.Request) bool {
 		return false
 	}
 	if !s.now().UTC().Before(exp) {
-		_, _ = s.db.Exec(`DELETE FROM sessions WHERE token_hash = ?`, hashToken(raw))
+		_, _ = s.db.Exec(`DELETE FROM sessions WHERE token_hash = ?`, tokenHash)
 		return false
 	}
 	return true
@@ -111,9 +153,11 @@ func (s *SessionStore) ValidateSession(r *http.Request) bool {
 // DestroySession revokes the request's session (if any) and clears the cookie.
 // It is idempotent: requests without a session still get a cleared cookie.
 func (s *SessionStore) DestroySession(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
-		if raw, ok := decodeSessionValue(c.Value, s.secret); ok {
-			_, _ = s.db.Exec(`DELETE FROM sessions WHERE token_hash = ?`, hashToken(raw))
+	if s != nil && s.db != nil {
+		if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
+			if raw, ok := decodeSessionValue(c.Value, s.secret); ok {
+				_, _ = s.db.Exec(`DELETE FROM sessions WHERE token_hash = ?`, hashToken(raw))
+			}
 		}
 	}
 	clearSessionCookie(w)
@@ -156,6 +200,9 @@ func decodeSessionValue(value string, secret []byte) ([]byte, bool) {
 }
 
 func setSessionCookie(w http.ResponseWriter, value string, exp time.Time) {
+	// Session-bearing responses must never be cached: the Set-Cookie value
+	// is a live credential.
+	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    value,
@@ -169,6 +216,7 @@ func setSessionCookie(w http.ResponseWriter, value string, exp time.Time) {
 }
 
 func clearSessionCookie(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    "",

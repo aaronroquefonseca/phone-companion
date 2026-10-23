@@ -13,7 +13,7 @@ import (
 
 // setupRoundTripEnv enrolls two devices, writes one text + one secret widget
 // targeted at devA, loads the registry, and returns the mux plus credentials.
-func setupRoundTripEnv(t *testing.T, secretValue string) (*http.ServeMux, string, string, string, string, string) {
+func setupRoundTripEnv(t *testing.T, secretValue string) (http.Handler, string, string, string, string, string) {
 	t.Helper()
 	db, err := OpenDB(t.TempDir() + "/roundtrip.db")
 	if err != nil {
@@ -63,7 +63,7 @@ func decodeRoundTripKey(t *testing.T, keyB64 string) [crypto.KeySize]byte {
 	return k
 }
 
-func fetchSecretEnvelope(t *testing.T, mux *http.ServeMux, target, token string) (widgetEnvelope, int, string) {
+func fetchSecretEnvelope(t *testing.T, mux http.Handler, target, token string) (widgetEnvelope, int, string) {
 	t.Helper()
 	rec := authedGet(mux, "GET", target, token, nil)
 	if rec.Code != http.StatusOK {

@@ -31,9 +31,11 @@ type Credentials struct {
 	Password     string
 }
 
-// RegisterRoutes wires the auth endpoints onto mux.
-func RegisterRoutes(mux *http.ServeMux, store SessionStore, creds Credentials) {
-	h := &handler{store: store, creds: creds}
+// RegisterRoutes wires the auth endpoints onto mux. csrf guards POST
+// /logout (see handleLogoutPost); a nil protector fails that endpoint closed
+// with 403 rather than leaving logout unguarded.
+func RegisterRoutes(mux *http.ServeMux, store SessionStore, creds Credentials, csrf *CSRFProtection) {
+	h := &handler{store: store, creds: creds, csrf: csrf}
 	mux.HandleFunc("GET /login", h.handleLoginGet)
 	mux.HandleFunc("POST /login", h.handleLoginPost)
 	mux.HandleFunc("POST /logout", h.handleLogoutPost)
@@ -61,6 +63,7 @@ func RequireAdmin(store SessionStore, next http.Handler) http.Handler {
 type handler struct {
 	store SessionStore
 	creds Credentials
+	csrf  *CSRFProtection
 }
 
 // verify runs both comparisons unconditionally so a wrong username does

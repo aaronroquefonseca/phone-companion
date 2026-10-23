@@ -137,8 +137,11 @@ func revokeNotice(v string) string {
 
 // renderPairPage executes the template with an HTML Content-Type on every
 // path (including errors), so browsers never sniff a missing type.
+// Cache-Control is no-store throughout: the page embeds a single-use enroll
+// token and the operator device registry — both must never sit in a cache.
 func renderPairPage(w http.ResponseWriter, status int, data pairPageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = pairPageTmpl.Execute(w, data)
 }
@@ -201,6 +204,8 @@ func csrfTokenForPage(csrf *CSRFProtection, r *http.Request) (string, bool) {
 // what happened instead of a silent no-op.
 func HandlePairRevoke(store Store, csrf *CSRFProtection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Revocation changes operator state; never cache the outcome.
+		w.Header().Set("Cache-Control", "no-store")
 		if store == nil {
 			http.Error(w, "internal", http.StatusInternalServerError)
 			return

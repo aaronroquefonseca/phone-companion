@@ -44,7 +44,7 @@ func (e2eNullSender) Send(_ context.Context, _ notify.Device, _ map[string]strin
 
 // e2eOperatorLogin performs a real WebUI login (POST /login with operator
 // credentials) and returns the session cookie that RequireAdmin accepts.
-func e2eOperatorLogin(t *testing.T, mux *http.ServeMux, username, password string) *http.Cookie {
+func e2eOperatorLogin(t *testing.T, mux http.Handler, username, password string) *http.Cookie {
 	t.Helper()
 	form := url.Values{"username": {username}, "password": {password}}.Encode()
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form))
@@ -63,7 +63,7 @@ func e2eOperatorLogin(t *testing.T, mux *http.ServeMux, username, password strin
 }
 
 // e2eIssueEnrollToken mints a single-use pairing token via the operator API.
-func e2eIssueEnrollToken(t *testing.T, mux *http.ServeMux, cookie *http.Cookie) string {
+func e2eIssueEnrollToken(t *testing.T, mux http.Handler, cookie *http.Cookie) string {
 	t.Helper()
 	w := doOperatorWriteReq(t, mux, "POST", "/api/v1/enroll-tokens", "", "", cookie)
 	if w.Code != http.StatusCreated {
@@ -78,7 +78,7 @@ func e2eIssueEnrollToken(t *testing.T, mux *http.ServeMux, cookie *http.Cookie) 
 
 // e2eEnrollDevice pairs one phone via POST /api/v1/enroll (token-only auth,
 // no session — the phone has no cookie). Returns id, bearer token, key.
-func e2eEnrollDevice(t *testing.T, mux *http.ServeMux, token, name, fcm string) (id, devToken, devKey string) {
+func e2eEnrollDevice(t *testing.T, mux http.Handler, token, name, fcm string) (id, devToken, devKey string) {
 	t.Helper()
 	body := `{"enroll_token":` + jsonQuote(token) +
 		`,"device_name":` + jsonQuote(name) +
@@ -102,7 +102,7 @@ func e2eEnrollDevice(t *testing.T, mux *http.ServeMux, token, name, fcm string) 
 }
 
 // e2eNotify posts a notify request and returns the 202 id + accepted count.
-func e2eNotify(t *testing.T, mux *http.ServeMux, cookie *http.Cookie, body string) (notificationID string, accepted int) {
+func e2eNotify(t *testing.T, mux http.Handler, cookie *http.Cookie, body string) (notificationID string, accepted int) {
 	t.Helper()
 	// Operator write marker for forward-compat with the API write guard
 	// (parallel auth batch owns POST /api/v1/notify hardening).
@@ -176,7 +176,10 @@ func TestE2EDoneCriteria(t *testing.T) {
 	resetEnrollIssueLimiter()
 
 	const sessionSecret = "e2e-done-session-secret-01234567"
-	sessions := NewSessionStore(db, sessionSecret)
+	sessions, err := NewSessionStore(db, sessionSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
 	csrf := webui.NewCSRFProtection(sessionSecret)
 
 	widgetDir := t.TempDir()
@@ -184,16 +187,19 @@ func TestE2EDoneCriteria(t *testing.T) {
 	if err := reg.Load(); err != nil {
 		t.Fatal(err)
 	}
-	mux := NewMuxWithWidgets(reg, sessions, csrf)
+	base := newBaseMux(reg, sessions, csrf)
 	// Same operator notify wiring as production NewMux. The harness uses a
-	// hermetic recording driver (stub Log/NoopSender fail closed in the
-	// handler now): rows still land in notification_history.
-	mux.Handle("POST /api/v1/notify",
-		notifyAdminChain(sessions, handleNotify(db, e2eNullSender{})))
-	webui.RegisterRoutes(mux, sessions, webui.Credentials{
+	// hermetic recording driver (captureSender records deliveries; stub
+	// Log/NoopSender fail closed in the handler now): rows still land in
+	// notification_history.
+	base.Handle("POST /api/v1/notify",
+		notifyAdminChain(sessions, handleNotify(db, &captureSender{})))
+	webui.RegisterRoutes(base, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",
-	})
+	}, csrf)
+	// Same no-store pin as production NewMux (withAuthNoStore inside).
+	mux := withAuthNoStore(base)
 
 	// --- Operator login: the real RequireAdmin gate for everything below.
 	cookie := e2eOperatorLogin(t, mux, "op", "op-pass-e2e-0123456789abcdef")
