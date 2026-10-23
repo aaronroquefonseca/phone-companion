@@ -3,11 +3,18 @@ package com.phonecompanion.app.work
 import android.content.Context
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetManager
+import com.phonecompanion.app.data.ApiClient
 import com.phonecompanion.app.data.DatabaseHolder
+import com.phonecompanion.app.data.SecureStorage
+import com.phonecompanion.app.data.WidgetCacheEntity
+import com.phonecompanion.app.data.WidgetEnvelope
 import com.phonecompanion.app.widgets.ListWidget
 import com.phonecompanion.app.widgets.SecretWidget
 import com.phonecompanion.app.widgets.StatusWidget
 import com.phonecompanion.app.widgets.TextWidget
+import com.squareup.moshi.JsonAdapter
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -17,25 +24,101 @@ import kotlinx.coroutines.supervisorScope
  * Shared generic polling plumbing (widgets PR / P7).
  *
  * Single code path used by both the hourly [RefreshWorker] and the manual
- * refresh entrypoint: read the Room widget cache, then push it to every
- * per-type Glance widget. Per-type rendering lives in widgets/ — this file
- * never renders; it only fans out.
+ * refresh entrypoint: fetch GET /api/v1/widgets with the device Bearer
+ * token, upsert into the Room widget cache, then push it to every per-type
+ * Glance widget. Per-type rendering lives in widgets/ — this file never
+ * renders; it only fetches and fans out.
  *
- * Network fetch (GET /api/v1/widgets with the device Bearer token, base URL
- * config, ETag handling) is owned by the data-layer PR (P6). Until then
- * [refresh] propagates the last cached state so the worker, scheduling, and
- * Glance update path are verifiable standalone on P0.
+ * Revocation: HTTP 401/403 means the credential is revoked (or unknown).
+ * The poll then forgets local credentials, drops the widget cache, and
+ * pushes the fail-closed widget states — a revoked phone shows
+ * needs-refresh/empty states until it re-pairs. Any other failure keeps
+ * the last cache.
  */
 object WidgetPoller {
 
+    private val moshi: Moshi = Moshi.Builder().build()
+
+    private val mapAdapter: JsonAdapter<Any> =
+        moshi.adapter(
+            Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java),
+        )
+
     suspend fun refresh(context: Context) {
-        // TODO (P6 data/): fetch GET /api/v1/widgets and upsert into
-        // widget_cache before fanning out. No hardcoded hosts/users.
-        // Touch the cache so the DAO + entity wiring is exercised even
-        // before the network fetch lands; keeps standalone builds green.
-        // The singleton is shared — never closed here.
-        DatabaseHolder.get(context).widgetCacheDao().getAll()
+        if (pollOnce(context)) {
+            // Revoked: fail-closed states already pushed by handleRevoked.
+            return
+        }
         updateAllWidgets(context)
+    }
+
+    /**
+     * One fetch + cache cycle.
+     *
+     * @return true when the credential was revoked (handled: credentials
+     * cleared, cache dropped, widgets pushed); false otherwise.
+     */
+    internal suspend fun pollOnce(context: Context): Boolean {
+        val storage = SecureStorage.getInstance(context)
+        val baseUrl = storage.baseUrl
+        val token = storage.deviceToken
+        if (baseUrl.isNullOrBlank() || token.isNullOrBlank()) return false
+        try {
+            val service = ApiClient.create(baseUrl) { storage.deviceToken }
+            val response = service.getWidgets()
+            if (response.isSuccessful) {
+                val widgets = response.body()?.widgets.orEmpty()
+                DatabaseHolder.get(context).widgetCacheDao().upsertAll(widgets.map { toCacheEntity(it) })
+                return false
+            }
+            if (isRevokedHttpCode(response.code())) {
+                handleRevoked(context)
+                return true
+            }
+            // Other HTTP errors: keep the last cache (fail-closed renderers
+            // cover the stale state until the next poll).
+            return false
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Transport failure: keep the last cache.
+            return false
+        }
+    }
+
+    /**
+     * Post-revoke reset: forget local credentials, drop the widget cache,
+     * and push the fail-closed widget states (secret widgets render
+     * MASKED once the key is gone).
+     */
+    internal suspend fun handleRevoked(context: Context) {
+        SecureStorage.getInstance(context).clearCredentials()
+        try {
+            DatabaseHolder.get(context).widgetCacheDao().clearAll()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Cache drop is best-effort; credentials are already forgotten.
+        }
+        updateAllWidgets(context)
+    }
+
+    /** Revoked/unknown credential codes per the api-contract (401/403). */
+    fun isRevokedHttpCode(code: Int): Boolean = code == 401 || code == 403
+
+    internal fun toCacheEntity(envelope: WidgetEnvelope): WidgetCacheEntity = WidgetCacheEntity(
+        id = envelope.id,
+        type = envelope.type,
+        title = envelope.title,
+        updatedAt = envelope.updatedAt,
+        payloadJson = payloadToJson(envelope.payload),
+        secretRef = envelope.secretRef,
+    )
+
+    /** Serializes a widgets-poll payload map for the cache. Never null. */
+    internal fun payloadToJson(payload: Map<String, Any?>?): String {
+        if (payload == null) return "{}"
+        return mapAdapter.toJson(payload) ?: "{}"
     }
 
     /**

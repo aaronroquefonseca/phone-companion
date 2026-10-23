@@ -63,9 +63,20 @@ private fun extractJsonField(json: String, vararg names: String): String? {
     return null
 }
 
-/** Strips the `/api/v1/enroll` endpoint suffix to recover the server base. */
-private fun baseFromEnrollUrl(enrollUrl: String): String =
-    enrollUrl.trim()
-        .removeSuffix("/api/v1/enroll")
+/**
+ * Strips the `/api/v1/enroll` endpoint suffix to recover the server base.
+ *
+ * Query and fragment are stripped BEFORE suffix matching (a QR carrying
+ * `.../enroll?enroll_token=...` must still reduce to the base), and
+ * trailing slashes are stripped first so the `.../enroll/` form works too.
+ */
+private fun baseFromEnrollUrl(enrollUrl: String): String {
+    var s = enrollUrl.trim()
+    val cut = s.indexOfFirst { it == '?' || it == '#' }
+    if (cut >= 0) s = s.substring(0, cut)
+    while (s.length > 1 && s.endsWith("/")) s = s.dropLast(1)
+    s = s.removeSuffix("/api/v1/enroll")
         .removeSuffix("/api/v1")
-        .removeSuffix("/")
+    while (s.length > 1 && s.endsWith("/")) s = s.dropLast(1)
+    return s
+}

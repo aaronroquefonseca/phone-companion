@@ -22,7 +22,7 @@ import androidx.security.crypto.MasterKey
 // 1.1.x marks EncryptedSharedPreferences deprecated without shipping a stable
 // DataStore replacement; it remains the documented credentials approach and
 // functions as before, so the usage is suppressed at file level by design.
-class SecureStorage private constructor(context: Context) {
+class SecureStorage private constructor(context: Context) : EnrollmentStore {
 
     private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
         context.applicationContext,
@@ -68,9 +68,18 @@ class SecureStorage private constructor(context: Context) {
      * payloads encrypted under the old key become undecryptable.
      * Synchronous commit: credentials must be durable before the caller
      * proceeds (e.g. process death right after a 201).
+     *
+     * @return the `commit()` result: false means the enrollment did NOT
+     * persist and the caller must not report success (see
+     * [EnrollRepository.Result.Unexpected] `"persist-failed"`).
      */
-    fun saveEnrollment(baseUrl: String, deviceId: String, deviceToken: String, deviceKey: String) {
-        prefs.edit()
+    override fun saveEnrollment(
+        baseUrl: String,
+        deviceId: String,
+        deviceToken: String,
+        deviceKey: String,
+    ): Boolean {
+        return prefs.edit()
             .putString(KEY_BASE_URL, baseUrl)
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_DEVICE_TOKEN, deviceToken)
@@ -78,12 +87,22 @@ class SecureStorage private constructor(context: Context) {
             .commit()
     }
 
-    /** Revokes local credentials (server-side revocation is the WebUI's job). */
+    /**
+     * Forgets this device entirely (explicit unpair AND post-revoke reset
+     * share this path): device credentials plus the server base URL and the
+     * cached FCM token. Re-pair starts over from a fresh QR scan or manual
+     * entry — no half-paired state is retained.
+     *
+     * Server-side revocation itself is the WebUI's job; this only drops the
+     * local copy so a revoked phone fails closed to the unpaired state.
+     */
     fun clearCredentials() {
         prefs.edit()
+            .remove(KEY_BASE_URL)
             .remove(KEY_DEVICE_ID)
             .remove(KEY_DEVICE_TOKEN)
             .remove(KEY_DEVICE_KEY)
+            .remove(KEY_FCM_TOKEN)
             .apply()
     }
 
