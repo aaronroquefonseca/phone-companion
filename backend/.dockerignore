@@ -1,0 +1,7 @@
+# Keep secrets and local state out of the build context entirely so COPY
+# can never bake them into image layers.
+.git
+*.db
+secrets/
+.env
+docker-compose.yml

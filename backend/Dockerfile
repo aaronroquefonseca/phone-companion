@@ -29,7 +29,14 @@ ENV PORT=8080 \
 
 VOLUME ["/data", "/widgets"]
 
+# EXPOSE documents the default container port only; it is not a publish
+# rule. The app listens on $PORT (default 8080, see config.go). If PORT is
+# overridden, publish that port instead (see docker-compose.example.yml).
 EXPOSE 8080
+
+# No HEALTHCHECK: the distroless runtime has no shell, so CMD-SHELL probes
+# cannot run. Probe GET /healthz from the orchestrator or reverse proxy
+# instead (see backend/README.md).
 
 COPY --from=builder /out/phone-companion /phone-companion
 COPY --from=builder --chown=65532:65532 /out/data /data

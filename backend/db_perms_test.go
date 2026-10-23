@@ -1,0 +1,53 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// OpenDB must keep the sqlite state owner-only: parent dir 0700, DB file
+// 0600 — the DB holds token hashes and per-device key material.
+func TestOpenDBPermissions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sub")
+	path := filepath.Join(dir, "perms.db")
+
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+	// Materialize the file through real use, then check modes.
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	if fi, err := os.Stat(dir); err != nil {
+		t.Fatalf("stat dir: %v", err)
+	} else if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("dir mode = %04o, want 0700", got)
+	}
+	if fi, err := os.Stat(path); err != nil {
+		t.Fatalf("stat db: %v", err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("db mode = %04o, want 0600", got)
+	}
+}
+
+// A pre-existing world-readable DB file must be tightened on open.
+func TestOpenDBTightensExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loose.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	db.Close()
+	if fi, err := os.Stat(path); err != nil {
+		t.Fatalf("stat db: %v", err)
+	} else if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("db mode = %04o, want 0600", got)
+	}
+}
