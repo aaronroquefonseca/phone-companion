@@ -1,5 +1,6 @@
 package com.phonecompanion.app.data
 
+import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
@@ -38,7 +39,12 @@ interface ApiService {
     /**
      * Poll widget definitions for this device. Requires the device Bearer
      * token. Response parsing/rendering per type is the widgets PR's job.
+     *
+     * Raw body (not a Moshi-converted [WidgetsResponse]) so the poll path
+     * parses through [AppMoshi] — the exact instance the parse-path
+     * regression test pins — and can log the response byte length when
+     * parsing fails (shape only, never content).
      */
     @GET("api/v1/widgets")
-    suspend fun getWidgets(): Response<WidgetsResponse>
+    suspend fun getWidgetsRaw(): Response<ResponseBody>
 }

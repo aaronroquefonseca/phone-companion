@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -18,7 +19,6 @@ import com.phonecompanion.app.data.EnrollResponse
 import com.phonecompanion.app.data.EnrollmentStore
 import com.phonecompanion.app.data.FcmTokenUpdateRequest
 import com.phonecompanion.app.data.FcmTokenUpdateResponse
-import com.phonecompanion.app.data.WidgetsResponse
 
 /**
  * Finding 4/5: rotation-safe enroll. The ViewModel survives recreation; an
@@ -54,8 +54,8 @@ class PairViewModelTest {
         override suspend fun updateFcmToken(request: FcmTokenUpdateRequest): Response<FcmTokenUpdateResponse> =
             Response.success(FcmTokenUpdateResponse(updated = true))
 
-        override suspend fun getWidgets(): Response<WidgetsResponse> =
-            Response.success(WidgetsResponse())
+        override suspend fun getWidgetsRaw(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
     }
 
     private fun ok() = Response.success(
