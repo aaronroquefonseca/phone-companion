@@ -48,6 +48,9 @@ class EnrollRepositoryTest {
             return enrollFn(request)
         }
 
+        override suspend fun updateFcmToken(request: FcmTokenUpdateRequest): Response<FcmTokenUpdateResponse> =
+            Response.success(FcmTokenUpdateResponse(updated = true))
+
         override suspend fun getWidgets(): Response<WidgetsResponse> =
             Response.success(WidgetsResponse())
     }

@@ -42,12 +42,13 @@ type Config struct {
 	// $WIDGET_DIR, default /widgets.
 	WidgetDir string
 
-	// FCM settings (notifications P9). The FCM driver is still a skeleton
-	// that fails closed until the Wave-2 push implementation lands; the
-	// default LogSender needs no credentials. When push is wired, the
-	// service-account JSON is mounted at runtime (e.g. a compose secret)
-	// and pointed to from here — it is never committed, baked into the
-	// image, or logged. See README "Notifications".
+	// FCM settings (notifications P9). The FCM driver posts data-only
+	// messages via FCM HTTPv1 using a short-lived OAuth2 token minted from
+	// the service-account JSON at FCM_CREDENTIALS_FILE for FCM_PROJECT_ID;
+	// per-device fan-out reads devices.fcm_token. The default LogSender
+	// needs no credentials. The service-account JSON is mounted at runtime
+	// (e.g. a compose secret) and pointed to from here — it is never
+	// committed, baked into the image, or logged. See README "Notifications".
 	FCMProjectID   string // $FCM_PROJECT_ID
 	FCMCredentials string // $FCM_CREDENTIALS_FILE (path to mounted service-account JSON)
 

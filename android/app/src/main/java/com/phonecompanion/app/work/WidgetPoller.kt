@@ -5,6 +5,7 @@ import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import com.phonecompanion.app.data.ApiClient
 import com.phonecompanion.app.data.DatabaseHolder
+import com.phonecompanion.app.data.FcmTokenBackfill
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.data.WidgetEnvelope
@@ -46,6 +47,17 @@ object WidgetPoller {
         if (pollOnce(context)) {
             // Revoked: fail-closed states already pushed by handleRevoked.
             return
+        }
+        // Push backfill: a device that paired before FCM was configured
+        // (or whose token rotated while the immediate upload failed) heals
+        // its server row here, on the next successful poll. Best-effort and
+        // silent — it never fails the poll or touches the widget push.
+        try {
+            FcmTokenBackfill.maybeBackfill(context)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Transport/storage failure: the next poll retries.
         }
         updateAllWidgets(context)
     }

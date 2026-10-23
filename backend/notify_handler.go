@@ -107,7 +107,7 @@ func dedupeStrings(in []string) []string {
 // already 401s via AuthenticateDevice).
 func resolveNotifyTargets(ctx context.Context, db *sql.DB, t notify.Target) ([]notify.Device, error) {
 	if t.All {
-		return queryDevices(ctx, db, `SELECT id, name FROM devices WHERE revoked_at IS NULL ORDER BY id`)
+		return queryDevices(ctx, db, `SELECT id, name, COALESCE(fcm_token, '') FROM devices WHERE revoked_at IS NULL ORDER BY id`)
 	}
 	args := make([]any, 0, len(t.DeviceIDs))
 	placeholders := make([]string, 0, len(t.DeviceIDs))
@@ -116,7 +116,7 @@ func resolveNotifyTargets(ctx context.Context, db *sql.DB, t notify.Target) ([]n
 		placeholders = append(placeholders, "?")
 	}
 	return queryDevices(ctx, db,
-		`SELECT id, name FROM devices WHERE revoked_at IS NULL AND id IN (`+strings.Join(placeholders, ",")+`) ORDER BY id`,
+		`SELECT id, name, COALESCE(fcm_token, '') FROM devices WHERE revoked_at IS NULL AND id IN (`+strings.Join(placeholders, ",")+`) ORDER BY id`,
 		args...)
 }
 
@@ -129,7 +129,7 @@ func queryDevices(ctx context.Context, db *sql.DB, query string, args ...any) ([
 	var devices []notify.Device
 	for rows.Next() {
 		var d notify.Device
-		if err := rows.Scan(&d.ID, &d.Name); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.FCMToken); err != nil {
 			return nil, err
 		}
 		devices = append(devices, d)
@@ -197,7 +197,17 @@ func fanoutNotify(ctx context.Context, db *sql.DB, sender notify.Sender, msg not
 			log.Printf("notify: build payload device=%s notification=%s: %v", d.ID, notificationID, perr)
 		} else if sendErr := sender.Send(ctx, d, payload); sendErr != nil {
 			status, errMsg = notify.StatusFailed, sendErr.Error()
-			log.Printf("notify: send failed device=%s notification=%s: %v", d.ID, notificationID, sendErr)
+			// Token-gone signals (unregistered/invalid/missing FCM
+			// token) are recorded in the failed history row — the
+			// operator greps history for them — but NEVER revoke the
+			// device here: revocation is destructive and stays an
+			// explicit operator action. The device heals by uploading
+			// a fresh token (re-pair or the token-update endpoint).
+			if notify.NeedsReRegistration(sendErr) {
+				log.Printf("notify: device=%s notification=%s needs fresh FCM token: %v", d.ID, notificationID, sendErr)
+			} else {
+				log.Printf("notify: send failed device=%s notification=%s: %v", d.ID, notificationID, sendErr)
+			}
 		} else {
 			accepted++
 		}

@@ -96,6 +96,11 @@ func authNoStore(path string) bool {
 	if path == "/api/v1/enroll" || path == "/api/v1/enroll-tokens" {
 		return true
 	}
+	// Device token backfill carries the device Bearer credential plus the
+	// FCM registration token: uncacheable like enroll.
+	if path == "/api/v1/device/fcm-token" {
+		return true
+	}
 	// Operator WebUI: the dashboard home plus every page under /webui/
 	// (pairing, widgets preview, notify form) all carry session or
 	// single-use-token state.

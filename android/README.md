@@ -72,13 +72,33 @@ returns `201`.) Detail: `docs/pairing.md`.
 
 ## Push (FCM)
 
-Place the Firebase console's `google-services.json` at
+Place the Firebase console's `google-services.json` at exactly
 `android/app/google-services.json` — it is gitignored and never
-committed. The `google-services` Gradle plugin is intentionally NOT
-applied yet, so debug builds work without the file; without it, FCM token
-fetch is best-effort and pairing/notification polling still work. Backend
-side: `FCM_PROJECT_ID` + service-account JSON at `FCM_CREDENTIALS_FILE`
-(see `backend/README.md`).
+committed. Steps: Firebase console → Project settings → General → Your
+apps → Add app → Android, package name `com.phonecompanion.app`
+→ download `google-services.json` → copy it to
+`android/app/google-services.json` in your checkout → rebuild
+(`./gradlew assembleDebug`). No keys ship in the repo: the file lives
+only in your local checkout (and your release CI secrets, if you build
+there), and unit tests use fake tokens only.
+
+The `google-services` Gradle plugin is intentionally NOT applied yet, so
+debug builds work without the file; without it, FCM token fetch is
+best-effort and pairing/notification polling still work. Token lifecycle
+in the app:
+
+- Pairing (`PairActivity`) fetches the token best-effort and sends it in
+  the enroll body (`fcm_token`, null when push is not configured).
+- `CompanionMessagingService.onNewToken` persists every rotation to
+  encrypted storage and uploads it immediately when paired; if the upload
+  fails (or the service dies first), the next successful widgets poll
+  backfills it via `POST /api/v1/device/fcm-token`
+  (`FcmTokenBackfill.maybeBackfill`, called from `WidgetPoller.refresh`).
+  The endpoint is idempotent — rows that paired before push was
+  configured heal without re-pairing.
+
+Backend side: `FCM_PROJECT_ID` + service-account JSON at
+`FCM_CREDENTIALS_FILE` (see `backend/README.md`).
 
 ## Adding widgets
 

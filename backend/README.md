@@ -151,10 +151,49 @@ in production).
 
 Operator-only (see Routes). Caps: 1 MiB body, max 500 explicit
 `device_ids`, field-length validation, HTTPS-only `image_url`. Drivers via
-`NOTIFY_DRIVER`: `log` (default), `noop` (CI), `fcm` (skeleton that fails
-closed until Wave-2 push; needs `FCM_PROJECT_ID` +
-`FCM_CREDENTIALS_FILE`). Fan-out is sequential; delivery history is
-pruned to 90 days / 20,000 newest rows best-effort after fan-out.
+`NOTIFY_DRIVER`: `log` (default), `noop` (CI), `fcm` (real FCM HTTPv1;
+needs `FCM_PROJECT_ID` + `FCM_CREDENTIALS_FILE`). Fan-out is sequential;
+delivery history is pruned to 90 days / 20,000 newest rows best-effort
+after fan-out.
+
+### Push via FCM (`NOTIFY_DRIVER=fcm`)
+
+The driver POSTs each per-device **data-only** payload to FCM HTTPv1
+(`POST /v1/projects/<project>/messages:send`) with a short-lived OAuth2
+access token minted from the service-account JSON at
+`FCM_CREDENTIALS_FILE` (scope:
+`https://www.googleapis.com/auth/firebase.messaging`). Nothing in this
+package touches client-side FCM artifacts.
+
+- **Credentials file.** Mount the Firebase console's service-account JSON
+  at runtime (compose secret or read-only bind) and point
+  `FCM_CREDENTIALS_FILE` at it. Boot refuses group/other-readable files
+  (want `0600`; `0400` also passes) and refuses to boot without the file
+  when the driver is `fcm`. The file is never committed, baked into the
+  image, or logged — only the failure class is ("cannot read FCM
+  credentials file", never contents).
+- **IAM minimum.** The service account needs the
+  `cloudmessaging.messages.create` permission on the Firebase project
+  (Firebase console: Project settings → Service accounts → Manage service
+  account permissions). A custom role granting exactly that permission is
+  the least-privilege choice; the Firebase Admin predefined role includes
+  it. Setup walkthrough: `docs/setup.md` ("Push (FCM)").
+- **Data-only contract.** Secret messages (`"secret": true`) are sealed
+  into per-device P5 envelopes by the handler *before* `Send`, so the FCM
+  leg carries ciphertext under `title_env`/`body_env` — never plaintext
+  `title`/`body`. The driver POSTs the payload map verbatim (data block
+  only, no `notification` block) and logs metadata only
+  (`notification_id`, device id, `kind`).
+- **Failure model.** Every send failure becomes a per-device `failed`
+  history row (sanitized). Token death (`UNREGISTERED` / `INVALID_ARGUMENT`
+  on the token, or a row with no stored token) returns a typed
+  re-register signal recorded in the row — grep history for
+  `fcm-unregistered` / `fcm-invalid-token` / `fcm-missing-token` to find
+  devices that need a fresh token. The driver **never revokes**: healing
+  is the token backfill (`POST /api/v1/device/fcm-token`, re-pair, or the
+  app's post-poll backfill). No device accepting means the handler answers
+  `500 driver_unavailable` (fail closed); genuinely zero targets stay
+  `202 accepted:0` behind any driver.
 
 ## Log viewing
 

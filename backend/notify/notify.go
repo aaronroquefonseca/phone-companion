@@ -79,12 +79,16 @@ var ValidPriorities = map[string]bool{
 	"max":     true,
 }
 
-// Device is the addressing unit for fan-out. Only columns guaranteed by the
-// P0 devices schema (id, name) are used here; registration-token storage
-// lands in the pairing PR, and the FCM driver documents that dependency.
+// Device is the addressing unit for fan-out. id and name come from the P0
+// devices schema; FCMToken is the FCM registration token stored at pairing
+// (devices.fcm_token, backfilled on re-pair or the device-token update
+// endpoint). Empty means the device paired without push (no
+// google-services.json at enroll time): the FCM driver fails that device
+// closed with a re-registration signal instead of sending anywhere.
 type Device struct {
-	ID   string
-	Name string
+	ID       string
+	Name     string
+	FCMToken string
 }
 
 // Action is one tappable notification action: stable id plus label.
@@ -375,45 +379,14 @@ func (LogSender) Send(_ context.Context, device Device, payload map[string]strin
 	return nil
 }
 
-// FCMSender delivers via FCM HTTPv1. Skeleton only: it carries resolved
-// configuration and fails closed until the Wave-2 implementation lands.
-//
-// TODO (Wave-2 push): mint an OAuth2 access token from the service-account
-// JSON at CredentialsFile, then POST the versioned data payload from
-// Message.DataPayload to
-// https://fcm.googleapis.com/v1/projects/<projectID>/messages:send with the
-// device registration token (pairing PR adds token storage). Depends on:
-// FCM_PROJECT_ID, FCM_CREDENTIALS_FILE (path to a mounted service-account
-// JSON — never committed, never baked into the image).
-type FCMSender struct {
-	ProjectID       string
-	CredentialsFile string
-}
-
-// NewFCMSender builds the skeleton driver from already-resolved config.
-func NewFCMSender(projectID, credentialsFile string) *FCMSender {
-	return &FCMSender{ProjectID: projectID, CredentialsFile: credentialsFile}
-}
-
-// Send implements Sender. Always returns an error until Wave-2 implements
-// the HTTPv1 call, so misconfiguration can never silently drop pushes.
-// The payload (not operator plaintext) is what will be POSTed, so the
-// secret fan-out shape is already safe to pass through here.
-func (s *FCMSender) Send(_ context.Context, device Device, _ map[string]string) error {
-	if s.ProjectID == "" || s.CredentialsFile == "" {
-		return errors.New("notify: FCM driver unconfigured (need FCM_PROJECT_ID and FCM_CREDENTIALS_FILE)")
-	}
-	// TODO (Wave-2 push): real HTTPv1 send for device " + device.ID.
-	return errors.New("notify: FCM HTTPv1 driver not implemented yet (TODO Wave-2 push)")
-}
-
 // SenderFromEnv resolves the driver from caller-provided config (main wires
 // Config's FCM fields through here; driver comes from NOTIFY_DRIVER).
 // Selection:
 //
 //	(""/"log") LogSender — the default, no credentials needed
 //	"noop"     NoopSender — silent success for dev/CI/verification
-//	"fcm"      FCMSender skeleton — fails closed until Wave-2 push
+//	"fcm"      *FCMSender — real FCM HTTPv1 (needs FCM_PROJECT_ID +
+//	             FCM_CREDENTIALS_FILE; per-device tokens from devices)
 //
 // An unknown driver is an error so startup fails fast — a typo must never
 // silently become a black hole.

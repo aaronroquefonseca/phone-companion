@@ -100,3 +100,42 @@ docker compose logs backend | tail
 Back up `/data` first (section 3). Migrations run automatically at boot
 (`Migrate` in `db.go` + notification history). Rolling back the image
 after a migration is not supported — restore the backup instead.
+
+## 5. Push (FCM)
+
+Default deployments log notifications instead of sending them
+(`NOTIFY_DRIVER` unset → `LogSender`). For real push to paired phones:
+
+1. **Firebase project.** In the Firebase console: create a project (or
+   reuse one), open Project settings → General, and add an Android app
+   with package name `com.phonecompanion.app` (nicknames/SHA-1 optional).
+   Download the generated `google-services.json` and place it at exactly
+   `android/app/google-services.json` in your checkout — it is gitignored
+   and never committed. Rebuild the app from a checkout containing the
+   file so FCM registration tokens are issued (without it, pairing still
+   works but the server row holds no token until a push-enabled build
+   backfills it).
+2. **Service account.** Project settings → Service accounts → Generate
+   new private key. Grant that service account the
+   `cloudmessaging.messages.create` permission on the Firebase project —
+   minimum is a custom IAM role with exactly that permission (the Firebase
+   Admin predefined role includes it and is the common choice).
+3. **Credentials file.** Copy the JSON to the server host (e.g.
+   `secrets/fcm-service-account.json` next to your compose file — that
+   path is gitignored), set mode `0600` (`chmod 0600 <file>`; the backend
+   refuses group/other-readable files at boot), and wire it in compose:
+   `FCM_PROJECT_ID: "<project-id>"`,
+   `FCM_CREDENTIALS_FILE: "/run/secrets/fcm.json"` with the secret/bind
+   mounted there (see `backend/docker-compose.example.yml`).
+4. **Switch the driver.** `NOTIFY_DRIVER: "fcm"`, then
+   `docker compose up -d --build`.
+
+Data-only contract: the server POSTs data payloads only — secret
+notifications travel as per-device encrypted envelopes, never plaintext
+`title`/`body` (see `backend/README.md` "Push via FCM" and
+`docs/threat-model.md`). When a device's token dies (app reinstall,
+rotation), fan-out records a failed row carrying `fcm-unregistered` /
+`fcm-invalid-token` / `fcm-missing-token` and the device row is left alone:
+re-pairing (or the app's automatic token backfill on the next widgets
+poll) uploads a fresh token and delivery resumes with no operator action
+beyond spotting the history rows.

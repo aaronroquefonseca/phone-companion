@@ -170,7 +170,7 @@ the backend refuses to boot on weak/missing secrets.
 | `DB_PATH` | `/data/phone-companion.db` | sqlite file; back up `/data` (see `docs/setup.md`) |
 | `WIDGET_DIR` | `/widgets` | Folder-per-widget mount (see `backend/README.md`) |
 | `EXTERNAL_BASE_URL` | — | `https://<public-host>` bare origin. Required in production; dev falls back to request Host |
-| `NOTIFY_DRIVER` | `log` | `log` (default, logs deliveries), `noop` (silent, CI), `fcm` (fails closed until Wave-2 push) |
+| `NOTIFY_DRIVER` | `log` | `log` (default, logs deliveries), `noop` (silent, CI), `fcm` (real FCM HTTPv1 push) |
 | `FCM_PROJECT_ID` | — | Needed only for `fcm` driver |
 | `FCM_CREDENTIALS_FILE` | — | Path to mounted service-account JSON; never committed or baked into the image |
 

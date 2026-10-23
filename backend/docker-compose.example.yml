@@ -44,7 +44,8 @@ services:
       # REQUIRED in production (e.g. "https://example.com"); when unset
       # the QR falls back to the request Host (dev-only, spoofable).
       # EXTERNAL_BASE_URL: "https://example.com"
-      # --- Push (notifications PR; leave unset until then) ---
+      # --- Push (notifications; leave unset for log-driver default) ---
+      # NOTIFY_DRIVER: "fcm"
       # FCM_PROJECT_ID: ""
       # FCM_CREDENTIALS_FILE: "/run/secrets/fcm.json"
     volumes:
@@ -54,7 +55,7 @@ services:
       # Mount your own directory here, e.g.:
       # - /srv/phone-companion/widgets:/widgets:ro
       - ./backend/widgets:/widgets:ro
-    # Example secret mount for the FCM service-account JSON (unused stub):
+    # Example secret mount for the FCM service-account JSON (NOTIFY_DRIVER=fcm):
     # secrets:
     #   - fcm-service-account
 

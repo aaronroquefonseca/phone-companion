@@ -28,6 +28,20 @@ data class EnrollResponse(
     @Json(name = "device_key") val deviceKey: String,
 )
 
+// --- POST /api/v1/device/fcm-token ---
+
+// FCM registration-token backfill (Wave-2 push). Sent with the device
+// Bearer token after FCM rotation (onNewToken) and opportunistically on
+// the next widgets poll when the local token is present but the server row
+// may hold none (paired before push was configured) or a stale one.
+data class FcmTokenUpdateRequest(
+    @Json(name = "fcm_token") val fcmToken: String,
+)
+
+data class FcmTokenUpdateResponse(
+    @Json(name = "updated") val updated: Boolean = false,
+)
+
 // --- GET /api/v1/widgets ---
 
 data class WidgetsResponse(
