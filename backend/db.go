@@ -18,7 +18,9 @@ import (
 //	id          device identifier (server-issued, opaque)
 //	name        human-friendly device label shown in the WebUI
 //	token_hash  hash of the per-device Bearer token (never the raw token)
-//	secret_key  per-device payload-encryption key material (encrypted at rest)
+//	secret_key  per-device payload-encryption key material, generated at
+//	            enroll and delivered once (wire contract: docs/api-contract.md
+//	            "Key bootstrap at enrollment"; rationale: docs/threat-model.md)
 //
 // TODO (pairing PR): created_at/revoked_at columns, revocation indexes.
 // TODO (auth PR): decide at-rest protection for secret_key.

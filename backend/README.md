@@ -17,8 +17,8 @@ only: config, routes, DB stub, container.
 ## Run
 
 ```sh
-# Local (Go toolchain):
-go run ./backend
+# Local (Go toolchain, from the backend/ directory):
+cd backend && go run .
 
 # Docker:
 docker build ./backend

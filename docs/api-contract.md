@@ -47,13 +47,41 @@ Response `201`:
 ```json
 {
   "device_id": "opaque-server-issued-id",
-  "device_token": "raw-bearer-token-shown-once"
+  "device_token": "raw-bearer-token-shown-once",
+  "device_key": "base64-256-bit-per-device-key-shown-once"
 }
 ```
 
 The raw `device_token` is returned exactly once; the server keeps only its
 hash. Errors: `410` expired/used enroll token, `409` device already
 enrolled (re-pair flow, pairing PR decides).
+
+### Key bootstrap at enrollment (pairing P2 / widgets P5 / notify P10)
+
+So `secret` widgets are decryptable per device without rework, enrollment
+also bootstraps a per-device encryption key (documentation-only contract
+here; generation and storage land in the pairing PR):
+
+- The server generates a random 256-bit key per device at enroll time and
+  returns it once inside the `201` enroll response as `device_key`
+  (base64), delivered only over TLS alongside `device_token`.
+- The server stores the key as `secret_key` on the device row; it is never
+  logged, never returned by any other endpoint, and never embedded in
+  widget payloads or notifications.
+- The app persists `device_key` in encrypted storage on first receipt and
+  never transmits it again. Loss of the app-side key = re-pair (see
+  rotation below).
+- Key identification: every encrypted field carries a `kid`
+  (key id = `device_id` at v1). The app selects its stored key by `kid`
+  and refuses to decrypt under any other key.
+- Rotation on re-pair: re-enrolling a device (new QR scan) generates a
+  fresh 256-bit key, overwrites `secret_key`, and invalidates ciphertexts
+  encrypted under the old key. Payloads encrypted under a rotated-out key
+  fail closed (widget shows "needs refresh", never plaintext, never a
+  crash). Key history is NOT kept at v1.
+- Rationale and at-rest storage choices are the threat-model doc's job
+  (`docs/threat-model.md` stub); this section defines the wire contract so
+  P2/P5/P10 implement compatibly.
 
 ### `GET /api/v1/widgets` (widgets PR)
 
@@ -138,16 +166,51 @@ Every widget served by `GET /api/v1/widgets` uses this envelope:
 | `title`      | Display title from `widget.toml`.                            |
 | `updated_at` | Last backend-observed change; drives client refresh.         |
 | `payload`    | Type-specific content (shapes below).                        |
-| `secret_ref` | Present only for `secret`; opaque ref the app resolves via   |
-|              | per-device decryption (threat-model doc, widgets PR).        |
+| `secret_ref` | Present only for `secret`; `kid` of the per-device key that   |
+|              | encrypted this widget's payload (v1: the target `device_id`).  |
+|              | Lets the app pick the right stored key before decrypting.      |
 
 Payload shapes (v1):
 
 - `text`: `{ "body": "<markdown/plain text>" }` from `body.md`.
-- `secret`: `{ "ciphertext": "<base64>", "alg": "<name>" }` — decryptable
-  only by the target device; never logged, never cached unencrypted.
+- `secret`: the encrypted envelope below — decryptable only by the target
+  device; never logged, never cached unencrypted.
 - `list`: `{ "items": [{ "id": "<stable>", "text": "<label>", "done": false }] }`.
 - `status`: `{ "state": "ok | warn | alert | unknown", "detail": "<text>" }`.
+
+### Encrypted envelope for `secret` widgets (widgets P5, notify P10)
+
+All secret-bearing fields use AES-256-GCM with a fresh random 96-bit nonce
+per message. The envelope is JSON with base64 (standard alphabet, no
+line breaks) values:
+
+```json
+{
+  "alg": "AES-256-GCM",
+  "kid": "<device_id whose secret_key encrypted this>",
+  "nonce": "<base64 12-byte nonce>",
+  "ciphertext": "<base64 AES-GCM ciphertext+tag>"
+}
+```
+
+Rules:
+
+- `alg` is fixed to `AES-256-GCM` at v1. Unknown `alg` values fail closed
+  (no decrypt attempt, "needs refresh" UI, never a crash) so a future
+  algorithm can be introduced without breaking old apps.
+- `nonce` MUST be freshly random per encrypted message; reuse across two
+  messages under the same key is a correctness/security bug.
+- `ciphertext` is the raw AES-GCM output (ciphertext concatenated with the
+  16-byte auth tag), base64-encoded as one field.
+- Associated data: `kid` and widget `id` are bound as AES-GCM additional
+  authenticated data where implementations support it, so a ciphertext
+  cannot be transplanted across devices or widgets. Where a platform API
+  makes AAD awkward, implementations MUST still verify `kid`/`id` match
+  before rendering (fail closed on mismatch).
+- Key selection and rotation follow "Key bootstrap at enrollment" above:
+  decrypt only under the stored key matching `kid`; on mismatch or auth
+  failure, fail closed. Re-pair rotates the key; old ciphertexts become
+  undecryptable by design.
 
 Unknown `type` values must be ignored (not crash) by the app so the
 backend can add types later.

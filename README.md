@@ -21,7 +21,7 @@ polls widget definitions, and receives targeted notifications.
 
 ```sh
 # Backend health check from the container:
-docker build ./backend
+docker build -t phone-companion-backend:local ./backend
 docker run --rm -p 8080:8080 phone-companion-backend:local
 curl localhost:8080/healthz   # {"status":"ok"}
 

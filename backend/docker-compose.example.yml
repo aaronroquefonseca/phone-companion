@@ -34,7 +34,7 @@ services:
     volumes:
       # sqlite state (survives rebuilds).
       - phone-companion-data:/data
-      # Folder-per-widget definitions (see backend/widgets/example/).
+      # Folder-per-widget definitions (see backend/widgets/hello/).
       # Mount your own directory here, e.g.:
       # - /srv/phone-companion/widgets:/widgets:ro
       - ./backend/widgets:/widgets:ro
