@@ -11,16 +11,19 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Per-device secret decryption (P10 SECRET ROUND-TRIP).
+ * Per-device secret decryption (P10 SECRET ROUND-TRIP, P11 NOTIFY SECRECY).
  *
  * Wire contract: docs/api-contract.md "Encrypted envelope for `secret`
  * widgets". AES-256-GCM, fresh 96-bit nonce per message, envelope JSON
  * `{alg,kid,nonce,ciphertext}` with RFC 4648 §4 base64. Plaintext is the
  * UTF-8 bytes of the secret string (empty legal). AAD is exactly
- * `UTF-8(kid) || 0x00 || UTF-8(binding)` with binding == widget id.
+ * `UTF-8(kid) || 0x00 || UTF-8(binding)` with binding == widget id for
+ * secret widgets, or `notify/<notification_id>/<field>` for secret
+ * notification fields (see [notifyBinding]).
  *
  * Oracle policy: EVERY failure maps to null (the widget shows the single
- * "needs refresh" masked state). Callers must not branch on failure kinds
+ * "needs refresh" masked state; a secret notification falls back to the
+ * blank-notification rendering). Callers must not branch on failure kinds
  * and must not log failure details — kid-mismatch, unknown alg, bad
  * base64, auth-tag failure, and non-UTF-8 output are indistinguishable to
  * the user and to logcat. Never log plaintext, keys, nonces, or
@@ -34,6 +37,20 @@ object SecretCrypto {
     const val KEY_SIZE_BYTES = 32
     const val NONCE_SIZE_BYTES = 12
     const val GCM_TAG_BITS = 128
+
+    /**
+     * Builds the AAD binding for a secret notification field:
+     * `notify/<notification_id>/<field>`. Mirrors backend/crypto
+     * NotifyBinding exactly: empty segments or segments containing `/`
+     * (the join separator) fail closed to null from the caller — there is
+     * nothing legitimate to decrypt under them.
+     */
+    fun notifyBinding(notificationId: String?, field: String?): String? {
+        if (notificationId.isNullOrEmpty() || field.isNullOrEmpty()) return null
+        if (notificationId.contains('/') || notificationId.contains('\u0000')) return null
+        if (field.contains('/') || field.contains('\u0000')) return null
+        return "notify/$notificationId/$field"
+    }
 
     /**
      * Builds the exact AES-GCM AAD for (kid, binding): UTF-8(kid) || 0x00
@@ -68,11 +85,52 @@ object SecretCrypto {
         expectedKid: String?,
         widgetId: String?,
     ): String? {
+        if (widgetId.isNullOrBlank()) return null
+        return decryptInternal(envelopeJson, deviceKeyBase64, expectedKid, widgetId)
+    }
+
+    /**
+     * Decrypts one secret notification field (`title` or `body`) from a
+     * secret fan-out payload.
+     *
+     * @param envelopeJson the `title_env`/`body_env` envelope JSON string.
+     * @param deviceKeyBase64 base64 (std, padded) 256-bit per-device key
+     * from [com.phonecompanion.app.data.SecureStorage].
+     * @param expectedKid the device id that must match the envelope `kid`.
+     * @param notificationId the payload `notification_id` (AAD binding).
+     * @param field "title" or "body" (AAD binding).
+     * @return the field plaintext, or null for EVERY failure mode
+     * (caller renders the blank-notification fallback — no oracle).
+     */
+    fun decryptNotifyField(
+        envelopeJson: String?,
+        deviceKeyBase64: String?,
+        expectedKid: String?,
+        notificationId: String?,
+        field: String?,
+    ): String? {
+        val binding = notifyBinding(notificationId, field) ?: return null
+        return decryptInternal(envelopeJson, deviceKeyBase64, expectedKid, binding)
+    }
+
+    /**
+     * Shared decrypt core: envelope parse, alg/kid checks, base64 lengths,
+     * AES-GCM open under buildAad(kid, binding), strict UTF-8 decode. Every
+     * failure — including unexpected provider errors — maps to the same
+     * null (single needs-refresh outcome, no oracle).
+     */
+    private fun decryptInternal(
+        envelopeJson: String?,
+        deviceKeyBase64: String?,
+        expectedKid: String?,
+        binding: String?,
+    ): String? {
         try {
             if (envelopeJson.isNullOrBlank()) return null
             if (deviceKeyBase64.isNullOrBlank()) return null
             if (expectedKid.isNullOrBlank()) return null
-            if (widgetId.isNullOrBlank()) return null
+            if (binding.isNullOrBlank()) return null
+            if (!looksLikeEnvelope(envelopeJson)) return null
 
             val alg = extractField(envelopeJson, "alg") ?: return null
             if (alg != ALGORITHM) return null
@@ -105,7 +163,7 @@ object SecretCrypto {
             val keySpec = SecretKeySpec(keyBytes, "AES")
             val gcmSpec = GCMParameterSpec(GCM_TAG_BITS, nonce)
             cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-            cipher.updateAAD(buildAad(kid, widgetId))
+            cipher.updateAAD(buildAad(kid, binding))
             val plainBytes = try {
                 cipher.doFinal(sealed)
             } catch (e: Exception) {
@@ -134,13 +192,27 @@ object SecretCrypto {
     }
 
     /**
+     * Envelope shape gate: the trimmed input must be one `{...}` object
+     * naming all four envelope fields. The field extractor below is
+     * regex-based and would otherwise ignore trailing/leading garbage
+     * (e.g. a transplanted envelope with appended bytes); this gate fails
+     * such inputs closed. Base64 values never contain `"`, so quoted key
+     * probes cannot false-positive on field contents.
+     */
+    private fun looksLikeEnvelope(json: String): Boolean {
+        val t = json.trim()
+        if (!t.startsWith("{") || !t.endsWith("}")) return false
+        return t.contains("\"alg\"") && t.contains("\"kid\"") &&
+            t.contains("\"nonce\"") && t.contains("\"ciphertext\"")
+    }
+
+    /**
      * Minimal strict-ish JSON string-field extractor for the flat envelope.
      * Returns null when the field is absent or not a JSON string. Unknown
      * fields are ignored (forward compatibility); missing/typed-wrong
      * required fields fail closed.
      */
-    private fun extractField(json: String, field: String): String? {
-        // Matches "field" : "value" with no escaped-quote support beyond
+    private fun extractField(json: String, field: String): String? {        // Matches "field" : "value" with no escaped-quote support beyond
         // what the backend emits (kids, nonces, ciphertexts, alg are all
         // [A-Za-z0-9+/=_-] without quotes or backslashes).
         val pattern = Regex("\"" + Regex.escape(field) + "\"\\s*:\\s*\"([^\"]*)\"")

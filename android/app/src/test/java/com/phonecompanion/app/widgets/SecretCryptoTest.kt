@@ -154,4 +154,62 @@ class SecretCryptoTest {
             decryptSecretStub(envelope(), kid, widgetId, deviceKeyBase64 = keyB64),
         )
     }
+
+    private fun encryptForNotify(plain: String, notificationId: String, field: String): String {
+        val key = Base64.getDecoder().decode(keyB64)
+        val nonce = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val binding = SecretCrypto.notifyBinding(notificationId, field)!!
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            SecretKeySpec(key, "AES"),
+            GCMParameterSpec(128, nonce),
+        )
+        cipher.updateAAD(SecretCrypto.buildAad(kid, binding))
+        val sealed = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+        return "{\"alg\":\"AES-256-GCM\",\"kid\":\"$kid\"," +
+            "\"nonce\":\"${Base64.getEncoder().encodeToString(nonce)}\"," +
+            "\"ciphertext\":\"${Base64.getEncoder().encodeToString(sealed)}\"}"
+    }
+
+    @Test
+    fun `notify binding matches backend NotifyBinding`() {
+        assertEquals("notify/nid-1/title", SecretCrypto.notifyBinding("nid-1", "title"))
+        assertEquals("notify/nid-1/body", SecretCrypto.notifyBinding("nid-1", "body"))
+        // Empty segments and separator bytes fail closed (nothing
+        // legitimate decrypts under them).
+        assertNull(SecretCrypto.notifyBinding("", "title"))
+        assertNull(SecretCrypto.notifyBinding("nid-1", ""))
+        assertNull(SecretCrypto.notifyBinding(null, "title"))
+        assertNull(SecretCrypto.notifyBinding("nid-1", null))
+        assertNull(SecretCrypto.notifyBinding("a/b", "title"))
+        assertNull(SecretCrypto.notifyBinding("nid-1", "a/b"))
+    }
+
+    @Test
+    fun `notify field decrypt round-trips and fails closed`() {
+        val nid = "nid-notify-1"
+        val titleEnv = encryptForNotify("Dinner ✓", nid, "title")
+        val bodyEnv = encryptForNotify("Ready in 10", nid, "body")
+        assertEquals(
+            "Dinner ✓",
+            SecretCrypto.decryptNotifyField(titleEnv, keyB64, kid, nid, "title"),
+        )
+        assertEquals(
+            "Ready in 10",
+            SecretCrypto.decryptNotifyField(bodyEnv, keyB64, kid, nid, "body"),
+        )
+        // Every failure maps to the same null (no oracle): wrong kid,
+        // wrong notification, wrong field, tampered envelope, bad key.
+        val wrongKeyB64 = Base64.getEncoder().encodeToString(ByteArray(32) { 0xFF.toByte() })
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv, keyB64, "dev-2", nid, "title"))
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv, keyB64, kid, "nid-other", "title"))
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv, keyB64, kid, nid, "body"))
+        assertNull(SecretCrypto.decryptNotifyField(bodyEnv, keyB64, kid, nid, "title"))
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv, wrongKeyB64, kid, nid, "title"))
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv + "x", keyB64, kid, nid, "title"))
+        assertNull(SecretCrypto.decryptNotifyField(null, keyB64, kid, nid, "title"))
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv, keyB64, kid, null, "title"))
+        assertNull(SecretCrypto.decryptNotifyField(titleEnv, keyB64, kid, nid, ""))
+    }
 }

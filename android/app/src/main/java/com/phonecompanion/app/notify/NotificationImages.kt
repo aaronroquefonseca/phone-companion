@@ -14,6 +14,14 @@ import javax.net.ssl.HttpsURLConnection
  * non-2xx responses, oversized bodies, and undecodable bytes all yield
  * null, and the caller falls back to text rendering. No exception ever
  * escapes — a bad attachment must never crash or block a notification.
+ *
+ * Decode is two-pass and bounded: pass one reads dimensions only
+ * ([BitmapFactory.Options.inJustDecodeBounds]), images whose pixel count
+ * exceeds [MAX_PIXELS] are rejected before any pixel buffer exists, and
+ * pass two downsamples ([inSampleSize]) so the decoded bitmap's longest
+ * side never exceeds [MAX_DIMENSION_PX]. Everything is guarded by a
+ * `catch (Throwable)` — including [OutOfMemoryError] — because a hostile
+ * attachment must not kill the FCM service.
  */
 object NotificationImages {
 
@@ -22,6 +30,12 @@ object NotificationImages {
 
     /** Hard cap on downloaded bytes (defense against huge attachments). */
     const val MAX_BYTES = 5 * 1024 * 1024
+
+    /** Longest decoded side in px; larger images are downsampled to fit. */
+    const val MAX_DIMENSION_PX = 1024
+
+    /** Images with more pixels than this are rejected before decoding. */
+    const val MAX_PIXELS = 4_000_000L
 
     fun download(urlString: String): Bitmap? {
         return try {
@@ -42,13 +56,47 @@ object NotificationImages {
                 val bytes = conn.inputStream.use { it.readCapped(MAX_BYTES + 1) }
                     ?: return null
                 if (bytes.isEmpty() || bytes.size > MAX_BYTES) return null
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                decodeBounded(bytes)
             } finally {
                 conn.disconnect()
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
+    }
+
+    /**
+     * Two-pass bounded decode: bounds first, pixel-count gate, then a
+     * downsampled decode. Returns null for anything undecodable or over
+     * budget. Never throws.
+     */
+    fun decodeBounded(bytes: ByteArray): Bitmap? {
+        try {
+            if (bytes.isEmpty()) return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val width = bounds.outWidth
+            val height = bounds.outHeight
+            if (width <= 0 || height <= 0) return null
+            if (width.toLong() * height.toLong() > MAX_PIXELS) return null
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(width, height) }
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        } catch (_: Throwable) {
+            return null
+        }
+    }
+
+    /**
+     * Pure downsample math: the smallest power-of-two sample size whose
+     * application brings both sides within [MAX_DIMENSION_PX]. Exported
+     * for unit tests; byte-identical wherever it runs.
+     */
+    fun sampleSizeFor(width: Int, height: Int): Int {
+        var sampleSize = 1
+        while (width / sampleSize > MAX_DIMENSION_PX || height / sampleSize > MAX_DIMENSION_PX) {
+            sampleSize *= 2
+        }
+        return sampleSize
     }
 
     private fun InputStream.readCapped(cap: Int): ByteArray? {

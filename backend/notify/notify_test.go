@@ -3,9 +3,12 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/aaronroquefonseca/phone-companion/backend/crypto"
 )
 
 func validMessage() Message {
@@ -158,17 +161,18 @@ func TestDriversSend(t *testing.T) {
 	ctx := context.Background()
 	dev := Device{ID: "dev-1", Name: "Test"}
 	msg := validMessage()
-	if err := (NoopSender{}).Send(ctx, dev, msg); err != nil {
+	plain := msg.DataPayload("nid-plain")
+	if err := (NoopSender{}).Send(ctx, dev, plain); err != nil {
 		t.Fatalf("noop: %v", err)
 	}
-	if err := (LogSender{}).Send(ctx, dev, msg); err != nil {
+	if err := (LogSender{}).Send(ctx, dev, plain); err != nil {
 		t.Fatalf("log: %v", err)
 	}
 	// FCM skeleton fails closed both unconfigured and configured.
-	if err := NewFCMSender("", "").Send(ctx, dev, msg); err == nil {
+	if err := NewFCMSender("", "").Send(ctx, dev, plain); err == nil {
 		t.Fatal("fcm unconfigured: expected error")
 	}
-	if err := NewFCMSender("p", "/x.json").Send(ctx, dev, msg); err == nil {
+	if err := NewFCMSender("p", "/x.json").Send(ctx, dev, plain); err == nil {
 		t.Fatal("fcm skeleton: expected not-implemented error")
 	}
 }
@@ -189,5 +193,120 @@ func TestDataPayloadActions(t *testing.T) {
 		if len(k) > 7 && k[:7] == "action_" {
 			t.Fatalf("empty actions must emit no action_* keys, got %q", k)
 		}
+	}
+}
+
+func TestSecretDataPayloadRoundTrip(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := validMessage()
+	m.Secret = true
+	payload, err := m.SecretDataPayload("nid-secret-1", "dev-1", key)
+	if err != nil {
+		t.Fatalf("secret payload: %v", err)
+	}
+	if payload[SecretFlagKey] != "true" {
+		t.Fatalf("missing secret flag: %v", payload)
+	}
+	if _, ok := payload["title"]; ok {
+		t.Fatalf("secret payload must not carry plaintext title")
+	}
+	if _, ok := payload["body"]; ok {
+		t.Fatalf("secret payload must not carry plaintext body")
+	}
+	m2 := validMessage()
+	for _, tc := range []struct {
+		envKey, field, want string
+	}{
+		{TitleEnvKey, "title", m2.Title},
+		{BodyEnvKey, "body", m2.Body},
+	} {
+		var env crypto.Envelope
+		if err := json.Unmarshal([]byte(payload[tc.envKey]), &env); err != nil {
+			t.Fatalf("%s envelope is not P5 JSON: %v", tc.envKey, err)
+		}
+		if env.Kid != "dev-1" {
+			t.Fatalf("%s envelope kid = %q, want dev-1", tc.envKey, env.Kid)
+		}
+		binding, err := crypto.NotifyBinding("nid-secret-1", tc.field)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain, err := crypto.Decrypt(key, "dev-1", binding, env)
+		if err != nil {
+			t.Fatalf("%s decrypt: %v", tc.envKey, err)
+		}
+		if string(plain) != tc.want {
+			t.Fatalf("%s = %q, want %q", tc.envKey, plain, tc.want)
+		}
+		// Transplant across devices fails closed.
+		if _, err := crypto.Decrypt(key, "dev-2", binding, env); err == nil {
+			t.Fatalf("%s decrypts under the wrong kid", tc.envKey)
+		}
+		// Transplant across fields fails closed.
+		other := "body"
+		if tc.field == "body" {
+			other = "title"
+		}
+		otherBinding, _ := crypto.NotifyBinding("nid-secret-1", other)
+		if _, err := crypto.Decrypt(key, "dev-1", otherBinding, env); err == nil {
+			t.Fatalf("%s decrypts under the wrong field binding", tc.envKey)
+		}
+	}
+	// Non-secret fields ride in the clear alongside the envelopes.
+	if payload["kind"] == "" || payload["v"] != PayloadVersion || payload["notification_id"] != "nid-secret-1" {
+		t.Fatalf("secret payload lost clear fields: %v", payload)
+	}
+}
+
+func TestValidatePayloadCap(t *testing.T) {
+	m := validMessage()
+	// A max-length ASCII body blows the FCM budget: worst-case marshal cap.
+	m.Body = strings.Repeat("b", MaxBodyLen)
+	if err := m.Validate(); codeOf(err) != "payload_too_large" {
+		t.Fatalf("max body: got %v, want payload_too_large", err)
+	}
+	// Secret expansion trips the cap even sooner.
+	m.Secret = true
+	m.Body = strings.Repeat("b", 2500)
+	if err := m.Validate(); codeOf(err) != "payload_too_large" {
+		t.Fatalf("secret 2k body: got %v, want payload_too_large", err)
+	}
+	// Small secret messages pass.
+	m.Body = "Ready in 10 minutes"
+	m.Title = "Dinner"
+	if err := m.Validate(); err != nil {
+		t.Fatalf("small secret message should validate: %v", err)
+	}
+	// Ordinary small messages still pass.
+	m.Secret = false
+	if err := m.Validate(); err != nil {
+		t.Fatalf("small plain message should validate: %v", err)
+	}
+}
+
+func TestSanitizeError(t *testing.T) {
+	if got := SanitizeError(""); got != "" {
+		t.Fatalf("empty must stay empty, got %q", got)
+	}
+	if got := SanitizeError("notify: FCM driver unconfigured (need FCM_PROJECT_ID)"); got == "" {
+		t.Fatal("ordinary driver text must survive")
+	}
+	// Control bytes, quote tricks, and escapes are stripped.
+	got := SanitizeError("x\x00y\nz\t\"'`\\${PATH}$(id)\x1b[31m")
+	for _, r := range got {
+		if r < 0x20 || r == 0x7f {
+			t.Fatalf("control byte survived: %q", got)
+		}
+	}
+	if strings.ContainsAny(got, "\"'`\\$") {
+		t.Fatalf("quotable metachars survived: %q", got)
+	}
+	// Truncation to MaxErrLen runes.
+	long := strings.Repeat("e", MaxErrLen+100)
+	if got := SanitizeError(long); len([]rune(got)) != MaxErrLen {
+		t.Fatalf("truncated length = %d, want %d", len([]rune(got)), MaxErrLen)
 	}
 }

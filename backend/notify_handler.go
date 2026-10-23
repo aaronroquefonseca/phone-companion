@@ -36,7 +36,10 @@ type notifyActionJSON struct {
 	Title string `json:"title"`
 }
 
-// notifyRequestJSON mirrors the contract's notify request body.
+// notifyRequestJSON mirrors the contract's notify request body, plus the
+// additive v1 "secret" flag (code-only extension, see notify.Message): when
+// true the server per-device encrypts title+body into P5 envelopes and the
+// fan-out payload carries no plaintext. Non-secret requests are unchanged.
 type notifyRequestJSON struct {
 	Target   notifyTargetJSON   `json:"target"`
 	Kind     string             `json:"kind"`
@@ -46,6 +49,7 @@ type notifyRequestJSON struct {
 	Channel  string             `json:"channel"`
 	Actions  []notifyActionJSON `json:"actions"`
 	ImageURL string             `json:"image_url"`
+	Secret   bool               `json:"secret"`
 }
 
 // requestToMessage converts the wire shape into a validated notify.Message,
@@ -58,6 +62,7 @@ func requestToMessage(req notifyRequestJSON) (notify.Message, error) {
 		Priority: strings.TrimSpace(req.Priority),
 		Channel:  strings.TrimSpace(req.Channel),
 		ImageURL: strings.TrimSpace(req.ImageURL),
+		Secret:   req.Secret,
 	}
 	if req.Target.All != nil && *req.Target.All {
 		msg.Target.All = true
@@ -147,11 +152,22 @@ func writeNotifyError(w http.ResponseWriter, status int, code string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
-// handleNotify enqueues fan-out: validate, resolve targets, send per device
-// via the configured Sender, record history, respond 202. One device's
-// failure never blocks the rest; accepted counts successful sends.
-// accepted:0 is a normal 202 (not an error): it means no devices matched —
-// unknown device_ids, or an empty registry for {"all":true}.
+// handleNotify enqueues fan-out: validate, resolve targets, build the
+// per-device data payload (plaintext DataPayload, or per-device P5
+// envelopes when the request sets secret:true), send via the configured
+// Sender, record history, respond.
+//
+// Delivery semantics:
+//
+//	accepted>0 → 202 {"notification_id","accepted"} (normal).
+//	genuinely zero targets (unknown device_ids, or an empty registry for
+//	{"all":true}) → 202 accepted:0, never an error.
+//	stub driver (LogSender/NoopSender) with real targets, or every send
+//	driver-failing (e.g. misconfigured FCM) → 500 driver_unavailable. A
+//	stub "accept" would lie about delivery, so it fails closed instead.
+//
+// One device's failure never blocks the rest; accepted counts successful
+// sends. Driver error text is sanitized by RecordDelivery before storage.
 func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -180,6 +196,12 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			writeNotifyError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
+		if notify.DebugEnabled() {
+			// Explicit local-debug opt-in only: this is the one place full
+			// notify content may be logged. Never on in production.
+			log.Printf("notify: debug dump kind=%q title=%q body=%q secret=%v targets=%+v",
+				msg.Kind, msg.Title, msg.Body, msg.Secret, msg.Target)
+		}
 		devices, err := resolveNotifyTargets(ctx, db, msg.Target)
 		if err != nil {
 			log.Printf("notify: resolve targets: %v", err)
@@ -192,10 +214,37 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			writeNotifyError(w, http.StatusInternalServerError, "internal")
 			return
 		}
+		if len(devices) == 0 {
+			// Genuinely zero targets is a normal 202, not an error —
+			// even behind a stub driver.
+			if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
+				log.Printf("notify: prune history: %v", pruneErr)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"notification_id": notificationID,
+				"accepted":        0,
+			})
+			return
+		}
+		switch sender.(type) {
+		case notify.LogSender, notify.NoopSender:
+			// Stub drivers deliver nothing: reporting accepted>0 would
+			// lie to the operator, so fail closed. (Zero targets return
+			// 202 above regardless of driver.)
+			log.Printf("notify: stub driver %T cannot deliver notification=%s to %d device(s)", sender, notificationID, len(devices))
+			writeNotifyError(w, http.StatusInternalServerError, "driver_unavailable")
+			return
+		}
 		accepted := 0
 		for _, d := range devices {
 			status, errMsg := notify.StatusQueued, ""
-			if sendErr := sender.Send(ctx, d, msg); sendErr != nil {
+			payload, perr := payloadForDevice(msg, db, notificationID, d)
+			if perr != nil {
+				status, errMsg = notify.StatusFailed, perr.Error()
+				log.Printf("notify: build payload device=%s notification=%s: %v", d.ID, notificationID, perr)
+			} else if sendErr := sender.Send(ctx, d, payload); sendErr != nil {
 				status, errMsg = notify.StatusFailed, sendErr.Error()
 				log.Printf("notify: send failed device=%s notification=%s: %v", d.ID, notificationID, sendErr)
 			} else {
@@ -212,6 +261,12 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 		if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
 			log.Printf("notify: prune history: %v", pruneErr)
 		}
+		if accepted == 0 {
+			// Real targets, nothing delivered: the driver (e.g.
+			// misconfigured FCM) is down, not merely idle.
+			writeNotifyError(w, http.StatusInternalServerError, "driver_unavailable")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -219,4 +274,43 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			"accepted":        accepted,
 		})
 	}
+}
+
+// payloadForDevice builds the wire payload for one device: the plaintext
+// versioned payload, or per-device P5 envelopes when msg.Secret is set
+// (key lookup + Encrypt per field; any failure fails that device closed —
+// the failure text is sanitized at RecordDelivery time). The key lookup
+// reads the passed db handle (not the deviceDB global) so fan-out stays
+// hermetic in tests and never depends on boot wiring.
+func payloadForDevice(msg notify.Message, db *sql.DB, notificationID string, d notify.Device) (map[string]string, error) {
+	if !msg.Secret {
+		return msg.DataPayload(notificationID), nil
+	}
+	key, err := lookupNotifySecretKey(db, d.ID)
+	if err != nil {
+		return nil, errors.New("notify: no device key for secret payload")
+	}
+	return msg.SecretDataPayload(notificationID, d.ID, key)
+}
+
+// lookupNotifySecretKey returns the 32-byte per-device key for an active
+// device, or an error when the row is missing/revoked or the key is
+// absent/malformed. Secret material is never logged by callers.
+func lookupNotifySecretKey(db *sql.DB, deviceID string) ([32]byte, error) {
+	var zero [32]byte
+	if db == nil {
+		return zero, errors.New("notify: device DB not wired")
+	}
+	var keyBytes []byte
+	if err := db.QueryRow(
+		`SELECT secret_key FROM devices WHERE id = ? AND revoked_at IS NULL`,
+		deviceID).Scan(&keyBytes); err != nil {
+		return zero, err
+	}
+	if len(keyBytes) != 32 {
+		return zero, errors.New("notify: bad key length")
+	}
+	var key [32]byte
+	copy(key[:], keyBytes)
+	return key, nil
 }
