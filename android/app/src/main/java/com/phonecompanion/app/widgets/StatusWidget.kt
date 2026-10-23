@@ -8,17 +8,20 @@ import androidx.glance.appwidget.provideContent
 import androidx.glance.layout.Column
 import androidx.glance.layout.Row
 import androidx.glance.text.Text
-import androidx.room.Room
-import com.phonecompanion.app.data.AppDatabase
+import com.phonecompanion.app.data.DatabaseHolder
+import com.phonecompanion.app.data.WidgetPayloadParser
+import com.phonecompanion.app.data.loadOrFallback
 
 /**
  * Status widget: state badge + detail line.
  * Distinct rendering: single status row ("STATE — detail").
+ * Content is per instance (see [WidgetInstancePicker]); state/detail come
+ * from the parsed payload, bounded by [WidgetPayloadParser].
  */
 class StatusWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val (state, detail) = loadStatus(context)
+        val (state, detail) = loadStatus(context, id)
         provideContent {
             Column {
                 Row {
@@ -29,31 +32,21 @@ class StatusWidget : GlanceAppWidget() {
         }
     }
 
-    private suspend fun loadStatus(context: Context): Pair<String, String> {
-        return try {
-            val db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-                .fallbackToDestructiveMigration()
-                .build()
-            try {
-                val row = db.widgetCacheDao().getByType("status").firstOrNull()
-                if (row != null) {
-                    "unknown" to row.payloadJson.take(PREVIEW_LEN)
-                } else {
-                    FALLBACK_STATE to FALLBACK_DETAIL
-                }
-            } finally {
-                db.close()
-            }
-        } catch (e: Exception) {
-            FALLBACK_STATE to FALLBACK_DETAIL
+    private suspend fun loadStatus(context: Context, id: GlanceId): Pair<String, String> =
+        loadOrFallback(FALLBACK_STATE to FALLBACK_DETAIL) {
+            val rows = DatabaseHolder.get(context).widgetCacheDao().getByType("status")
+            val row = WidgetInstancePicker.pick(
+                rows,
+                WidgetInstancePicker.boundIndex(context, StatusWidget::class.java, id),
+            ) ?: return@loadOrFallback FALLBACK_STATE to FALLBACK_DETAIL
+            val status = WidgetPayloadParser.parseStatus(row.payloadJson)
+                ?: return@loadOrFallback FALLBACK_STATE to FALLBACK_DETAIL
+            status.state to status.detail
         }
-    }
 
     companion object {
-        private const val DB_NAME = "phone-companion.db"
         private const val FALLBACK_STATE = "unknown"
         private const val FALLBACK_DETAIL = "Status — pull to refresh."
-        private const val PREVIEW_LEN = 160
     }
 }
 
