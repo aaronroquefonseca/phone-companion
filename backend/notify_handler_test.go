@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
+	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 	_ "modernc.org/sqlite"
 )
 
@@ -166,7 +167,7 @@ func TestHandleNotifyRejects(t *testing.T) {
 func openAuthedMux(t *testing.T, db *sql.DB) (*http.ServeMux, *SessionStore) {
 	t.Helper()
 	store := NewSessionStore(db, strings.Repeat("s", 32))
-	return NewMux(db, notify.NoopSender{}, store), store
+	return NewMux(db, notify.NoopSender{}, store, webui.NewCSRFProtection(strings.Repeat("s", 32))), store
 }
 
 func loginCookie(t *testing.T, store *SessionStore) *http.Cookie {

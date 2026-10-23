@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // EnrollTokenTTL is how long a single-use pairing token from the WebUI QR
@@ -88,6 +89,25 @@ func utcNow() time.Time {
 
 func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
+}
+
+// maxDeviceNameBytes bounds stored device names. Truncation is
+// rune-boundary safe so multi-byte UTF-8 names are never split into
+// invalid bytes.
+const maxDeviceNameBytes = 200
+
+// truncateNameBytes cuts s to at most max bytes without splitting a UTF-8
+// rune. ASCII-heavy names keep byte-exact behavior; emoji/CJK names lose
+// whole runes instead of corrupting.
+func truncateNameBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	t := s[:max]
+	for len(t) > 0 && !utf8.ValidString(t) {
+		t = t[:len(t)-1]
+	}
+	return t
 }
 
 func randomBytes(n int) ([]byte, error) {
@@ -164,9 +184,7 @@ func EnrollDevice(db *sql.DB, deviceName, fcmToken string) (deviceID, rawToken, 
 	if name == "" {
 		name = "unnamed-device"
 	}
-	if len(name) > 200 {
-		name = name[:200]
-	}
+	name = truncateNameBytes(name, maxDeviceNameBytes)
 	fcmToken = strings.TrimSpace(fcmToken)
 	if len(fcmToken) > 4096 {
 		return "", "", "", errors.New("fcm_token too long")

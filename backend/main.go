@@ -42,9 +42,15 @@ func main() {
 
 	SetDeviceDB(db)
 
-	store := NewSessionStore(db, cfg.SessionSecret)
-	mux := NewMux(db, sender, store)
-	webui.RegisterRoutes(mux, store, webui.Credentials{
+	sessionStore := NewSessionStore(db, cfg.SessionSecret)
+	csrf := webui.NewCSRFProtection(cfg.SessionSecret)
+	webui.ExternalBaseURL = cfg.ExternalBaseURL
+	if webui.ExternalBaseURL == "" {
+		log.Printf("WARNING: EXTERNAL_BASE_URL unset — pairing QR falls back to request Host (dev-only)")
+	}
+
+	mux := NewMux(db, sender, sessionStore, csrf)
+	webui.RegisterRoutes(mux, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,
 		PasswordHash: cfg.AdminPasswordHash,
 		Password:     cfg.AdminPassword,
