@@ -9,35 +9,46 @@ import (
 	"time"
 )
 
-// PairTokenTTL matches the enroll-token lifetime used by the pairing API.
-const PairTokenTTL = 15 * time.Minute
-
 // enrollPayload is the QR contents scanned by the phone: where to POST and
-// the single-use token authorizing that POST.
+// the single-use token authorizing that POST. The keys enroll_url +
+// enroll_token are canonical — the Android app (P6 PairingQr) parses them —
+// and must not be renamed.
 type enrollPayload struct {
 	EnrollURL   string `json:"enroll_url"`
 	EnrollToken string `json:"enroll_token"`
 }
 
-// EnrollPayloadForRequest builds the QR payload from the incoming request's
-// host/scheme so the same image works behind a reverse proxy + TLS. It
-// honors X-Forwarded-Proto when present and otherwise reflects the
-// connection (https for TLS, http for direct plain-HTTP access).
+// ExternalBaseURL is the configured public origin (EXTERNAL_BASE_URL,
+// e.g. "https://example.com") used to build enroll_url. Set once at boot
+// from Config. When empty the builder falls back to the request Host +
+// X-Forwarded-Proto, which is dev-only: Host headers are
+// client-controlled and spoofable behind a misconfigured proxy, so
+// production must set EXTERNAL_BASE_URL (see docs/threat-model.md).
+var ExternalBaseURL string
+
+// EnrollPayloadForRequest builds the canonical QR payload
+// {"enroll_url":..., "enroll_token":...}. With ExternalBaseURL set the URL
+// is ExternalBaseURL + "/api/v1/enroll"; otherwise it reflects the request
+// (X-Forwarded-Proto, then TLS state) and Host — dev-only fallback.
 func EnrollPayloadForRequest(r *http.Request, rawToken string) (string, error) {
-	scheme := r.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		if r.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
+	base := strings.TrimSuffix(strings.TrimSpace(ExternalBaseURL), "/")
+	if base == "" {
+		scheme := r.Header.Get("X-Forwarded-Proto")
+		if scheme == "" {
+			if r.TLS != nil {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
 		}
-	}
-	host := r.Host
-	if host == "" {
-		host = "localhost"
+		host := r.Host
+		if host == "" {
+			host = "localhost"
+		}
+		base = scheme + "://" + host
 	}
 	raw, err := json.Marshal(enrollPayload{
-		EnrollURL:   scheme + "://" + host + "/api/v1/enroll",
+		EnrollURL:   base + "/api/v1/enroll",
 		EnrollToken: rawToken,
 	})
 	if err != nil {
@@ -52,6 +63,7 @@ var pairPageTmpl = template.Must(template.New("pair").Parse(`<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pair a device — Phone Companion</title>
+<meta name="csrf-token" content="{{.CSRFToken}}">
 <style>
 body{font-family:system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
 table{border-collapse:collapse;width:100%}
@@ -59,10 +71,12 @@ th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left}
 .revoked{color:#777}
 code{word-break:break-all}
 .notice{background:#f6f6f6;border:1px solid #ddd;padding:.6rem .9rem;border-radius:.4rem}
+.error{background:#fdecea;border:1px solid #e0a39e;padding:.6rem .9rem;border-radius:.4rem}
 </style>
 </head>
 <body>
 <h1>Pair a device</h1>
+{{if .Notice}}<p class="error">{{.Notice}}</p>{{end}}
 {{if .QRDataURI}}
 <div class="notice">
 <p>Scan with the Phone Companion app to enroll. Single-use, expires {{.ExpiresAt}} (UTC).</p>
@@ -83,7 +97,7 @@ code{word-break:break-all}
 <td><code>{{.ID}}</code></td>
 <td>{{.CreatedAt}}</td>
 <td>{{if .Revoked}}revoked{{else}}active{{end}}</td>
-<td>{{if .Revoked}}{{else}}<form method="POST" action="/webui/pair/revoke"><input type="hidden" name="device_id" value="{{.ID}}"><button type="submit">Revoke</button></form>{{end}}</td>
+<td>{{if .Revoked}}{{else}}<form method="POST" action="/webui/pair/revoke"><input type="hidden" name="device_id" value="{{.ID}}"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button type="submit">Revoke</button></form>{{end}}</td>
 </tr>
 {{end}}
 </table>
@@ -101,52 +115,102 @@ type pairPageData struct {
 	ExpiresAt string
 	Devices   []DeviceInfo
 	Error     string
+	// Notice is a one-shot operator message (e.g. unknown revoke ID),
+	// sourced only from a whitelisted ?error= value — never raw query.
+	Notice string
+	// CSRFToken is the session-bound token embedded in each revoke form.
+	CSRFToken string
+}
+
+// revokeNotice maps whitelisted ?error= values to operator text. Anything
+// else renders no notice, so query input can never inject page content.
+func revokeNotice(v string) string {
+	switch v {
+	case "device_not_found":
+		return "Device not found — it may already have been revoked or the ID is stale."
+	case "csrf":
+		return "Security token mismatch — please try again."
+	default:
+		return ""
+	}
+}
+
+// renderPairPage executes the template with an HTML Content-Type on every
+// path (including errors), so browsers never sniff a missing type.
+func renderPairPage(w http.ResponseWriter, status int, data pairPageData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_ = pairPageTmpl.Execute(w, data)
 }
 
 // HandlePairPage serves GET /webui/pair: issues a fresh single-use enroll
-// token, renders it as a QR PNG (embedded data URI, no extra endpoint, no
-// token in URLs/logs), and lists devices with revoke buttons.
-func HandlePairPage(store Store) http.HandlerFunc {
+// token (TTL supplied by the caller so there is exactly one TTL constant —
+// main.EnrollTokenTTL), renders it as a QR PNG (embedded data URI, no
+// extra endpoint, no token in URLs/logs), and lists devices with
+// CSRF-guarded revoke buttons.
+func HandlePairPage(store Store, ttl time.Duration, csrf *CSRFProtection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		data := pairPageData{}
+		data := pairPageData{Notice: revokeNotice(r.URL.Query().Get("error"))}
+		if store == nil {
+			data.Error = "internal error"
+			renderPairPage(w, http.StatusInternalServerError, data)
+			return
+		}
 		if devices, err := store.ListDevices(r.Context()); err == nil {
 			data.Devices = devices
 		}
-		raw, exp, err := store.IssueEnrollToken(r.Context(), PairTokenTTL)
+		if token, ok := csrfTokenForPage(csrf, r); ok {
+			data.CSRFToken = token
+		}
+		raw, exp, err := store.IssueEnrollToken(r.Context(), ttl)
 		if err != nil {
 			data.Error = "internal error"
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = pairPageTmpl.Execute(w, data)
+			renderPairPage(w, http.StatusInternalServerError, data)
 			return
 		}
 		payload, err := EnrollPayloadForRequest(r, raw)
 		if err != nil {
 			data.Error = "internal error"
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = pairPageTmpl.Execute(w, data)
+			renderPairPage(w, http.StatusInternalServerError, data)
 			return
 		}
 		png, err := QRPNG(payload)
 		if err != nil {
 			data.Error = "internal error"
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = pairPageTmpl.Execute(w, data)
+			renderPairPage(w, http.StatusInternalServerError, data)
 			return
 		}
 		data.QRDataURI = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
 		data.RawToken = raw
 		data.ExpiresAt = exp.UTC().Format(time.RFC3339)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = pairPageTmpl.Execute(w, data)
+		renderPairPage(w, http.StatusOK, data)
 	}
 }
 
+func csrfTokenForPage(csrf *CSRFProtection, r *http.Request) (string, bool) {
+	if csrf == nil {
+		return "", false
+	}
+	return csrf.TokenForRequest(r)
+}
+
 // HandlePairRevoke serves POST /webui/pair/revoke (HTML form from the
-// revoke buttons) and redirects back to the pairing page.
-func HandlePairRevoke(store Store) http.HandlerFunc {
+// revoke buttons) and redirects back to the pairing page. The form must
+// carry the session-bound CSRF token; mismatches fail closed with 403.
+// Unknown IDs redirect with ?error=device_not_found so the operator sees
+// what happened instead of a silent no-op.
+func HandlePairRevoke(store Store, csrf *CSRFProtection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if store == nil {
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "invalid_request", http.StatusBadRequest)
+			return
+		}
+		if csrf == nil || !csrf.VerifyRequest(r) {
+			http.Error(w, "csrf_mismatch", http.StatusForbidden)
 			return
 		}
 		id := strings.TrimSpace(r.FormValue("device_id"))
@@ -154,8 +218,13 @@ func HandlePairRevoke(store Store) http.HandlerFunc {
 			http.Error(w, "invalid_request", http.StatusBadRequest)
 			return
 		}
-		if _, err := store.RevokeDevice(r.Context(), id); err != nil {
+		found, err := store.RevokeDevice(r.Context(), id)
+		if err != nil {
 			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.Redirect(w, r, "/webui/pair?error=device_not_found", http.StatusSeeOther)
 			return
 		}
 		http.Redirect(w, r, "/webui/pair", http.StatusSeeOther)

@@ -28,6 +28,10 @@ services:
       SESSION_SECRET: "CHANGEME-long-random-secret-min-32-bytes"
       DB_PATH: "/data/phone-companion.db"
       WIDGET_DIR: "/widgets"
+      # Public origin used to build the pairing QR enroll_url.
+      # REQUIRED in production (e.g. "https://example.com"); when unset
+      # the QR falls back to the request Host (dev-only, spoofable).
+      # EXTERNAL_BASE_URL: "https://example.com"
       # --- Push (notifications PR; leave unset until then) ---
       # FCM_PROJECT_ID: ""
       # FCM_CREDENTIALS_FILE: "/run/secrets/fcm.json"

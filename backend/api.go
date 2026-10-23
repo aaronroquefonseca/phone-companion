@@ -11,17 +11,20 @@ import (
 	"net/http"
 
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
+	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
-// NewMux builds the HTTP router.
-func NewMux(db *sql.DB, sender notify.Sender) *http.ServeMux {
+// NewMux builds the HTTP router. sessions gates the operator-only
+// pairing routes (see pair_wire.go); POST /api/v1/enroll stays on
+// enroll-token auth and never touches sessions.
+func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
 
-	// Pairing (P2): enroll + device registry + revocation + WebUI.
+	// Pairing (P2+P8): enroll + device registry + revocation + WebUI.
 	// See devices.go / pair_wire.go / webui/.
-	RegisterPairingRoutes(mux)
+	RegisterPairingRoutes(mux, sessions, csrf)
 	// TODO (widgets PR): GET /api/v1/widgets
 	mux.HandleFunc("GET /api/v1/widgets", notImplemented("widgets"))
 	// Implemented (notifications P4): POST /api/v1/notify

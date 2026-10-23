@@ -7,6 +7,7 @@ package main
 
 import (
 	"errors"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -41,6 +42,14 @@ type Config struct {
 	// TODO (notifications PR): document service-account wiring.
 	FCMProjectID   string // $FCM_PROJECT_ID
 	FCMCredentials string // $FCM_CREDENTIALS_FILE (path to mounted service-account JSON)
+
+	// ExternalBaseURL is the public origin used to build the WebUI pairing
+	// QR payload (enroll_url). $EXTERNAL_BASE_URL, e.g.
+	// "https://example.com". Optional: when empty the QR builder falls
+	// back to the request Host + X-Forwarded-Proto, which is dev-only
+	// (Host headers are client-controlled and spoofable behind a
+	// misconfigured proxy). Production must set EXTERNAL_BASE_URL.
+	ExternalBaseURL string // $EXTERNAL_BASE_URL
 }
 
 // Fail-closed bounds for auth secrets. These are deliberately strict: the
@@ -70,6 +79,7 @@ func LoadConfig() Config {
 		WidgetDir:         getenv("WIDGET_DIR", "/widgets"),
 		FCMProjectID:      os.Getenv("FCM_PROJECT_ID"),
 		FCMCredentials:    os.Getenv("FCM_CREDENTIALS_FILE"),
+		ExternalBaseURL:   normalizeBaseURL(os.Getenv("EXTERNAL_BASE_URL")),
 	}
 }
 
@@ -114,5 +124,24 @@ func (c Config) Validate() error {
 			return errors.New("ADMIN_PASSWORD still holds a placeholder value")
 		}
 	}
+	if c.ExternalBaseURL != "" {
+		u, err := url.Parse(c.ExternalBaseURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("EXTERNAL_BASE_URL must be an http(s) origin like https://example.com")
+		}
+		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("EXTERNAL_BASE_URL must be a bare origin with no path, query, or fragment")
+		}
+	}
 	return nil
+}
+
+// normalizeBaseURL trims whitespace and trailing slashes so
+// EXTERNAL_BASE_URL + "/api/v1/enroll" never doubles slashes.
+func normalizeBaseURL(v string) string {
+	v = strings.TrimSpace(v)
+	for strings.HasSuffix(v, "/") && v != "" {
+		v = strings.TrimSuffix(v, "/")
+	}
+	return v
 }
