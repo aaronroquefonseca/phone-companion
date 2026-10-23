@@ -8,9 +8,15 @@ import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.phonecompanion.app.R
+import com.phonecompanion.app.data.FcmTokenBackfill
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.ui.MainActivity
 import com.phonecompanion.app.widgets.SecretCrypto
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * FCM receiver: renders data messages per [NotificationPayload] — one
@@ -33,6 +39,32 @@ import com.phonecompanion.app.widgets.SecretCrypto
  * forwarded into activity extras.
  */
 class CompanionMessagingService : FirebaseMessagingService() {
+
+    /**
+     * FCM token rotation: persist immediately, then upload when paired so
+     * the server row tracks the live token (enroll carries the token too,
+     * but rotation happens outside pairing). Best-effort: any failure —
+     * including the service dying mid-upload — heals on the next widgets
+     * poll via [FcmTokenBackfill.maybeBackfill]. Never throws.
+     */
+    override fun onNewToken(token: String) {
+        try {
+            val storage = SecureStorage.getInstance(this)
+            storage.fcmToken = token
+            if (storage.baseUrl.isNullOrBlank() || storage.deviceToken.isNullOrBlank()) return
+            backfillScope.launch {
+                try {
+                    FcmTokenBackfill.maybeBackfill(this@CompanionMessagingService)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Best-effort: the next widgets poll retries.
+                }
+            }
+        } catch (_: Exception) {
+            // Token rotation must never crash the push receiver.
+        }
+    }
 
     override fun onMessageReceived(message: RemoteMessage) {
         try {
@@ -203,5 +235,11 @@ class CompanionMessagingService : FirebaseMessagingService() {
     companion object {
         /** Distinct request codes per (notification, action) pair. */
         fun actionRequestCode(notifyId: Int, index: Int): Int = notifyId * 4 + index
+
+        /**
+         * Detached upload scope: token backfill must not hold the service
+         * alive, and a failed upload must not cancel anything else.
+         */
+        private val backfillScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }

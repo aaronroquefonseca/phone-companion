@@ -26,6 +26,16 @@ interface ApiService {
     suspend fun enroll(@Body request: EnrollRequest): Response<EnrollResponse>
 
     /**
+     * Upload the current FCM registration token for this device (Wave-2
+     * push backfill). Auth is the device Bearer token. Idempotent: the
+     * server rewrites the stored token only when it differs and answers
+     * `{"updated": ...}` either way. Best-effort from the app — failures
+     * are retried on the next widgets poll.
+     */
+    @POST("api/v1/device/fcm-token")
+    suspend fun updateFcmToken(@Body request: FcmTokenUpdateRequest): Response<FcmTokenUpdateResponse>
+
+    /**
      * Poll widget definitions for this device. Requires the device Bearer
      * token. Response parsing/rendering per type is the widgets PR's job.
      */
