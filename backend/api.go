@@ -11,10 +11,14 @@ import (
 	"net/http"
 
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
+	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
-// NewMux builds the HTTP router.
-func NewMux(db *sql.DB, sender notify.Sender) *http.ServeMux {
+// NewMux builds the HTTP router. sessions backs the operator gate for
+// POST /api/v1/notify (WebUI session via webui.RequireAdmin, 401 without
+// one; device Bearer tokens are rejected with 403 before auth runs — see
+// notify_auth.go).
+func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", handleHealthz)
@@ -24,8 +28,12 @@ func NewMux(db *sql.DB, sender notify.Sender) *http.ServeMux {
 	RegisterPairingRoutes(mux)
 	// TODO (widgets PR): GET /api/v1/widgets
 	mux.HandleFunc("GET /api/v1/widgets", notImplemented("widgets"))
-	// Implemented (notifications P4): POST /api/v1/notify
-	mux.HandleFunc("POST /api/v1/notify", requireAdminNotifyStub(handleNotify(db, sender)))
+	// Implemented (notifications P9): POST /api/v1/notify is operator-only
+	// (WebUI session). 202 {"notification_id","accepted"}: accepted counts
+	// successful per-device sends; accepted:0 still returns 202 and means
+	// no devices matched (unknown device_ids, or an empty registry) — not
+	// an error. See handleNotify.
+	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, handleNotify(db, sender)))
 
 	return mux
 }

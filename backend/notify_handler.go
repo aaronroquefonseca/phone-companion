@@ -1,10 +1,11 @@
 // Package main — POST /api/v1/notify handler (P4 NOTIFICATIONS).
 //
 // Request/response shapes follow docs/api-contract.md ("notify" section).
-// Target resolution queries the devices table directly here so this PR stays
-// independent of the pairing/auth PRs: only the P0-stable columns
-// (id, name) are selected. Admin gating wraps at registration time via
-// requireAdminNotifyStub (see notify_auth_stub.go).
+// Target resolution queries the devices table directly here: only the
+// P0-stable columns (id, name) are selected. Admin gating wraps at
+// registration time via notifyAdminChain (see notify_auth.go): the WebUI
+// session is required (401 without one) and device Bearer tokens are
+// rejected with 403.
 package main
 
 import (
@@ -147,13 +148,16 @@ func writeNotifyError(w http.ResponseWriter, status int, code string) {
 // handleNotify enqueues fan-out: validate, resolve targets, send per device
 // via the configured Sender, record history, respond 202. One device's
 // failure never blocks the rest; accepted counts successful sends.
+// accepted:0 is a normal 202 (not an error): it means no devices matched —
+// unknown device_ids, or an empty registry for {"all":true}.
 func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req notifyRequestJSON
-		// Cap the body before decode: this endpoint is unauthenticated until
-		// Wave-2 P9, so bound the storage/CPU amplifier (history INSERTs +
-		// log lines per device) up front.
+		// Cap the body before decode (B1): this endpoint fans out to N
+		// devices, so bound the storage/CPU amplifier (history INSERTs +
+		// log lines per device) up front. Target-list size is capped by
+		// validation (B2: at most notify.MaxDeviceIDs explicit ids).
 		r.Body = http.MaxBytesReader(w, r.Body, notify.MaxRequestBodyBytes)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			var maxErr *http.MaxBytesError
@@ -198,6 +202,13 @@ func handleNotify(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			if recErr := notify.RecordDelivery(ctx, db, notificationID, d.ID, msg.Kind, status, errMsg, time.Now()); recErr != nil {
 				log.Printf("notify: record delivery: %v", recErr)
 			}
+		}
+		// Bounded history (P4 follow-up): prune best-effort after fan-out. A
+		// prune failure is logged, never fails the request; fan-out stays
+		// sequential (one device after another) so a slow device cannot
+		// amplify into concurrent load.
+		if pruneErr := notify.PruneHistory(ctx, db, time.Now()); pruneErr != nil {
+			log.Printf("notify: prune history: %v", pruneErr)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)

@@ -42,8 +42,9 @@ func main() {
 
 	SetDeviceDB(db)
 
-	mux := NewMux(db, sender)
-	webui.RegisterRoutes(mux, NewSessionStore(db, cfg.SessionSecret), webui.Credentials{
+	store := NewSessionStore(db, cfg.SessionSecret)
+	mux := NewMux(db, sender, store)
+	webui.RegisterRoutes(mux, store, webui.Credentials{
 		Username:     cfg.AdminUser,
 		PasswordHash: cfg.AdminPasswordHash,
 		Password:     cfg.AdminPassword,

@@ -72,8 +72,8 @@ type Device struct {
 
 // Action is one tappable notification action: stable id plus label.
 type Action struct {
-	ID    string
-	Title string
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 // Target selects fan-out recipients: exactly one of All or DeviceIDs.
@@ -183,9 +183,12 @@ func (m Message) Validate() error {
 // DataPayload renders the versioned data payload shipped alongside the
 // visible notification. String-only values keep it FCM-data compatible.
 // Unknown kinds flow through untouched: the app keys generic rendering off
-// "kind" with "v" gating future shape changes.
+// "kind" with "v" gating future shape changes. Actions ride as flat
+// action_<i>_id / action_<i>_title pairs (i = 0..2, at most MaxActions, so
+// no JSON parsing is needed on the app); absent entirely when empty so old
+// readers see no new keys beyond the documented version "v".
 func (m Message) DataPayload(notificationID string) map[string]string {
-	return map[string]string{
+	payload := map[string]string{
 		"v":               PayloadVersion,
 		"notification_id": notificationID,
 		"kind":            m.Kind,
@@ -195,6 +198,11 @@ func (m Message) DataPayload(notificationID string) map[string]string {
 		"channel":         m.Channel,
 		"image_url":       m.ImageURL,
 	}
+	for i, a := range m.Actions {
+		payload["action_"+strconv.Itoa(i)+"_id"] = a.ID
+		payload["action_"+strconv.Itoa(i)+"_title"] = a.Title
+	}
+	return payload
 }
 
 // Sender delivers one Message to one resolved Device.
