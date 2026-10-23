@@ -27,13 +27,13 @@ class WidgetsActivity : AppCompatActivity() {
             setPadding(32, 32, 32, 32)
         }
         val status = TextView(this).apply {
-            text = "Widgets — refreshing from cache…"
+            text = "Loading widgets…"
         }
         val refreshButton = Button(this).apply {
             text = "Refresh now"
             setOnClickListener {
                 RefreshWorker.requestManualRefresh(this@WidgetsActivity)
-                status.text = "Widgets — refresh requested."
+                status.text = "Refresh requested."
             }
         }
         layout.addView(status)

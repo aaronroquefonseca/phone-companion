@@ -54,7 +54,7 @@ class ListWidget : GlanceAppWidget() {
 
     companion object {
         private const val FALLBACK_TITLE = "List"
-        private const val EMPTY_HINT = "No items — pull to refresh."
+        private const val EMPTY_HINT = "No items yet."
     }
 }
 

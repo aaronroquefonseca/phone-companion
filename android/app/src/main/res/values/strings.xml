@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Phone Companion</string>
-    <string name="skeleton_notice">Skeleton build — pairing, widgets, and notifications land in later PRs.</string>
 
     <string name="main_paired">Paired\nDevice: %1$s\nServer: %2$s</string>
     <string name="main_not_paired">Not paired yet — open Pair to scan the WebUI QR.</string>
@@ -23,11 +22,20 @@
     <string name="pair_enrolling">Enrolling…</string>
     <string name="pair_success">Paired as %1$s.</string>
     <string name="pair_error_expired">This QR code is expired or already used. Generate a new one in the WebUI and scan again.</string>
-    <string name="pair_error_conflict">The server reports this device is already enrolled. Generate a fresh pairing code to re-pair (this rotates credentials).</string>
+    <string name="pair_error_conflict">Already paired here. Generate a fresh pairing code in the WebUI and scan again — this replaces the current connection.</string>
     <string name="pair_error_url">Server URL problem: %1$s</string>
     <string name="pair_error_network">Network error: %1$s</string>
     <string name="pair_error_network_default">check the server URL and connection.</string>
     <string name="pair_error_server">Server error (HTTP %1$d: %2$s).</string>
     <string name="pair_error_unexpected">Unexpected error: %1$s</string>
     <string name="pair_error_unknown">unknown</string>
+
+    <string name="widget_text_label">Companion Text</string>
+    <string name="widget_text_desc">Shows a title with text from your server.</string>
+    <string name="widget_list_label">Companion List</string>
+    <string name="widget_list_desc">Shows a checklist with completed items.</string>
+    <string name="widget_status_label">Companion Status</string>
+    <string name="widget_status_desc">Shows a status with details.</string>
+    <string name="widget_secret_label">Companion Secret</string>
+    <string name="widget_secret_desc">Shows a secured value.</string>
 </resources>

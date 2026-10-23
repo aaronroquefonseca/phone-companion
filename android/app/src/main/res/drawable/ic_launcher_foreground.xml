@@ -4,7 +4,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Placeholder glyph: white rounded square. TODO (later PR): real icon. -->
+    <!-- App icon foreground: white rounded square. -->
     <path
         android:fillColor="#FFFFFF"
         android:pathData="M36,36h36v36h-36z" />

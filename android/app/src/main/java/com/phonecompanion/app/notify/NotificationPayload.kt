@@ -41,6 +41,12 @@ object NotificationKinds {
     fun displayName(kind: String): String =
         if (isKnown(kind)) kind.replaceFirstChar { it.uppercase() } + " notifications"
         else "General notifications"
+
+    fun description(kind: String): String = when (kind) {
+        NOTE -> "Notes from your server."
+        ALERT -> "Important alerts from your server."
+        else -> "All other notifications."
+    }
 }
 
 /**
@@ -117,6 +123,8 @@ data class NotificationPayload(
     }
 
     fun channelName(): String = NotificationKinds.displayName(kind)
+
+    fun channelDescription(): String = NotificationKinds.description(kind)
 
     fun importance(): Int = when (priority.lowercase()) {
         "min" -> NotificationManager.IMPORTANCE_MIN

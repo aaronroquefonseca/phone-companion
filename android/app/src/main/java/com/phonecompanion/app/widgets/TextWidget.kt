@@ -42,7 +42,7 @@ class TextWidget : GlanceAppWidget() {
 
     companion object {
         private const val FALLBACK_TITLE = "Phone Companion"
-        private const val FALLBACK_BODY = "Text widget — pull to refresh."
+        private const val FALLBACK_BODY = "Nothing to show yet."
     }
 }
 

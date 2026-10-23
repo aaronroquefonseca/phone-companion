@@ -6,21 +6,12 @@
     android:padding="24dp">
 
     <TextView
-        android:id="@+id/skeletonNotice"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:text="@string/skeleton_notice"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <TextView
         android:id="@+id/pairStatus"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:text="@string/main_not_paired"
-        app:layout_constraintTop_toBottomOf="@id/skeletonNotice"
+        app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
