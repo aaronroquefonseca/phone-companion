@@ -14,6 +14,13 @@ import (
 
 // sharedCSS is the single stylesheet for every WebUI page. Inline
 // <style> only: no external assets, no frameworks.
+//
+// Form rhythm (8px scale): .field blocks stack with 16px (2×8px) gaps,
+// label-to-control is 4px, hints/field errors sit 4px under the control,
+// and .form-actions carries 24px (3×8px) top margin so buttons sit
+// left-aligned below the fields — never inline with inputs. All text
+// controls share one max-width (min(100%, 28rem)) with identical
+// padding/border so their left/right edges align vertically.
 const sharedCSS = `*{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:52rem;margin:0 auto;padding:0 1rem 3rem;line-height:1.5;color:#1a1a1a;background:#fff}
 .topbar{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1.2rem;border-bottom:2px solid #1a1a1a;padding:.9rem 0;margin-bottom:1.4rem}
@@ -26,8 +33,19 @@ nav a:hover{text-decoration:underline}
 button{font:inherit;padding:.35rem .8rem;border:1px solid #1a1a1a;border-radius:.35rem;background:#1a1a1a;color:#fff;cursor:pointer}
 button:hover{background:#333}
 button.secondary{background:#fff;color:#1a1a1a}
-input,select,textarea{font:inherit;padding:.35rem .5rem;border:1px solid #666;border-radius:.35rem;max-width:100%}
-label{display:block;margin:.6rem 0}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #0b5fff;outline-offset:2px}
+form{margin:0}
+input[type="hidden"]{display:none!important}
+.field{margin:0 0 1rem;max-width:min(100%,28rem)}
+.field label{display:block;margin:0 0 .25rem;font-weight:600}
+.field input[type="text"],.field input[type="password"],.field select,.field textarea{display:block;width:100%;max-width:100%;min-height:2.5rem;padding:.5rem .6rem;border:1px solid #666;border-radius:.35rem;font:inherit;line-height:1.4;background:#fff;color:#1a1a1a}
+.field textarea{min-height:6rem;resize:vertical}
+.field input[type="checkbox"]{display:block;width:1.1rem;height:1.1rem;margin:.25rem 0 0;min-height:0;padding:0}
+.field .hint{margin:.25rem 0 0;font-size:.875rem;color:#555}
+.field-error{margin:.25rem 0 0;font-size:.875rem;color:#b3261e}
+.field input[aria-invalid="true"],.field select[aria-invalid="true"],.field textarea[aria-invalid="true"]{border:2px solid #b3261e}
+.form-actions{margin-top:1.5rem}
+@media (prefers-color-scheme:dark){body{color:#e8e8e8;background:#121212}.brand a{color:#e8e8e8}.topbar{border-color:#555}nav a{color:#8ab4ff}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline-color:#8ab4ff}.field input[type="text"],.field input[type="password"],.field select,.field textarea{background:#1e1e1e;color:#e8e8e8;border-color:#999}.field .hint{color:#b0b0b0}.field-error{color:#ffb4ab}.field input[aria-invalid="true"],.field select[aria-invalid="true"],.field textarea[aria-invalid="true"]{border-color:#ffb4ab}.error{background:#3b1215;border-color:#ffb4ab}.notice{background:#1e1e1e;border-color:#555}.success{background:#0f2e1a;border-color:#7bd88f}.muted{color:#b0b0b0}th{background:#1e1e1e}.card p{color:#c9c9c9}footer{border-color:#555}}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));gap:1rem;margin:1rem 0}
 .card{border:1px solid #999;border-radius:.5rem;padding:1rem}
 .card h2{margin:0 0 .3rem;font-size:1.05rem}

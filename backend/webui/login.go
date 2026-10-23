@@ -8,17 +8,28 @@ import (
 
 // loginBody is the sign-in surface inside the shared layout: sign-in form,
 // signed-in state, and failure message. Error text stays generic so
-// usernames cannot be enumerated.
+// usernames cannot be enumerated — hence the banner only, with no
+// per-field errors (a field-level message would oracle which half failed).
+// Fields use the stacked pattern: div.field > label ABOVE its control, so
+// both text fields share one width and their left edges align.
 var loginBody = template.Must(template.New("loginBody").Parse(`<h1>Sign in</h1>
 {{if .SignedIn}}
 <p>Signed in as {{.Username}}.</p>
 <p><a href="/">Open the operator dashboard</a>.</p>
 {{else}}
-{{if .Error}}<p class="error" role="alert">Invalid username or password.</p>{{end}}
-<form method="post" action="/login">
-<label>Username <input type="text" name="username" autocomplete="username" required></label>
-<label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+{{if .Error}}<p class="error" id="login-error" role="alert">Invalid username or password.</p>{{end}}
+<form method="post" action="/login"{{if .Error}} aria-describedby="login-error"{{end}}>
+<div class="field">
+<label for="login-username">Username</label>
+<input id="login-username" type="text" name="username" autocomplete="username" required>
+</div>
+<div class="field">
+<label for="login-password">Password</label>
+<input id="login-password" type="password" name="password" autocomplete="current-password" required>
+</div>
+<div class="form-actions">
 <button type="submit">Sign in</button>
+</div>
 </form>
 {{end}}`))
 
