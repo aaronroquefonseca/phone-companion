@@ -6,11 +6,13 @@ import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.phonecompanion.app.data.loadOrFallback
 import java.util.concurrent.TimeUnit
 
 /**
@@ -20,7 +22,8 @@ import java.util.concurrent.TimeUnit
  * network + battery-not-low. Screen-on awareness: no WorkManager constraint
  * exists for screen state, so doWork() checks PowerManager.isInteractive and
  * returns retry (exponential backoff) while the screen is off instead of
- * polling in the background.
+ * polling in the background. Both the screen-off path and failures give up
+ * after [MAX_ATTEMPTS] attempts.
  */
 class RefreshWorker(
     context: Context,
@@ -30,19 +33,21 @@ class RefreshWorker(
     override suspend fun doWork(): Result {
         val power = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!power.isInteractive) {
-            // Screen off: back off and let WorkManager retry later.
-            return Result.retry()
+            // Screen off: back off and let WorkManager retry later, but honor
+            // the attempt cap like any other failure.
+            return if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
         }
-        return try {
+        // Cancellation is rethrown by loadOrFallback (never converted to
+        // retry/failure); other failures retry until the attempt cap.
+        return loadOrFallback(if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()) {
             WidgetPoller.refresh(applicationContext)
             Result.success()
-        } catch (e: Exception) {
-            if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
         }
     }
 
     companion object {
         private const val UNIQUE_HOURLY = "widget-refresh-hourly"
+        private const val UNIQUE_MANUAL = "widget-refresh-manual"
         private const val MAX_ATTEMPTS = 3
 
         private fun hourlyConstraints(): Constraints = Constraints.Builder()
@@ -63,7 +68,11 @@ class RefreshWorker(
             )
         }
 
-        /** Manual refresh entrypoint (WidgetsActivity open + refresh button). */
+        /**
+         * Manual refresh entrypoint (WidgetsActivity open + refresh button).
+         * Unique REPLACE so rapid calls (open + button) collapse to a single
+         * refresh instead of stacking duplicate work.
+         */
         fun requestManualRefresh(context: Context) {
             val request = OneTimeWorkRequestBuilder<RefreshWorker>()
                 .setConstraints(
@@ -73,7 +82,11 @@ class RefreshWorker(
                 )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
                 .build()
-            WorkManager.getInstance(context).enqueue(request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_MANUAL,
+                ExistingWorkPolicy.REPLACE,
+                request,
+            )
         }
     }
 }
