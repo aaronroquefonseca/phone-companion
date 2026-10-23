@@ -21,7 +21,6 @@ class WidgetsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         RefreshWorker.scheduleHourly(this)
-        RefreshWorker.requestManualRefresh(this)
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
