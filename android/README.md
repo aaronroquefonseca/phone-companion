@@ -54,9 +54,10 @@ cd android
 
 Use the public origin (`https://<your-host>`) as base URL in production
 — the same origin the QR encodes via `EXTERNAL_BASE_URL`. Failure text:
-expired/used token, already-enrolled conflict, bad URL, network/server
-errors — nothing crashes, nothing logs secrets. Detail:
-`docs/pairing.md`.
+expired/used token, bad URL, network/server errors — nothing crashes,
+nothing logs secrets. (The app also maps a 409 already-enrolled status,
+but the server never emits it at v1 — reserved for future dedup; re-pair
+returns `201`.) Detail: `docs/pairing.md`.
 
 ## Push (FCM)
 

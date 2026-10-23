@@ -72,7 +72,7 @@ same device re-enrolling) overwrites that row's token hash AND
 | Symptom | Cause → fix |
 | --- | --- |
 | `410 enroll_token_invalid` | Token used or older than 15 min → refresh `/webui/pair`, scan again |
-| `409` on enroll | Device already enrolled → re-pair intentionally (rotates key) or use the existing credentials |
+| `409` on enroll | Reserved for future stable-device-identity dedup — never emitted at v1; re-pair returns `201` with rotation (see above) |
 | `429 rate_limited` | >30 token issues/min/IP → wait a minute |
 | Device `401` on widgets poll | Revoked (or unknown) credential → re-pair, or check the registry |
 | Secret widget "needs refresh" | Key rotated or payload undecryptable → pull-to-refresh / wait for hourly poll; persists only if the device row lost its key (re-pair) |

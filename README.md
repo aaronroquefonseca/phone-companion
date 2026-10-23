@@ -81,8 +81,10 @@ docker compose logs backend          # "loaded 1 widget(s)", notify driver
 ```
 
 ```sh
-# 4. Sign in (302 redirect to /login means "not signed in"):
+# 4. Sign in (success is 303; the 302 to /login is the RequireAdmin
+#    "not signed in" redirect on gated pages, not the login result):
 curl -c jar.txt -d 'username=admin&password=choose-a-long-password' \
+  -w "\nPOST /login -> %{http_code}\n" \
   http://127.0.0.1:8080/login
 ```
 
@@ -182,6 +184,6 @@ the backend refuses to boot on weak/missing secrets.
 
 Verified in this PR's environment: `docker build ./backend`, full
 compose quickstart (`up -d --build`, `/healthz`, bcrypt-hash login →
-`302`, session-cookie `POST /api/v1/notify` → `202`), `go vet` + `go test`
+`303`, session-cookie `POST /api/v1/notify` → `202`), `go vet` + `go test`
 clean. NOT run here: Android build (no SDK in this environment) and the
 Caddy/nginx snippets above (standard proxy config, adjust paths/hosts).
