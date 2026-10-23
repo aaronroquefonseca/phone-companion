@@ -2,6 +2,7 @@ package com.phonecompanion.app.data
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -46,8 +47,8 @@ class EnrollValidationTest {
         override suspend fun updateFcmToken(request: FcmTokenUpdateRequest): Response<FcmTokenUpdateResponse> =
             Response.success(FcmTokenUpdateResponse(updated = true))
 
-        override suspend fun getWidgets(): Response<WidgetsResponse> =
-            Response.success(WidgetsResponse())
+        override suspend fun getWidgetsRaw(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
     }
 
     @Test

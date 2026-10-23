@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import com.phonecompanion.app.data.ApiClient
+import com.phonecompanion.app.data.AppMoshi
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.FcmTokenBackfill
 import com.phonecompanion.app.data.SecureStorage
@@ -89,7 +90,12 @@ object WidgetPoller {
      */
     internal interface PollCollaborators {
         suspend fun fetch(): PollFetchOutcome
-        suspend fun saveWidgets(widgets: List<WidgetEnvelope>)
+
+        /**
+         * Upserts one poll batch. Returns the row count written. An empty
+         * batch writes nothing and returns 0 (never wipes the cache).
+         */
+        suspend fun saveWidgets(widgets: List<WidgetEnvelope>): Int
         suspend fun clearCache()
         suspend fun clearCredentials()
         suspend fun pushFailClosed()
@@ -113,11 +119,36 @@ object WidgetPoller {
             override suspend fun fetch(): PollFetchOutcome {
                 return try {
                     val service = ApiClient.create(baseUrl ?: "") { storage.deviceToken }
-                    val response = service.getWidgets()
-                    if (response.isSuccessful) {
-                        PollFetchOutcome.Success(response.body()?.widgets.orEmpty())
-                    } else {
+                    val response = service.getWidgetsRaw()
+                    if (!response.isSuccessful) {
                         PollFetchOutcome.HttpError(response.code())
+                    } else {
+                        // Raw body so a 200-with-garbage parse failure can
+                        // log the byte length (shape only, never content):
+                        // the old Moshi-converter path swallowed the body
+                        // and degraded to a silent TransportFailure.
+                        val raw = try {
+                            response.body()?.string().orEmpty()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.i(TAG, "widget poll body-read-failure error=${e.javaClass.simpleName}")
+                            return PollFetchOutcome.TransportFailure
+                        }
+                        try {
+                            val parsed = AppMoshi.widgetsResponseAdapter.fromJson(raw)
+                            PollFetchOutcome.Success(parsed?.widgets.orEmpty())
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.i(
+                                TAG,
+                                "widget poll parse-failure " +
+                                    "bodyBytes=${raw.toByteArray(Charsets.UTF_8).size} " +
+                                    "error=${e.javaClass.simpleName}",
+                            )
+                            PollFetchOutcome.TransportFailure
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -126,8 +157,14 @@ object WidgetPoller {
                 }
             }
 
-            override suspend fun saveWidgets(widgets: List<WidgetEnvelope>) {
+            override suspend fun saveWidgets(widgets: List<WidgetEnvelope>): Int {
+                // Empty poll must never wipe the cache: Room @Insert with an
+                // empty list issues no statements (verified semantics), but
+                // guard explicitly so a future DAO change cannot turn
+                // "server sent zero widgets" into "cached widgets vanished".
+                if (widgets.isEmpty()) return 0
                 DatabaseHolder.get(app).widgetCacheDao().upsertAll(widgets.map { toCacheEntity(it) })
+                return widgets.size
             }
 
             override suspend fun clearCache() {
@@ -196,20 +233,26 @@ object WidgetPoller {
         }
         return when (outcome) {
             is PollFetchOutcome.Success -> {
-                try {
-                    deps.saveWidgets(outcome.widgets)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // Cache write failed: keep the last cache, streak untouched.
-                    state.lastStatus = PollStatus(
-                        result = PollResult.NON_AUTH_ERROR,
-                        httpCode = null,
-                        timestampMs = nowMs(),
-                        consecutiveAuthFailures = state.consecutiveAuthFailures,
-                    )
-                    logInfo("widget poll httpCode=none result=network-error")
-                    return false
+                // An empty batch skips the DAO entirely (see the saveWidgets
+                // guard): the last cache survives a zero-widget poll.
+                val upserted = if (outcome.widgets.isEmpty()) {
+                    0
+                } else {
+                    try {
+                        deps.saveWidgets(outcome.widgets)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Cache write failed: keep the last cache, streak untouched.
+                        state.lastStatus = PollStatus(
+                            result = PollResult.NON_AUTH_ERROR,
+                            httpCode = null,
+                            timestampMs = nowMs(),
+                            consecutiveAuthFailures = state.consecutiveAuthFailures,
+                        )
+                        logInfo("widget poll httpCode=none result=network-error")
+                        return false
+                    }
                 }
                 state.consecutiveAuthFailures = 0
                 state.lastStatus = PollStatus(
@@ -218,7 +261,10 @@ object WidgetPoller {
                     timestampMs = nowMs(),
                     consecutiveAuthFailures = 0,
                 )
-                logInfo("widget poll httpCode=200 result=ok")
+                // Shape only (counts, never ids/titles/bodies): distinguishes
+                // "parsed 4, cached 4" from "parsed 0" in field reports of
+                // the all-fallback symptom.
+                logInfo("widget poll httpCode=200 result=ok parsed=${outcome.widgets.size} upserted=$upserted")
                 false
             }
             is PollFetchOutcome.HttpError -> {
@@ -281,7 +327,7 @@ object WidgetPoller {
         val storage = SecureStorage.getInstance(app)
         val deps = object : PollCollaborators {
             override suspend fun fetch(): PollFetchOutcome = PollFetchOutcome.TransportFailure
-            override suspend fun saveWidgets(widgets: List<WidgetEnvelope>) = Unit
+            override suspend fun saveWidgets(widgets: List<WidgetEnvelope>): Int = 0
             override suspend fun clearCache() {
                 try {
                     DatabaseHolder.get(app).widgetCacheDao().clearAll()

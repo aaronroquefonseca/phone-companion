@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 
 /**
  * Pins the field-bug fix: a single 401/403 must NOT wipe credentials or
@@ -19,6 +20,7 @@ class WidgetPollerConsecutiveTest {
     private class FakeDeps(
         var outcome: WidgetPoller.PollFetchOutcome =
             WidgetPoller.PollFetchOutcome.TransportFailure,
+        var failSave: Boolean = false,
     ) : WidgetPoller.PollCollaborators {
         val savedBatches = mutableListOf<List<WidgetEnvelope>>()
         var clearCredentialsCalls = 0
@@ -31,8 +33,10 @@ class WidgetPollerConsecutiveTest {
             return outcome
         }
 
-        override suspend fun saveWidgets(widgets: List<WidgetEnvelope>) {
+        override suspend fun saveWidgets(widgets: List<WidgetEnvelope>): Int {
+            if (failSave) throw IOException("disk full")
             savedBatches += widgets
+            return widgets.size
         }
 
         override suspend fun clearCache() {
@@ -203,6 +207,53 @@ class WidgetPollerConsecutiveTest {
         assertEquals(now, status.timestampMs)
         assertTrue(status.displayText().contains("auth-failed-attempt-1-of-2"))
         assertTrue(status.displayText().contains("403"))
+    }
+
+    @Test
+    fun `success logs parsed and upserted counts`() {
+        val deps = FakeDeps(
+            WidgetPoller.PollFetchOutcome.Success(listOf(envelope("w1"), envelope("w2"))),
+        )
+        val state = InMemoryPollStateStore()
+        val logs = mutableListOf<String>()
+
+        assertFalse(runPoll(deps, state, logs = logs))
+
+        assertEquals(1, deps.savedBatches.size)
+        assertEquals(2, deps.savedBatches.single().size)
+        assertTrue(logs.any { it.contains("200") && it.contains("ok") })
+        assertTrue(logs.any { it.contains("parsed=2") && it.contains("upserted=2") })
+    }
+
+    @Test
+    fun `empty success never reaches the DAO layer and logs zero counts`() {
+        val deps = FakeDeps(WidgetPoller.PollFetchOutcome.Success(emptyList()))
+        val state = InMemoryPollStateStore()
+        val logs = mutableListOf<String>()
+
+        assertFalse(runPoll(deps, state, logs = logs))
+
+        // The DAO upsert is skipped: an empty server list keeps the last
+        // cache instead of risking a wipe.
+        assertTrue(deps.savedBatches.isEmpty())
+        assertEquals(PollResult.OK, state.lastStatus!!.result)
+        assertTrue(logs.any { it.contains("parsed=0") && it.contains("upserted=0") })
+    }
+
+    @Test
+    fun `cache write failure keeps the cache and leaves the streak untouched`() {
+        val deps = FakeDeps(
+            WidgetPoller.PollFetchOutcome.Success(listOf(envelope())),
+            failSave = true,
+        )
+        val state = InMemoryPollStateStore()
+        val logs = mutableListOf<String>()
+
+        assertFalse(runPoll(deps, state, logs = logs))
+
+        assertEquals(PollResult.NON_AUTH_ERROR, state.lastStatus!!.result)
+        assertEquals(0, state.consecutiveAuthFailures)
+        assertTrue(logs.any { it.contains("network-error") })
     }
 
     @Test

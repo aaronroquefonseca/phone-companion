@@ -1,8 +1,6 @@
 package com.phonecompanion.app.data
 
 import com.phonecompanion.app.BuildConfig
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -16,9 +14,9 @@ import java.util.concurrent.TimeUnit
  */
 object ApiClient {
 
-    private val moshi: Moshi = Moshi.Builder()
-        .add(KotlinJsonAdapterFactory())
-        .build()
+    // Network Moshi is owned by AppMoshi so the parse-path regression test
+    // exercises the exact production instance (no config drift).
+    private val moshi get() = AppMoshi.moshi
 
     /**
      * Normalizes and validates a server URL. Accepts bare hosts
