@@ -4,6 +4,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -168,12 +169,20 @@ func TestDriversSend(t *testing.T) {
 	if err := (LogSender{}).Send(ctx, dev, plain); err != nil {
 		t.Fatalf("log: %v", err)
 	}
-	// FCM skeleton fails closed both unconfigured and configured.
+	// FCM fails closed: unconfigured driver, and a configured driver with
+	// no stored device token, both error without touching the network.
 	if err := NewFCMSender("", "").Send(ctx, dev, plain); err == nil {
 		t.Fatal("fcm unconfigured: expected error")
 	}
-	if err := NewFCMSender("p", "/x.json").Send(ctx, dev, plain); err == nil {
-		t.Fatal("fcm skeleton: expected not-implemented error")
+	// Configured but the device has no registration token: typed
+	// re-register signal (backfill path), still no network.
+	err := NewFCMSender("p", "/x.json").Send(ctx, dev, plain)
+	var fe *FCMError
+	if !errors.As(err, &fe) || fe.Code != FCMCodeMissingToken {
+		t.Fatalf("fcm missing token: got %v, want %q", err, FCMCodeMissingToken)
+	}
+	if !NeedsReRegistration(err) {
+		t.Fatal("missing token must signal re-registration")
 	}
 }
 

@@ -18,6 +18,9 @@ import (
 //     token consumed atomically). It MUST NOT require the admin session —
 //     the phone has no session cookie, and MUST NOT require the API write
 //     guard below for the same reason.
+//   - POST /api/v1/device/fcm-token is the same phone-credential class:
+//     device Bearer auth ONLY (token backfill after onNewToken rotation or
+//     widgets poll; see device_token.go). No session, no write guard.
 //   - Every other route here is operator-only behind webui.RequireAdmin:
 //     POST /api/v1/enroll-tokens (issue), GET /api/v1/devices (list),
 //     DELETE /api/v1/devices/{id} (revoke), GET /webui/pair,
@@ -37,6 +40,7 @@ func RegisterPairingRoutes(mux *http.ServeMux, sessions webui.SessionStore, csrf
 		sessions = denyAllSessions{}
 	}
 	mux.Handle("POST /api/v1/enroll", http.HandlerFunc(HandleEnroll))
+	mux.Handle("POST /api/v1/device/fcm-token", http.HandlerFunc(HandleUpdateFCMToken))
 	mux.Handle("POST /api/v1/enroll-tokens", webui.RequireAdmin(sessions, requireAPIWriteGuard(csrf, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowEnrollIssue(w, r) {
 			return
