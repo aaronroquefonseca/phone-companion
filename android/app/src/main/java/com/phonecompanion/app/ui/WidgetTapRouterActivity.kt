@@ -13,13 +13,13 @@ import com.phonecompanion.app.data.SecureStorage
  * Pair when unpaired. This transparent activity makes that branch and
  * finishes without rendering anything.
  *
- * Position-binding note (user-visible in MainActivity's About explainer):
- * each home-screen instance shows the cached row pinned for it in the
- * Widgets screen (see
- * [com.phonecompanion.app.widgets.WidgetBindingResolver]) — add a second
- * text widget and pin a different text row to it. Unpinned instances show
- * the first row of their type. A per-instance configuration activity
- * (picking UI outside the Widgets screen) is out of scope at v1.
+ * Bound widget taps land here. Unbound ("Not associated") taps go straight
+ * to the configuration activity (see
+ * [com.phonecompanion.app.ui.WidgetConfigActivity]), which is also where
+ * placement chooses the row (see
+ * [com.phonecompanion.app.widgets.WidgetBindingResolver]): each
+ * home-screen instance shows exactly the cached row picked for it, or the
+ * explicit unassociated state — never another row's content.
  */
 class WidgetTapRouterActivity : AppCompatActivity() {
 

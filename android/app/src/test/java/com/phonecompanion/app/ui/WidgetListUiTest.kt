@@ -34,6 +34,16 @@ class WidgetListUiTest {
         consecutiveAuthFailures = 1,
     )
 
+    private companion object {
+        const val ISO_NOW = "2026-01-10T12:00:00Z"
+        const val ISO_NOW_MS = 1_768_046_400_000L // ISO_NOW as epoch millis.
+
+        fun minusMinutes(minutes: Long): String {
+            val then = java.time.Instant.parse(ISO_NOW).minusSeconds(minutes * 60)
+            return then.toString()
+        }
+    }
+
     @Test
     fun `row shows id type title and updated_at`() {
         val row = WidgetListUi.rowText("w1", "secret", "Keys", "2026-02-02T00:00:00Z")
@@ -149,25 +159,46 @@ class WidgetListUiTest {
     }
 
     @Test
-    fun `instance line shows default pinned stale and empty states`() {
+    fun `instance label shows human selection never raw glance ids`() {
         val rows = listOf(
             payloadEntity("text", """{"body":"hi"}""", id = "a").copy(title = "Hello"),
             payloadEntity("text", """{"body":"yo"}""", id = "b").copy(title = "World"),
         )
-        val default = WidgetListUi.instanceLine("k1", rows, null, null)
-        assertTrue(default.contains("k1"))
-        assertTrue(default.contains("Default"))
-        assertTrue(default.contains("Hello"))
+        val unbound = WidgetListUi.instanceLabel("Text", rows, null, null, ISO_NOW_MS)
+        assertTrue(unbound, unbound.contains("Not associated"))
+        assertTrue(unbound, unbound.contains("Text"))
+        assertTrue(unbound, !unbound.contains("APPWIDGETID") && !unbound.contains("AppWidgetId"))
 
-        val pinned = WidgetListUi.instanceLine("k1", rows, "b", null)
-        assertTrue(pinned.contains("Pinned"))
-        assertTrue(pinned.contains("World"))
+        val pinned = WidgetListUi.instanceLabel("Text", rows, "b", null, ISO_NOW_MS)
+        assertTrue(pinned, pinned.contains("World"))
+        assertTrue(pinned, pinned.contains("Text"))
+        assertTrue(pinned, !pinned.contains("Pinned") && !pinned.contains("Default"))
 
-        val stale = WidgetListUi.instanceLine("k1", rows, "gone", "was-gone")
-        assertTrue(stale.contains("was-gone"))
-        assertTrue(stale.contains("Hello"))
+        val stale = WidgetListUi.instanceLabel("Text", rows, "gone", "was-gone", ISO_NOW_MS)
+        assertTrue(stale, stale.contains("Not associated"))
+        assertTrue(stale, stale.contains("was-gone"))
 
-        val empty = WidgetListUi.instanceLine("k1", emptyList(), null, null)
-        assertTrue(empty.contains("no cached rows"))
+        val empty = WidgetListUi.instanceLabel("Text", emptyList(), null, null, ISO_NOW_MS)
+        assertTrue(empty, empty.contains("Text"))
+        assertTrue(empty, empty.contains("No cached rows"))
+    }
+
+    @Test
+    fun `human updated-at reads in words and never throws`() {
+        assertEquals("just now", WidgetListUi.humanUpdatedAt(ISO_NOW, ISO_NOW_MS))
+        assertEquals("1 minute ago", WidgetListUi.humanUpdatedAt(minusMinutes(1), ISO_NOW_MS))
+        assertEquals("5 minutes ago", WidgetListUi.humanUpdatedAt(minusMinutes(5), ISO_NOW_MS))
+        assertEquals("1 hour ago", WidgetListUi.humanUpdatedAt(minusMinutes(60), ISO_NOW_MS))
+        assertEquals("3 hours ago", WidgetListUi.humanUpdatedAt(minusMinutes(180), ISO_NOW_MS))
+        assertEquals("1 day ago", WidgetListUi.humanUpdatedAt(minusMinutes(24 * 60), ISO_NOW_MS))
+        assertEquals("6 days ago", WidgetListUi.humanUpdatedAt(minusMinutes(6 * 24 * 60), ISO_NOW_MS))
+        assertEquals("2025-12-01", WidgetListUi.humanUpdatedAt("2025-12-01T00:00:00Z", ISO_NOW_MS))
+        // Unparseable and future inputs pass through unchanged.
+        assertEquals("not-a-date", WidgetListUi.humanUpdatedAt("not-a-date", ISO_NOW_MS))
+        assertEquals("", WidgetListUi.humanUpdatedAt("", ISO_NOW_MS))
+        assertEquals(
+            "2026-02-01T00:00:00Z",
+            WidgetListUi.humanUpdatedAt("2026-02-01T00:00:00Z", ISO_NOW_MS),
+        )
     }
 }

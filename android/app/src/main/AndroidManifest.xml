@@ -36,6 +36,14 @@
         <activity
             android:name=".ui.WidgetsActivity"
             android:exported="false" />
+        <!-- Widget configuration: placement (android:configure on all four
+             providers) and re-configure (unassociated-tap + Widgets-screen
+             instance buttons via editIntent). Exported: the launcher starts
+             the placement flow cross-uid. Writes only the caller's own
+             binding row (widget_binding PK) and pushes that instance. -->
+        <activity
+            android:name=".ui.WidgetConfigActivity"
+            android:exported="true" />
         <!-- Transparent tap router for Glance widgets (paired → Widgets,
              unpaired → Pair). Exported=false: explicit in-app intents only. -->
         <activity

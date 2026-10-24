@@ -430,9 +430,8 @@ object WidgetPoller {
         widget: T,
         provider: String,
     ) {
-        val manager = GlanceAppWidgetManager(context)
         val ids = try {
-            manager.getGlanceIds(T::class.java)
+            GlanceAppWidgetManager(context).getGlanceIds(T::class.java)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

@@ -7,16 +7,16 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 
 /**
- * Per-instance widget selection (Glance all-fallback follow-up).
+ * Per-instance widget selection (Glance configure follow-up).
  *
  * One row pins one home-screen Glance instance to one cached widget row:
  * (`providerClass`, `glanceKey`) is the composite primary key, `widgetId`
- * NULL means "default" (first row of the type — single-widget users see
- * zero change). Duplicates are allowed: two instances may point at the
- * same `widgetId` (no unique constraint on it, no foreign key to
- * `widget_cache` — a binding must survive its row disappearing so the UI
- * can show a `was-<old id>` re-point hint instead of silently dropping
- * the choice).
+ * NULL means explicitly unassociated (the widget renders "Not associated"
+ * and its tap opens the configuration — never another row's content).
+ * Duplicates are allowed: two instances may point at the same `widgetId`
+ * (no unique constraint on it, no foreign key to `widget_cache` — a
+ * binding must survive its row disappearing so the UI can show a
+ * `was-<old id>` re-point hint instead of silently dropping the choice).
  *
  * - `providerClass`: `TextWidget::class.java.name` etc. (stable: no
  *   obfuscation — release builds keep `minifyEnabled false`).

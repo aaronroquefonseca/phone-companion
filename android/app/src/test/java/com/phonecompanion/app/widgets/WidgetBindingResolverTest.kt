@@ -8,13 +8,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Per-instance selection: resolve / miss / stale / duplicate / upgrade.
+ * Per-instance selection: resolve / unbound / stale / duplicate / upgrade.
  *
- * The contract: a pinned instance shows its row; an unpinned or
- * stale-miss instance shows the first row of its type (single-widget
- * users see zero change); an empty type selects nothing (the widget's
- * genuine fallback); duplicates are allowed; a fresh upgrade (no bindings
- * yet) behaves exactly like unpinned.
+ * The contract: a pinned instance shows its row; every unassociated state
+ * (null binding, stale pin, empty cache) selects nothing — the widget
+ * renders its explicit "Not associated" state and never another row's
+ * content. Stale pins keep a `was-<old id>` re-point hint; duplicates are
+ * allowed; a fresh upgrade (no bindings yet) behaves like unassociated.
  */
 class WidgetBindingResolverTest {
 
@@ -44,26 +44,26 @@ class WidgetBindingResolverTest {
     }
 
     @Test
-    fun `miss with no binding defaults to the first row`() {
+    fun `no binding selects nothing instead of another rows content`() {
         val rows = listOf(row("a"), row("b"))
-        assertEquals("a", WidgetBindingResolver.resolve(rows, null)!!.id)
+        assertNull(WidgetBindingResolver.resolve(rows, null))
+        assertNull(WidgetBindingResolver.staleHint(rows, null))
     }
 
     @Test
-    fun `stale miss falls back to the first row with a was-hint`() {
+    fun `stale miss selects nothing with a was-hint`() {
         val rows = listOf(row("a"), row("b"))
-        assertEquals("a", WidgetBindingResolver.resolve(rows, "gone")!!.id)
+        assertNull(WidgetBindingResolver.resolve(rows, "gone"))
         assertEquals("was-gone", WidgetBindingResolver.staleHint(rows, "gone"))
     }
 
     @Test
-    fun `fresh upgrade with no bindings behaves like unpinned`() {
-        // Post-MIGRATION_2_3 the table exists but is empty: no backfill of
-        // the old positional mapping, and the default is still first-row.
+    fun `fresh upgrade with no bindings selects nothing`() {
+        // The table exists but is empty: no backfill, no silent default.
         val rows = listOf(row("a"), row("b"))
         val stored = emptyList<WidgetBindingEntity>()
         assertTrue(WidgetBindingResolver.staleBindings(setOf("k1"), stored).isEmpty())
-        assertEquals("a", WidgetBindingResolver.resolve(rows, null)!!.id)
+        assertNull(WidgetBindingResolver.resolve(rows, null))
         assertNull(WidgetBindingResolver.staleHint(rows, null))
     }
 
@@ -111,5 +111,14 @@ class WidgetBindingResolverTest {
                 emptyList(),
             ).isEmpty(),
         )
+    }
+
+    @Test
+    fun `glance key for app widget id matches the Glance data-class format`() {
+        // Glance 1.1.1 AppWidgetId is a data class over appWidgetId, so
+        // GlanceId.toString() is exactly this string (verified against the
+        // shipped AAR). The placement config flow depends on it.
+        assertEquals("AppWidgetId(appWidgetId=51)", glanceKeyForAppWidgetId(51))
+        assertEquals("AppWidgetId(appWidgetId=1)", glanceKeyForAppWidgetId(1))
     }
 }

@@ -47,9 +47,9 @@ class SecretWidgetContentTest {
     }
 
     @Test
-    fun `unbound instance falls back to first row`() {
+    fun `unbound instance selects nothing`() {
         val rows = listOf(row("a"), row("b"))
-        assertEquals("a", WidgetBindingResolver.resolve(rows, null)?.id)
+        assertNull(WidgetBindingResolver.resolve(rows, null))
     }
 
     @Test

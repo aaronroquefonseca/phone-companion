@@ -1,6 +1,7 @@
 package com.phonecompanion.app.widgets
 
 import android.content.Context
+import android.content.Intent
 import androidx.compose.ui.unit.dp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
@@ -9,13 +10,14 @@ import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.provideContent
+import androidx.glance.appwidget.action.actionStartActivity as actionStartActivityWithIntent
 import androidx.glance.layout.Column
 import androidx.glance.layout.padding
 import androidx.glance.text.Text
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetCacheEntity
-import com.phonecompanion.app.data.WidgetPayloadParser
+import com.phonecompanion.app.ui.WidgetConfigActivity
 import com.phonecompanion.app.ui.WidgetTapRouterActivity
 import kotlinx.coroutines.CancellationException
 
@@ -37,25 +39,73 @@ import kotlinx.coroutines.CancellationException
  * masked line. Per-instance content: same [WidgetBindingResolver] row
  * selection as the other widgets, with the title bounded by
  * [WidgetPayloadParser.sanitizeTitle]; resolution stays fail-closed
- * ([resolveVisibleSecret] null → [SecretWidget.MASKED]). Database access
- * is one shared open via [DatabaseHolder] — never a per-call builder,
- * never closed here. Tapping opens the app (see [WidgetTapRouterActivity]).
+ * ([resolveVisibleSecret] null → [SecretWidget.MASKED]). An unbound
+ * instance stays masked (no oracle) and its tap opens the configuration.
+ * Database access is one shared open via [DatabaseHolder] — never a
+ * per-call builder, never closed here.
+ *
+ * Every state renders SOMETHING valid: [WidgetContent.secretModel] maps all
+ * inputs to non-blank strings, and a second-chance [provideContent] with
+ * static copy guards the composition itself, so a render failure can never
+ * propagate to the launcher as the broken-widget UI.
  */
 class SecretWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        var title = WidgetFallbackCopy.titleFor(FALLBACK_LABEL, WidgetFallbackCopy.Reason.LOAD_FAILED)
-        // Fail closed: any decrypt failure shows the masked state.
-        var visible: String?
-        var neverPaired: Boolean
+        val model = loadSecret(context, id)
+        try {
+            provideContent {
+                Column(
+                    modifier = GlanceModifier.padding(12.dp).clickable(tapAction(context, id, model)),
+                ) {
+                    Text(WidgetFallbackCopy.ellipsize(model.title, TITLE_MAX_CHARS))
+                    Text(WidgetFallbackCopy.ellipsize(model.body, BODY_MAX_CHARS))
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Fail closed to static copy: never throw, never post null.
+            // Masked even here: no oracle about what failed.
+            provideContent {
+                Column(
+                    modifier = GlanceModifier.padding(12.dp)
+                        .clickable(actionStartActivity<WidgetTapRouterActivity>()),
+                ) {
+                    Text("Secret")
+                    Text(MASKED)
+                }
+            }
+        }
+    }
+
+    private fun tapAction(
+        context: Context,
+        id: GlanceId,
+        model: WidgetContent.SecretModel,
+    ): androidx.glance.action.Action = when (WidgetContent.tapFor(model.paired, model.unbound)) {
+        WidgetContent.TapDestination.CONFIG -> actionStartActivityWithIntent(
+            Intent(context, WidgetConfigActivity::class.java)
+                .putExtra(WidgetConfigActivity.EXTRA_PROVIDER_CLASS, PROVIDER)
+                .putExtra(WidgetConfigActivity.EXTRA_GLANCE_KEY, glanceKey(id)),
+        )
+        WidgetContent.TapDestination.ROUTER -> actionStartActivity<WidgetTapRouterActivity>()
+    }
+
+    private suspend fun loadSecret(context: Context, id: GlanceId): WidgetContent.SecretModel {
+        // Fail closed: any decrypt/load failure shows the masked state.
+        // No logging on this path, ever: the no-oracle policy renders
+        // every failure as the single masked state, on screen and in logs.
+        var neverPaired = false
+        var row: WidgetCacheEntity? = null
+        var visible: String? = null
         try {
             val storage = SecureStorage.getInstance(context)
             neverPaired = !storage.isPaired
             val db = DatabaseHolder.get(context)
             val rows = db.widgetCacheDao().getByType("secret")
-            // No logging on this path, ever: the no-oracle policy renders
-            // every failure as the single masked state, on screen and in
-            // logs. A miss/empty table yields null (default first row).
+            // A miss/empty table yields null (unassociated, never another
+            // row's content).
             val widgetId = try {
                 db.widgetBindingDao().get(PROVIDER, glanceKey(id))?.widgetId
             } catch (e: CancellationException) {
@@ -63,8 +113,7 @@ class SecretWidget : GlanceAppWidget() {
             } catch (_: Exception) {
                 null
             }
-            val row = WidgetBindingResolver.resolve(rows, widgetId)
-            title = row?.let { WidgetPayloadParser.sanitizeTitle(it.title) } ?: title
+            row = WidgetBindingResolver.resolve(rows, widgetId)
             visible = if (neverPaired) null else resolveVisibleSecret(
                 storage.deviceId,
                 storage.deviceKey,
@@ -72,30 +121,16 @@ class SecretWidget : GlanceAppWidget() {
             )
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Single masked outcome: never leak failure details.
-            title = WidgetFallbackCopy.titleFor(FALLBACK_LABEL, WidgetFallbackCopy.Reason.LOAD_FAILED)
-            visible = null
-            neverPaired = false
+            return WidgetContent.SecretModel(
+                title = WidgetFallbackCopy.titleFor("Secret", WidgetFallbackCopy.Reason.LOAD_FAILED),
+                body = MASKED,
+                unbound = true,
+                paired = true,
+            )
         }
-        val body = when {
-            neverPaired -> WidgetFallbackCopy.bodyFor(WidgetFallbackCopy.Reason.NEVER_PAIRED)
-            else -> visible ?: MASKED
-        }
-        val shownTitle = when {
-            neverPaired -> WidgetFallbackCopy.titleFor(FALLBACK_LABEL, WidgetFallbackCopy.Reason.NEVER_PAIRED)
-            else -> title
-        }
-        provideContent {
-            Column(
-                modifier = GlanceModifier.padding(12.dp).clickable(
-                    actionStartActivity<WidgetTapRouterActivity>(),
-                ),
-            ) {
-                Text(WidgetFallbackCopy.ellipsize(shownTitle, TITLE_MAX_CHARS))
-                Text(WidgetFallbackCopy.ellipsize(body, BODY_MAX_CHARS))
-            }
-        }
+        return WidgetContent.secretModel(row, neverPaired, visible)
     }
 
     companion object {

@@ -54,26 +54,56 @@ object WidgetListUi {
     }
 
     /**
-     * One home-screen instance line for the assignment UI: the current
-     * selection (pinned row title, or the default first row) plus the
+     * One home-screen instance line for the assignment UI: the human label
+     * (type + chosen logical widget title or "Not associated") plus the
      * `was-<old id>` re-point hint when the binding pins a gone widget.
-     * Pure and JVM-testable; [WidgetsActivity] binds it to a button that
-     * opens the row picker.
+     * Pure and JVM-testable. Raw Glance instance ids never appear here —
+     * tapping the line opens the same chooser as the configuration
+     * activity ([WidgetConfigActivity]).
      */
-    fun instanceLine(
-        glanceKey: String,
+    fun instanceLabel(
+        providerLabel: String,
         rows: List<WidgetCacheEntity>,
         bindingWidgetId: String?,
         staleHint: String?,
+        nowMs: Long = System.currentTimeMillis(),
     ): String {
-        val selected = rows.find { it.id == bindingWidgetId } ?: rows.firstOrNull()
-        val selection = when {
-            selected == null -> "no cached rows"
-            staleHint != null -> "Default (first: ${selected.title}) — $staleHint (gone)"
-            bindingWidgetId == null -> "Default (first: ${selected.title})"
-            else -> "Pinned: ${selected.title}"
+        if (rows.isEmpty()) return "$providerLabel — No cached rows yet"
+        val selected = rows.find { it.id == bindingWidgetId }
+        if (selected == null) {
+            val base = "$providerLabel — Not associated"
+            return if (staleHint != null) {
+                "$base ($staleHint — gone, pick again)"
+            } else {
+                base
+            }
         }
-        return "$glanceKey → $selection"
+        val title = com.phonecompanion.app.widgets.WidgetContent.nonBlank(selected.title, "Untitled")
+        return "$providerLabel — $title · updated ${humanUpdatedAt(selected.updatedAt, nowMs)}"
+    }
+
+    /**
+     * Human updated-at for chooser/instance lines ("just now",
+     * "5 minutes ago", "3 hours ago", "2 days ago", else the calendar
+     * date). Unparseable and future inputs pass through unchanged; never
+     * throws.
+     */
+    fun humanUpdatedAt(iso: String, nowMs: Long = System.currentTimeMillis()): String {
+        val then = try {
+            java.time.Instant.parse(iso).toEpochMilli()
+        } catch (_: Exception) {
+            return iso
+        }
+        val diffMs = nowMs - then
+        if (diffMs < 0) return iso
+        val minutes = diffMs / 60_000
+        if (minutes < 1) return "just now"
+        if (minutes < 60) return "$minutes ${if (minutes == 1L) "minute" else "minutes"} ago"
+        val hours = minutes / 60
+        if (hours < 24) return "$hours ${if (hours == 1L) "hour" else "hours"} ago"
+        val days = hours / 24
+        if (days < 30) return "$days ${if (days == 1L) "day" else "days"} ago"
+        return iso.take(10)
     }
 
     /** Envelope field-name gate (no decrypt, no values, no oracle). */
