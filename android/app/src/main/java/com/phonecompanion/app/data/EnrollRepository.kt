@@ -15,6 +15,18 @@ import kotlinx.coroutines.CancellationException
  */
 class EnrollRepository(
     private val storage: EnrollmentStore,
+    /**
+     * Invoked once per successful enroll, after the credentials durably
+     * persist. Production passes a lambda that clears the revocation
+     * marker ([com.phonecompanion.app.work.PollStateStore.revokedAtMs]) —
+     * a re-pair heals a previously revoked device. Never invoked on any
+     * failure (including `"persist-failed"`).
+     *
+     * Kept ahead of [serviceFactory] so existing trailing-lambda call
+     * sites (`EnrollRepository(store) { _ -> api }`) keep binding to the
+     * factory; pass this one by name.
+     */
+    private val onEnrolled: () -> Unit = {},
     private val serviceFactory: (String) -> ApiService = { baseUrl -> ApiClient.create(baseUrl) },
 ) {
 
@@ -78,6 +90,7 @@ class EnrollRepository(
                 )
                 if (!persisted) return Result.Unexpected("persist-failed")
                 storage.saveDeviceName(sentDeviceName)
+                onEnrolled()
                 Result.Success(body.deviceId)
             } else {
                 val code = ApiClient.parseErrorCode(

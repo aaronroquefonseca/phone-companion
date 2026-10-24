@@ -23,6 +23,7 @@ import androidx.lifecycle.lifecycleScope
 import com.phonecompanion.app.R
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
+import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
 import kotlinx.coroutines.launch
 
@@ -174,7 +175,16 @@ class MainActivity : AppCompatActivity() {
             val name = storage.deviceName ?: getString(R.string.main_not_paired)
             statusView.text = getString(R.string.main_paired, name, storage.baseUrl ?: "?")
         } else {
-            statusView.text = getString(R.string.main_not_paired)
+            // Revoked reads differently from never-paired: the wipe marker
+            // (plain pref, survives the credential wipe) tells them apart.
+            val revokedAtMs = runCatching {
+                SharedPrefsPollStateStore(this).revokedAtMs
+            }.getOrNull()
+            statusView.text = RevocationCopy.mainUnpairedText(
+                revokedAtMs,
+                getString(R.string.main_not_paired),
+                getString(R.string.main_revoked),
+            )
         }
 
         renderJustPaired(paired)
@@ -294,13 +304,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Explicit unpair: clear credentials, drop the widget cache, push the
+     * Explicit unpair: clear credentials, drop the widget cache, clear the
+     * revocation marker (a fresh unpair is neither revoked nor paired —
+     * the next render shows the generic never-paired copy), push the
      * fail-closed widget states, and refresh this screen. All APIs already
      * exist ([SecureStorage.clearCredentials], [WidgetPoller.updateAllWidgets]).
      */
     private fun unpair() {
         lifecycleScope.launch {
             SecureStorage.getInstance(this@MainActivity).clearCredentials()
+            runCatching {
+                SharedPrefsPollStateStore(this@MainActivity).revokedAtMs = null
+            }
             runCatching {
                 DatabaseHolder.get(this@MainActivity).widgetCacheDao().clearAll()
             }

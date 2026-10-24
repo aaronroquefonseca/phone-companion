@@ -4,6 +4,7 @@
 
     <string name="main_paired">Paired\n%1$s\n%2$s</string>
     <string name="main_not_paired">Not paired yet — open Pair to scan the WebUI QR.</string>
+    <string name="main_revoked">This device was revoked — scan a new code to reconnect</string>
     <string name="main_last_notification">Last notification\n%1$s — %2$s</string>
     <string name="main_last_notification_action">Opened from a notification action.</string>
     <string name="main_just_paired_title">Pairing complete</string>

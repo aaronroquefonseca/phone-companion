@@ -114,10 +114,10 @@ object WidgetListUi {
     }
 
     /** Last-poll status line, or a never-polled marker before the first poll. */
-    fun statusText(status: PollStatus?): String =
-        status?.displayText() ?: "never-polled"
+    fun statusText(status: PollStatus?, revokedAtMs: Long? = null): String =
+        RevocationCopy.pollStatusLine(status, revokedAtMs)
 
     /** Empty-cache line: names the empty state AND the last poll outcome. */
-    fun emptyStateText(status: PollStatus?): String =
-        "No cached widgets — ${statusText(status)}."
+    fun emptyStateText(status: PollStatus?, revokedAtMs: Long? = null): String =
+        "No cached widgets — ${statusText(status, revokedAtMs)}."
 }
