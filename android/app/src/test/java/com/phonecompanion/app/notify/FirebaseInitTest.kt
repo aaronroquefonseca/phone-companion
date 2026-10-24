@@ -87,6 +87,36 @@ class FirebaseInitTest {
     }
 
     @Test
+    fun `ensure returns true when a concurrent init won the race`() {
+        // Two concurrent ensure() calls both pass the guard; the loser’s
+        // duplicate init throws, but the app IS registered — so it must
+        // report true (a spurious false would wipe a valid cached token
+        // and mislog init-failed).
+        var registered = false
+        val logged = mutableListOf<String>()
+        val result = FirebaseInit.ensure(
+            alreadyInitialized = { registered },
+            doInit = {
+                if (registered) throw IllegalStateException("Duplicate app")
+                registered = true
+                // Simulate the racing caller: a second ensure() now runs
+                // doInit, loses, but must still see the registered app.
+                val loserResult = FirebaseInit.ensure(
+                    alreadyInitialized = { registered },
+                    doInit = { throw IllegalStateException("Duplicate app") },
+                    configured = true,
+                    log = { logged.add(it) },
+                )
+                assertTrue(loserResult)
+            },
+            configured = true,
+            log = { logged.add(it) },
+        )
+        assertTrue(result)
+        assertTrue(logged.isEmpty())
+    }
+
+    @Test
     fun `ensure logs init-failed when init leaves no app registered`() {
         var initCalls = 0
         val logged = mutableListOf<String>()

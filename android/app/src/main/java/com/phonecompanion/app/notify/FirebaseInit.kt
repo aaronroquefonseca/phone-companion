@@ -102,6 +102,11 @@ object FirebaseInit {
                 false
             }
         } catch (e: Exception) {
+            // Lost a concurrent init race: another caller registered the
+            // app between our guard and doInit (duplicate-app init throws),
+            // so re-check before reporting failure — a spurious false here
+            // would wipe a valid cached token and mislog init-failed.
+            if (alreadyInitialized()) return true
             // Class name only — exception messages are never logged, so no
             // config value can leak into logcat here.
             log("$LOG_INIT_FAILED [${e.javaClass.simpleName}]")
