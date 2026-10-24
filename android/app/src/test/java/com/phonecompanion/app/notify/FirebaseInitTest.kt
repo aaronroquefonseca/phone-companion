@@ -87,6 +87,21 @@ class FirebaseInitTest {
     }
 
     @Test
+    fun `ensure logs init-failed when init leaves no app registered`() {
+        var initCalls = 0
+        val logged = mutableListOf<String>()
+        val result = FirebaseInit.ensure(
+            alreadyInitialized = { false },
+            doInit = { initCalls++ },
+            configured = true,
+            log = { logged.add(it) },
+        )
+        assertFalse(result)
+        assertEquals(1, initCalls)
+        assertEquals(listOf(FirebaseInit.LOG_INIT_FAILED), logged)
+    }
+
+    @Test
     fun `isConfigured rejects blanks and placeholders, accepts full config`() {
         assertFalse(FirebaseInit.isConfigured("", "p", "a", "k"))
         assertFalse(

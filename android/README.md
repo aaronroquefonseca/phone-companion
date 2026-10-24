@@ -88,10 +88,12 @@ The `google-services` Gradle plugin is intentionally NOT applied, so
 debug builds work without the file; at build time `app/build.gradle`
 parses the file when present and bakes its four sender fields into
 `BuildConfig`, otherwise `TODO-OPERATOR` placeholders keep the build
-green. `notify/FirebaseInit.ensure()` runs once before the first
-`FirebaseMessaging` use (pairing enroll) — guarded by
-`FirebaseApp.getApps()` so it is idempotent — and fails closed without
-config: enroll and polling still work, just without push. Init failure
+green. `notify/FirebaseInit.ensure()` gates both `FirebaseMessaging` entry
+points — the pairing enroll (`PairActivity.fetchFcmToken`) and the push
+receiver (`CompanionMessagingService.onCreate`, since the
+manifest-registered `MESSAGING_EVENT` path can run before any activity)
+— guarded by `FirebaseApp.getApps()` so it is idempotent, and fails
+closed without config: enroll and polling still work, just without push. Init failure
 and Play-services-unreachable log distinctly in logcat, with no secret
 material in either line. Token lifecycle in the app:
 

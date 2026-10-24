@@ -93,8 +93,14 @@ object FirebaseInit {
         return try {
             doInit()
             // Verify rather than assume: only report success when the
-            // default app is actually registered now.
-            alreadyInitialized()
+            // default app is actually registered now. A silent false here
+            // would hide a broken init, so it logs the init-failed line.
+            if (alreadyInitialized()) {
+                true
+            } else {
+                log(LOG_INIT_FAILED)
+                false
+            }
         } catch (e: Exception) {
             // Class name only — exception messages are never logged, so no
             // config value can leak into logcat here.

@@ -184,24 +184,39 @@ class PairActivity : AppCompatActivity() {
     /**
      * Best-effort FCM token for the enroll body. Null when push is not
      * configured (no google-services.json at build time, so FirebaseInit
-     * fails closed) or Play services is unreachable — enroll proceeds
-     * without it. The two causes log distinctly: init failure
-     * ([FirebaseInit.LOG_INIT_FAILED], logged inside FirebaseInit.ensure)
-     * vs token-fetch failure ([FirebaseInit.LOG_PLAY_UNREACHABLE] below).
+     * fails closed — the stale cached token is cleared, never resent) or
+     * Play services is unreachable (throw or timeout: both log the same
+     * distinct line and return null, never a stale fallback) — enroll
+     * proceeds without push either way. The two causes log distinctly:
+     * init failure ([FirebaseInit.LOG_INIT_FAILED], logged inside
+     * FirebaseInit.ensure) vs token-fetch failure
+     * ([FirebaseInit.LOG_PLAY_UNREACHABLE] below).
      */
     private suspend fun fetchFcmToken(): String? {
         if (!FirebaseInit.ensure(this)) {
-            return storage.fcmToken
+            // Unconfigured: drop any stale cached token from a previous
+            // install/config so enroll sends null instead of resending it.
+            storage.fcmToken = null
+            return null
         }
-        return try {
+        val token = try {
             withTimeoutOrNull(FCM_TOKEN_TIMEOUT_MS) {
                 com.google.firebase.messaging.FirebaseMessaging.getInstance().token.await()
             }
         } catch (e: Exception) {
             // Class name only — never log token or config material.
             Log.w(TAG, "${FirebaseInit.LOG_PLAY_UNREACHABLE} [${e.javaClass.simpleName}]")
-            null
-        }?.also { storage.fcmToken = it } ?: storage.fcmToken
+            return null
+        }
+        // Timeout yields null here, blank is equally unusable: Play
+        // services unreachable is one branch regardless — log it once and
+        // fail closed with null, never a stale cached fallback.
+        if (token.isNullOrBlank()) {
+            Log.w(TAG, FirebaseInit.LOG_PLAY_UNREACHABLE)
+            return null
+        }
+        storage.fcmToken = token
+        return token
     }
 
     companion object {

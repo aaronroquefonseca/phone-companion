@@ -48,6 +48,25 @@ def loadFcmConfig() {
 }
 def fcmConfig = loadFcmConfig()
 
+// Escape a raw JSON string value for embedding in a Java string literal:
+// without this a backslash or double-quote (or control character) in a
+// sender field would break the generated BuildConfig or inject code.
+def escJavaString(String s) {
+    StringBuilder out = new StringBuilder(s.length())
+    for (int i = 0; i < s.length(); i++) {
+        char c = s.charAt(i)
+        switch (c) {
+            case '\\': out.append('\\\\'); break
+            case '"': out.append('\\"'); break
+            case '\n': out.append('\\n'); break
+            case '\r': out.append('\\r'); break
+            case '\t': out.append('\\t'); break
+            default: out.append(c); break
+        }
+    }
+    return out.toString()
+}
+
 android {
     namespace 'com.phonecompanion.app'
     compileSdk 34
@@ -62,10 +81,12 @@ android {
         // Runtime Firebase init inputs (see notify/FirebaseInit). Real
         // values only when the operator's local google-services.json was
         // present at build time; TODO-OPERATOR placeholders otherwise.
-        buildConfigField 'String', 'FCM_SENDER_ID', "\"${fcmConfig.senderId}\""
-        buildConfigField 'String', 'FCM_PROJECT_ID', "\"${fcmConfig.projectId}\""
-        buildConfigField 'String', 'FCM_APP_ID', "\"${fcmConfig.appId}\""
-        buildConfigField 'String', 'FCM_API_KEY', "\"${fcmConfig.apiKey}\""
+        // Values are Java-escaped (see escJavaString) so no sender field
+        // can break the generated BuildConfig literal.
+        buildConfigField 'String', 'FCM_SENDER_ID', "\"${escJavaString(fcmConfig.senderId)}\""
+        buildConfigField 'String', 'FCM_PROJECT_ID', "\"${escJavaString(fcmConfig.projectId)}\""
+        buildConfigField 'String', 'FCM_APP_ID', "\"${escJavaString(fcmConfig.appId)}\""
+        buildConfigField 'String', 'FCM_API_KEY', "\"${escJavaString(fcmConfig.apiKey)}\""
     }
 
     buildTypes {

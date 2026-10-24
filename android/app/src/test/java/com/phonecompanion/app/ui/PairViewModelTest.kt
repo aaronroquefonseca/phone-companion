@@ -45,8 +45,10 @@ class PairViewModelTest {
         private val latencyMs: Long = 0,
     ) : ApiService {
         var enrollCalls = 0
+        var lastRequest: EnrollRequest? = null
         override suspend fun enroll(request: EnrollRequest): Response<EnrollResponse> {
             enrollCalls++
+            lastRequest = request
             if (latencyMs > 0) delay(latencyMs)
             return responses[minOf(enrollCalls - 1, responses.size - 1)]
         }
@@ -258,5 +260,31 @@ class PairViewModelTest {
         }
         assertEquals(PairMessages.SUCCESS, terminal.messageKey)
         assertEquals(1, api.enrollCalls)
+        // Throw path sends an empty token, never a stale or partial one.
+        assertNull(api.lastRequest?.fcmToken)
+    }
+
+    @Test
+    fun `null fcm token provider sends empty token, enroll still succeeds`() = runBlocking {
+        // Mirrors the fetch-timeout path (withTimeoutOrNull-null): enroll
+        // proceeds with an empty token instead of a stale cached one.
+        val api = FakeApi(ok())
+        val vm = PairViewModel(
+            repository = EnrollRepository(FakeStore()) { _ -> api },
+            fcmTokenProvider = { null },
+            injectedScope = CoroutineScope(Dispatchers.Unconfined),
+        )
+        vm.startEnroll("https://example.com", "tok", "My Phone")
+        var terminal = vm.state.value
+        var waited = 0
+        while (terminal.busy && waited < 100) {
+            delay(10)
+            terminal = vm.state.value
+            waited++
+        }
+        assertEquals(PairMessages.SUCCESS, terminal.messageKey)
+        assertEquals(1, api.enrollCalls)
+        // Timeout-null path sends an empty token, never a stale one.
+        assertNull(api.lastRequest?.fcmToken)
     }
 }
