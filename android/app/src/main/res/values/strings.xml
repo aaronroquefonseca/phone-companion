@@ -65,12 +65,12 @@
     <string name="pair_error_unexpected">Unexpected error: %1$s. Try again — if it keeps happening, scan a fresh code.</string>
     <string name="pair_error_unknown">unknown</string>
 
-    <string name="widget_text_label">Companion Text</string>
+    <string name="widget_text_label">Text</string>
     <string name="widget_text_desc">Shows a title with text from your server.</string>
-    <string name="widget_list_label">Companion List</string>
+    <string name="widget_list_label">List</string>
     <string name="widget_list_desc">Shows a checklist with completed items.</string>
-    <string name="widget_status_label">Companion Status</string>
+    <string name="widget_status_label">Status</string>
     <string name="widget_status_desc">Shows a status with details.</string>
-    <string name="widget_secret_label">Companion Secret</string>
+    <string name="widget_secret_label">Secret</string>
     <string name="widget_secret_desc">Shows a secured value.</string>
 </resources>
