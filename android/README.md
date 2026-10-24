@@ -84,10 +84,16 @@ apps → Add app → Android, package name `com.phonecompanion.app`
 only in your local checkout (and your release CI secrets, if you build
 there), and unit tests use fake tokens only.
 
-The `google-services` Gradle plugin is intentionally NOT applied yet, so
-debug builds work without the file; without it, FCM token fetch is
-best-effort and pairing/notification polling still work. Token lifecycle
-in the app:
+The `google-services` Gradle plugin is intentionally NOT applied, so
+debug builds work without the file; at build time `app/build.gradle`
+parses the file when present and bakes its four sender fields into
+`BuildConfig`, otherwise `TODO-OPERATOR` placeholders keep the build
+green. `notify/FirebaseInit.ensure()` runs once before the first
+`FirebaseMessaging` use (pairing enroll) — guarded by
+`FirebaseApp.getApps()` so it is idempotent — and fails closed without
+config: enroll and polling still work, just without push. Init failure
+and Play-services-unreachable log distinctly in logcat, with no secret
+material in either line. Token lifecycle in the app:
 
 - Pairing (`PairActivity`) fetches the token best-effort and sends it in
   the enroll body (`fcm_token`, null when push is not configured).

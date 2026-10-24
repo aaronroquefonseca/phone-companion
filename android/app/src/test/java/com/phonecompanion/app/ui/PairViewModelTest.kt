@@ -236,4 +236,27 @@ class PairViewModelTest {
         vm.onQrScanned(baseUrlBlank = false)
         assertEquals(PairMessages.SCANNED_CHECK_URL, vm.state.value.messageKey)
     }
+
+    @Test
+    fun `throwing fcm token provider fails closed, enroll still succeeds`() = runBlocking {
+        // Mirrors PairActivity.fetchFcmToken with Firebase unconfigured
+        // (IllegalStateException from FirebaseMessaging): enroll proceeds
+        // with an empty token instead of crashing.
+        val api = FakeApi(ok())
+        val vm = PairViewModel(
+            repository = EnrollRepository(FakeStore()) { _ -> api },
+            fcmTokenProvider = { throw IllegalStateException("FirebaseApp not initialized") },
+            injectedScope = CoroutineScope(Dispatchers.Unconfined),
+        )
+        vm.startEnroll("https://example.com", "tok", "My Phone")
+        var terminal = vm.state.value
+        var waited = 0
+        while (terminal.busy && waited < 100) {
+            delay(10)
+            terminal = vm.state.value
+            waited++
+        }
+        assertEquals(PairMessages.SUCCESS, terminal.messageKey)
+        assertEquals(1, api.enrollCalls)
+    }
 }

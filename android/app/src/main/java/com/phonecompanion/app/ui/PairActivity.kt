@@ -18,6 +18,7 @@ import com.phonecompanion.app.data.EnrollRepository
 import com.phonecompanion.app.data.QrParse
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.parsePairingQr
+import com.phonecompanion.app.notify.FirebaseInit
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -182,15 +183,23 @@ class PairActivity : AppCompatActivity() {
 
     /**
      * Best-effort FCM token for the enroll body. Null when push is not
-     * configured (no google-services.json in dev) or Play services is
-     * unreachable — enroll proceeds without it.
+     * configured (no google-services.json at build time, so FirebaseInit
+     * fails closed) or Play services is unreachable — enroll proceeds
+     * without it. The two causes log distinctly: init failure
+     * ([FirebaseInit.LOG_INIT_FAILED], logged inside FirebaseInit.ensure)
+     * vs token-fetch failure ([FirebaseInit.LOG_PLAY_UNREACHABLE] below).
      */
     private suspend fun fetchFcmToken(): String? {
+        if (!FirebaseInit.ensure(this)) {
+            return storage.fcmToken
+        }
         return try {
             withTimeoutOrNull(FCM_TOKEN_TIMEOUT_MS) {
                 com.google.firebase.messaging.FirebaseMessaging.getInstance().token.await()
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // Class name only — never log token or config material.
+            Log.w(TAG, "${FirebaseInit.LOG_PLAY_UNREACHABLE} [${e.javaClass.simpleName}]")
             null
         }?.also { storage.fcmToken = it } ?: storage.fcmToken
     }
