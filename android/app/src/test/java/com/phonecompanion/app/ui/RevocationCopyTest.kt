@@ -76,4 +76,20 @@ class RevocationCopyTest {
         assertTrue(neverPaired.contains("No cached widgets"))
         assertTrue(neverPaired.contains("never-polled"))
     }
+
+    @Test
+    fun `non-positive markers normalize to unset like the store`() {
+        assertEquals(
+            NOT_PAIRED,
+            RevocationCopy.mainUnpairedText(0L, NOT_PAIRED, REVOKED),
+        )
+        assertEquals(
+            NOT_PAIRED,
+            RevocationCopy.mainUnpairedText(-5L, NOT_PAIRED, REVOKED),
+        )
+        assertEquals("never-polled", WidgetListUi.statusText(null, 0L))
+        assertTrue(
+            WidgetListUi.statusText(noCredentialsStatus(), -5L).contains("not-paired"),
+        )
+    }
 }
