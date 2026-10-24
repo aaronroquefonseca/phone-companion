@@ -107,17 +107,22 @@ class WidgetBinderTest {
     }
 
     @Test
-    fun `failed pin skips the push`() = run {
+    fun `failed pin propagates and skips the push`() = run {
         val dao = FakeDao(failWrites = true)
         val pusher = FakePusher()
-        WidgetBinder.pinAndPush(
-            dao = dao,
-            pusher = pusher,
-            providerClass = "p",
-            widgetType = "text",
-            glanceKey = "k",
-            widgetId = "hello",
-        )
+        try {
+            WidgetBinder.pinAndPush(
+                dao = dao,
+                pusher = pusher,
+                providerClass = "p",
+                widgetType = "text",
+                glanceKey = "k",
+                widgetId = "hello",
+            )
+            throw AssertionError("pin failure must propagate, not report success")
+        } catch (e: RuntimeException) {
+            assertEquals("db down", e.message)
+        }
         assertTrue(pusher.pushes.isEmpty())
     }
 

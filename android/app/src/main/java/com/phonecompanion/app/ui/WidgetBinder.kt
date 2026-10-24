@@ -51,10 +51,12 @@ object WidgetBinder {
 
     /**
      * Stores the binding, then requests an immediate push of that
-     * instance. A failed pin skips the push; a failed push keeps the pin
-     * (the next update renders it). Null [widgetId] stores an explicitly
-     * unassociated binding — the widget renders "Not associated" instead
-     * of another row's content.
+     * instance. A failed pin propagates (callers report it — the config
+     * flow finishes cancelled); a failed push keeps the pin and stays
+     * best-effort (the next update renders it). Cancellation is always
+     * rethrown. Null [widgetId] stores an explicitly unassociated
+     * binding — the widget renders "Not associated" instead of another
+     * row's content.
      */
     suspend fun pinAndPush(
         dao: WidgetBindingDao,
@@ -64,13 +66,9 @@ object WidgetBinder {
         glanceKey: String,
         widgetId: String?,
     ) {
-        try {
-            pin(dao, providerClass, widgetType, glanceKey, widgetId)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            return
-        }
+        // No catch around the pin: a storage failure must surface so the
+        // caller reports it instead of a false success.
+        pin(dao, providerClass, widgetType, glanceKey, widgetId)
         try {
             pusher.push(providerClass, glanceKey)
         } catch (e: CancellationException) {

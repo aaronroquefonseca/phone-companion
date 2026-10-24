@@ -52,6 +52,7 @@ class WidgetConfigActivity : AppCompatActivity() {
     private lateinit var hintView: TextView
     private lateinit var noteView: TextView
     private lateinit var optionsGroup: RadioGroup
+    private lateinit var saveButton: Button
 
     /**
      * The user's pending (not yet saved) pick. Rebuilt from the stored
@@ -63,6 +64,13 @@ class WidgetConfigActivity : AppCompatActivity() {
 
     /** Rows backing the current radio buttons (for pick tracking). */
     private var currentRows: List<WidgetCacheEntity> = emptyList()
+
+    /**
+     * True once the options rendered from a successful DB read. Save is
+     * gated on it twice (disabled button plus the [WidgetConfigActions]
+     * check) so a failed render can never wipe a pin.
+     */
+    private var optionsLoaded = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -129,10 +137,15 @@ class WidgetConfigActivity : AppCompatActivity() {
         }
         val saveButton = Button(this).apply {
             text = "Save"
+            // Enabled only after the options load (see renderOptions): a
+            // failed read must never reach the save path, where the
+            // no-check fallback would wipe a pin.
+            isEnabled = false
             setOnClickListener {
                 save(entry, glanceKey, resultAppWidgetId)
             }
         }
+        this.saveButton = saveButton
         val cancelButton = Button(this).apply {
             text = "Cancel"
             setOnClickListener {
@@ -168,6 +181,8 @@ class WidgetConfigActivity : AppCompatActivity() {
                 throw e
             } catch (_: Exception) {
                 noteView.text = "Could not read cached widgets — try again."
+                optionsLoaded = false
+                saveButton.isEnabled = false
                 return@launch
             }
             val staleHint = WidgetBindingResolver.staleHint(rows, pinned)
@@ -206,6 +221,9 @@ class WidgetConfigActivity : AppCompatActivity() {
                     WidgetChooser.chosenId(currentRows, position),
                 )
             }
+            // Options are showing: Save may run.
+            optionsLoaded = true
+            saveButton.isEnabled = true
         }
     }
 
@@ -218,9 +236,9 @@ class WidgetConfigActivity : AppCompatActivity() {
 
     private fun save(entry: WidgetProviderEntry, glanceKey: String, resultAppWidgetId: Int?) {
         lifecycleScope.launch {
-            val rows: List<WidgetCacheEntity>
+            val freshRows: List<WidgetCacheEntity>
             try {
-                rows = DatabaseHolder.get(this@WidgetConfigActivity).widgetCacheDao()
+                freshRows = DatabaseHolder.get(this@WidgetConfigActivity).widgetCacheDao()
                     .getByType(entry.type)
             } catch (e: CancellationException) {
                 throw e
@@ -230,23 +248,32 @@ class WidgetConfigActivity : AppCompatActivity() {
                 return@launch
             }
             val checkedId = optionsGroup.checkedRadioButtonId
-            val position = if (checkedId == View.NO_ID) {
+            val fallbackPosition = if (checkedId == View.NO_ID) {
                 0
             } else {
                 (optionsGroup.findViewById<RadioButton>(checkedId)?.tag as? Int) ?: 0
             }
-            try {
+            val outcome = try {
                 WidgetConfigActions.save(
                     dao = DatabaseHolder.get(this@WidgetConfigActivity).widgetBindingDao(),
                     pusher = WidgetBinder.GlancePusher.forContext(this@WidgetConfigActivity),
                     entry = entry,
                     glanceKey = glanceKey,
-                    rows = rows,
-                    position = position,
+                    freshRows = freshRows,
+                    pending = pendingPick,
+                    fallbackPosition = fallbackPosition,
+                    snapshotRows = currentRows,
+                    optionsLoaded = optionsLoaded,
                 )
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
+                setResult(RESULT_CANCELED)
+                finish()
+                return@launch
+            }
+            if (outcome !is WidgetConfigActions.Outcome.Saved) {
+                // Unavailable (options never loaded): report cancelled.
                 setResult(RESULT_CANCELED)
                 finish()
                 return@launch
