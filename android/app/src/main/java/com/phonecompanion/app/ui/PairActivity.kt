@@ -18,6 +18,7 @@ import com.phonecompanion.app.data.EnrollRepository
 import com.phonecompanion.app.data.QrParse
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.parsePairingQr
+import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
@@ -51,7 +52,16 @@ class PairActivity : AppCompatActivity() {
         object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                val repo = EnrollRepository(storage)
+                val repo = EnrollRepository(
+                    storage,
+                    // Re-pair heals revocation: a fresh enroll clears the
+                    // wipe marker so the launcher shows the paired line.
+                    onEnrolled = {
+                        runCatching {
+                            SharedPrefsPollStateStore(this@PairActivity).revokedAtMs = null
+                        }
+                    },
+                )
                 return PairViewModel(
                     repository = repo,
                     fcmTokenProvider = { fetchFcmToken() },

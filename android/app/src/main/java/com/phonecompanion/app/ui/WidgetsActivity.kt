@@ -106,12 +106,19 @@ class WidgetsActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 null
             }
-            statusView.text = WidgetListUi.statusText(status)
+            val revokedAtMs = try {
+                SharedPrefsPollStateStore(this@WidgetsActivity).revokedAtMs
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+            statusView.text = WidgetListUi.statusText(status, revokedAtMs)
             rowsContainer.removeAllViews()
             val rows = WidgetListUi.rowTexts(widgets)
             if (rows.isEmpty()) {
                 rowsContainer.addView(TextView(this@WidgetsActivity).apply {
-                    text = WidgetListUi.emptyStateText(status)
+                    text = WidgetListUi.emptyStateText(status, revokedAtMs)
                 })
             } else {
                 for (row in rows) {

@@ -129,4 +129,39 @@ class EnrollRepositoryTest {
         assertTrue(result is EnrollRepository.Result.InvalidInput)
         assertEquals(0, api.enrollCalls)
     }
+
+    @Test
+    fun `success invokes onEnrolled once (re-pair clears the revocation marker)`() = runBlocking {
+        var calls = 0
+        val repo = EnrollRepository(
+            FakeStore(),
+            onEnrolled = { calls++ },
+            serviceFactory = { _ -> FakeApi { okResponse() } },
+        )
+        val result = repo.enroll("https://example.com", "tok123", "Pixel", null)
+        assertTrue(result is EnrollRepository.Result.Success)
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun `failures never invoke onEnrolled`() = runBlocking {
+        var calls = 0
+        val onEnrolled: () -> Unit = { calls++ }
+
+        val expired = EnrollRepository(
+            FakeStore(),
+            onEnrolled = onEnrolled,
+            serviceFactory = { _ -> FakeApi { errorResponse(410) } },
+        )
+        assertTrue(expired.enroll("https://example.com", "t", "d", null) is EnrollRepository.Result.ExpiredOrUsed)
+
+        val persistFailed = EnrollRepository(
+            FakeStore(persistResult = false),
+            onEnrolled = onEnrolled,
+            serviceFactory = { _ -> FakeApi { okResponse() } },
+        )
+        assertTrue(persistFailed.enroll("https://example.com", "t", "d", null) is EnrollRepository.Result.Unexpected)
+
+        assertEquals(0, calls)
+    }
 }

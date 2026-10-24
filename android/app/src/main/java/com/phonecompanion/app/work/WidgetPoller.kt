@@ -298,7 +298,7 @@ object WidgetPoller {
                             PollAuthPolicy.MAX_CONSECUTIVE_AUTH_FAILURES,
                     )
                     if (!PollAuthPolicy.shouldWipe(streak)) return false
-                    handleRevoked(deps, state)
+                    handleRevoked(deps, state, nowMs)
                     true
                 } else {
                     // Other HTTP errors: keep the last cache (fail-closed
@@ -329,9 +329,12 @@ object WidgetPoller {
 
     /**
      * Post-threshold reset: forget local credentials, drop the widget
-     * cache, and push the fail-closed widget states (secret widgets render
+     * cache, stamp the revocation marker (plain pref — survives the
+     * credential wipe so the UI can tell "revoked" from "never paired"),
+     * and push the fail-closed widget states (secret widgets render
      * MASKED once the key is gone). Resets the auth-failure streak so a
-     * later re-pair starts clean.
+     * later re-pair starts clean. The marker itself is cleared only by a
+     * later successful enroll/pair or an explicit unpair.
      */
     internal suspend fun handleRevoked(context: Context) {
         val app = context.applicationContext
@@ -361,10 +364,15 @@ object WidgetPoller {
     }
 
     /** Wipe via collaborators (single path for the Android edge and tests). */
-    internal suspend fun handleRevoked(deps: PollCollaborators, state: PollStateStore) {
+    internal suspend fun handleRevoked(
+        deps: PollCollaborators,
+        state: PollStateStore,
+        nowMs: () -> Long = System::currentTimeMillis,
+    ) {
         deps.clearCredentials()
         deps.clearCache()
         state.consecutiveAuthFailures = 0
+        state.revokedAtMs = nowMs()
         deps.pushFailClosed()
     }
 
