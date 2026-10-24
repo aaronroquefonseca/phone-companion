@@ -9,6 +9,64 @@ plugins {
     id 'kotlin-kapt'
 }
 
+// Firebase sender config for runtime init (see notify/FirebaseInit).
+// The operator's per-machine android/app/google-services.json (gitignored,
+// never committed) is parsed here at build time when present and its four
+// fields are baked into BuildConfig. When the file is absent (CI, fresh
+// checkouts, F-Droid path) every field is a TODO-OPERATOR placeholder, the
+// build stays green, and FirebaseInit fails closed at runtime with a
+// distinct log line — no google-services Gradle plugin, which would
+// hard-fail the build without the file.
+def loadFcmConfig() {
+    def missing = [
+        senderId : 'TODO-OPERATOR',
+        projectId: 'TODO-OPERATOR',
+        appId    : 'TODO-OPERATOR',
+        apiKey   : 'TODO-OPERATOR',
+    ]
+    try {
+        def f = file('google-services.json')
+        if (!f.exists()) return missing
+        def json = new groovy.json.JsonSlurper().parse(f)
+        // Note: the key is singular "client" in google-services.json.
+        def clients = json.client as List
+        if (clients == null || clients.isEmpty()) return missing
+        def client = clients.find {
+            it?.client_info?.android_client_info?.package_name == 'com.phonecompanion.app'
+        } ?: clients[0]
+        def senderId = json?.project_info?.project_number?.toString()
+        def projectId = json?.project_info?.project_id?.toString()
+        def appId = client?.client_info?.mobilesdk_app_id?.toString()
+        def apiKey = (client?.api_key as List)?.findResult {
+            it?.current_key?.toString()
+        }
+        if (!senderId || !projectId || !appId || !apiKey) return missing
+        return [senderId: senderId, projectId: projectId, appId: appId, apiKey: apiKey]
+    } catch (Exception ignored) {
+        return missing
+    }
+}
+def fcmConfig = loadFcmConfig()
+
+// Escape a raw JSON string value for embedding in a Java string literal:
+// without this a backslash or double-quote (or control character) in a
+// sender field would break the generated BuildConfig or inject code.
+def escJavaString(String s) {
+    StringBuilder out = new StringBuilder(s.length())
+    for (int i = 0; i < s.length(); i++) {
+        char c = s.charAt(i)
+        switch (c) {
+            case '\\': out.append('\\\\'); break
+            case '"': out.append('\\"'); break
+            case '\n': out.append('\\n'); break
+            case '\r': out.append('\\r'); break
+            case '\t': out.append('\\t'); break
+            default: out.append(c); break
+        }
+    }
+    return out.toString()
+}
+
 android {
     namespace 'com.phonecompanion.app'
     compileSdk 34
@@ -19,6 +77,16 @@ android {
         targetSdk 34
         versionCode 1
         versionName '0.1.0-skeleton'
+
+        // Runtime Firebase init inputs (see notify/FirebaseInit). Real
+        // values only when the operator's local google-services.json was
+        // present at build time; TODO-OPERATOR placeholders otherwise.
+        // Values are Java-escaped (see escJavaString) so no sender field
+        // can break the generated BuildConfig literal.
+        buildConfigField 'String', 'FCM_SENDER_ID', "\"${escJavaString(fcmConfig.senderId)}\""
+        buildConfigField 'String', 'FCM_PROJECT_ID', "\"${escJavaString(fcmConfig.projectId)}\""
+        buildConfigField 'String', 'FCM_APP_ID', "\"${escJavaString(fcmConfig.appId)}\""
+        buildConfigField 'String', 'FCM_API_KEY', "\"${escJavaString(fcmConfig.apiKey)}\""
     }
 
     buildTypes {

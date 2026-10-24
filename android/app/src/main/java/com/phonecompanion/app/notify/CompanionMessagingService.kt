@@ -41,6 +41,23 @@ import kotlinx.coroutines.launch
 class CompanionMessagingService : FirebaseMessagingService() {
 
     /**
+     * Second FirebaseInit gate (the first is the enroll path in
+     * PairActivity.fetchFcmToken): the manifest-registered MESSAGING_EVENT
+     * path can run before any activity ever does, so the service ensures
+     * the default FirebaseApp on creation. Fail-closed inside try/catch —
+     * rotation/upload below are already best-effort and never throw.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        try {
+            FirebaseInit.ensure(this)
+        } catch (_: Exception) {
+            // Fail closed: onNewToken/onMessageReceived already tolerate
+            // an unconfigured FirebaseApp (persist-only + backfill retry).
+        }
+    }
+
+    /**
      * FCM token rotation: persist immediately, then upload when paired so
      * the server row tracks the live token (enroll carries the token too,
      * but rotation happens outside pairing). Best-effort: any failure —
