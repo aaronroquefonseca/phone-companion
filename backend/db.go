@@ -103,8 +103,14 @@ func Migrate(db *sql.DB) error {
 		token_hash TEXT PRIMARY KEY,
 		expires_at TEXT NOT NULL,
 		used INTEGER NOT NULL DEFAULT 0,
-		created_at TEXT NOT NULL
+		created_at TEXT NOT NULL,
+		paired_device_id TEXT
 	)`); err != nil {
+		return err
+	}
+	// Old databases created before paired_device_id existed keep working:
+	// the column is added idempotently (live-pairing poll + rename link).
+	if err := ensureEnrollTokensPairedColumn(db); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_devices_token_hash ON devices (token_hash)`); err != nil {

@@ -19,6 +19,12 @@ type fakeStore struct {
 	listErr  error
 	rawToken string
 	issueErr error
+	// renameFound/renameErr script RenameDevice; tokenStatus/tokenStatusErr
+	// script TokenStatus.
+	renameFound    bool
+	renameErr      error
+	tokenStatus    TokenStatus
+	tokenStatusErr error
 }
 
 func (f *fakeStore) IssueEnrollToken(_ context.Context, _ time.Duration) (string, time.Time, error) {
@@ -38,6 +44,20 @@ func (f *fakeStore) RevokeDevice(_ context.Context, _ string) (bool, error) {
 
 func (f *fakeStore) PurgeDevice(_ context.Context, _ string) (bool, error) {
 	return true, nil
+}
+
+func (f *fakeStore) RenameDevice(_ context.Context, _, _ string) (bool, error) {
+	if f.renameErr != nil {
+		return false, f.renameErr
+	}
+	return f.renameFound, nil
+}
+
+func (f *fakeStore) TokenStatus(_ context.Context, _ string) (TokenStatus, error) {
+	if f.tokenStatusErr != nil {
+		return TokenStatus{}, f.tokenStatusErr
+	}
+	return f.tokenStatus, nil
 }
 
 type fakeLister struct {

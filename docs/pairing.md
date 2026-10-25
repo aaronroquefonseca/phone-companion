@@ -32,6 +32,13 @@ the page fetches one fresh token via the mint endpoint (page CSRF token,
 `Accept: application/json`): a single request per ~14 min, never a tight
 loop; on failure (e.g. `429`) it says so and stops.
 
+While a token is displayed the page also polls
+`GET /webui/pair/token-status?token_hash=<sha256>` every ~3 s (session
+only, no CSRF — read-only like the devices list). When the phone enrolls,
+the QR hides and a `Paired <name> (<id>)` banner takes its place while the
+device list refreshes in place — no manual reload. Polling stops on
+used/expired and backs off on `429`.
+
 ## Pair a second phone, target one
 
 Repeat the flow on another phone — the registry holds one row per device.
@@ -60,6 +67,11 @@ skipped silently. `{"target":{"all":true}}` fans out to every live row.
   the first POST renders a confirm interstitial naming the device;
   confirming revokes and flashes `?revoked=<name>`. Unknown ids redirect
   with `?error=device_not_found`.
+- WebUI: the **Rename** disclosure per device row (active and revoked)
+  renames in place (`POST /webui/pair/rename`, CSRF-guarded). Names must
+  be 1–200 bytes of single-line text (emoji/CJK fine); bad names redirect
+  with `?error=invalid_name` and success flashes `?renamed=<name>`.
+  Renaming is idempotent and never un-revokes.
 - The registry hides revoked rows by default; `Show revoked (N)` reveals
   them dimmed. Revoked rows offer **Purge** (two-step confirm hard-delete,
   `?purged=<name>`); active rows refuse purge (`?error=not_revoked`).
