@@ -53,6 +53,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
 // EnrollTokenTTL is how long a single-use pairing token from the WebUI QR
@@ -401,6 +403,174 @@ func FindSiblingDeviceIDs(db *sql.DB, deviceName, exceptID string) ([]string, er
 	return out, nil
 }
 
+// RenameDevice renames a registry row (active or revoked) to newName,
+// stamping updated_at like any other row mutation. The name rules are the
+// WebUI's canonical ones (webui.ValidateDeviceName: trimmed, non-empty, at
+// most maxDeviceNameBytes, valid UTF-8, no ASCII control characters) —
+// invalid names report webui.ErrInvalidDeviceName so callers map them to a
+// 4xx operator error, never a 500. Idempotent: renaming to the current name
+// succeeds. Unknown IDs report found=false.
+func RenameDevice(db *sql.DB, id, newName string) (found bool, err error) {
+	if err := ensureDevicesUpdatedAtColumn(db); err != nil {
+		return false, err
+	}
+	name, err := webui.ValidateDeviceName(newName)
+	if err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+	res, err := db.Exec(
+		`UPDATE devices SET name = ?, updated_at = ? WHERE id = ?`,
+		name, formatTime(utcNow()), id)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return false, err
+	} else if n == 1 {
+		return true, nil
+	}
+	// Zero rows touched: either unknown, or the row already carries this
+	// exact name (idempotent no-op). Distinguish via lookup.
+	var one int
+	if err := db.QueryRow(`SELECT 1 FROM devices WHERE id = ?`, id).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// ensureEnrollTokensPairedColumn adds enroll_tokens.paired_device_id when
+// missing, so the live-pairing token→device link works on databases
+// migrated before this column existed. Idempotent: a second call is a
+// no-op. Same PRAGMA pattern as ensureDevicesUpdatedAtColumn.
+func ensureEnrollTokensPairedColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(enroll_tokens)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var cid int
+	var name, ctype string
+	var notnull, pk int
+	var dflt sql.NullString
+	for rows.Next() {
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "paired_device_id" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE enroll_tokens ADD COLUMN paired_device_id TEXT`)
+	return err
+}
+
+// linkEnrollTokenDevice records which device row a single-use enroll token
+// produced, so the WebUI live-pairing poll can name the paired phone. The
+// token is already consumed and the device already created when this runs —
+// callers treat a link failure as best-effort (the enroll response must
+// stay 201: the phone holds credentials a failed response would strand,
+// since the same token replays 410). An unlinked-but-used token simply
+// reports used without a device name.
+func linkEnrollTokenDevice(db *sql.DB, rawToken, deviceID string) error {
+	if err := ensureEnrollTokensPairedColumn(db); err != nil {
+		return err
+	}
+	_, err := db.Exec(
+		`UPDATE enroll_tokens SET paired_device_id = ? WHERE token_hash = ?`,
+		deviceID, sha256Hex(rawToken))
+	return err
+}
+
+// Token status vocabulary for the live-pairing poll. The literals must
+// match webui.TokenLive/TokenUsed/TokenExpired/TokenUnknown — the adapter
+// in pair_wire.go maps them and degrades anything else to unknown.
+const (
+	tokenStatusLive    = "live"
+	tokenStatusUsed    = "used"
+	tokenStatusExpired = "expired"
+	tokenStatusUnknown = "unknown"
+)
+
+// TokenStatusReport is one enroll token's poll state: whether the QR still
+// works (live), was consumed by a pairing (used, naming the device row), is
+// past its expiry (expired), or is gone (unknown — bogus hash, or pruned
+// after a later mint swept used/expired rows). ExpiresAt is zero unless
+// live.
+type TokenStatusReport struct {
+	Status     string
+	DeviceID   string
+	DeviceName string
+	ExpiresAt  time.Time
+	Found      bool
+}
+
+// EnrollTokenStatus reads the poll state for one enroll token hash
+// (lowercase hex of SHA-256 over the raw token — the stored form, never the
+// raw secret). Malformed hashes report unknown with no error; database
+// failure is the only error path.
+func EnrollTokenStatus(db *sql.DB, tokenHash string) (TokenStatusReport, error) {
+	var rep TokenStatusReport
+	tokenHash = strings.ToLower(strings.TrimSpace(tokenHash))
+	if tokenHash == "" {
+		rep.Status = tokenStatusUnknown
+		return rep, nil
+	}
+	if err := ensureEnrollTokensPairedColumn(db); err != nil {
+		return rep, err
+	}
+	var expires string
+	var used int
+	var paired sql.NullString
+	err := db.QueryRow(
+		`SELECT expires_at, used, paired_device_id FROM enroll_tokens WHERE token_hash = ?`,
+		tokenHash).Scan(&expires, &used, &paired)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			rep.Status = tokenStatusUnknown
+			return rep, nil
+		}
+		return rep, err
+	}
+	rep.Found = true
+	if used != 0 {
+		rep.Status = tokenStatusUsed
+		if paired.Valid && paired.String != "" {
+			// The device row may be gone (purged after pairing): the
+			// token stays used, just unnamed.
+			var name sql.NullString
+			if err := db.QueryRow(
+				`SELECT name FROM devices WHERE id = ?`, paired.String).Scan(&name); err == nil && name.Valid {
+				rep.DeviceID, rep.DeviceName = paired.String, name.String
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return rep, err
+			} else {
+				rep.DeviceID = paired.String
+			}
+		}
+		return rep, nil
+	}
+	// Unused: live only while unexpired. Unparseable timestamps fail
+	// closed to expired (never claim a QR works when its row is suspect) —
+	// the same direction as consumeEnrollToken's SQL expiry check.
+	if exp, err := time.Parse(time.RFC3339, expires); err == nil && exp.After(utcNow()) {
+		rep.Status = tokenStatusLive
+		rep.ExpiresAt = exp
+		return rep, nil
+	}
+	rep.Status = tokenStatusExpired
+	return rep, nil
+}
+
 // RevokeDevice marks a device revoked; subsequent AuthenticateDevice calls
 // fail (immediate effect on the same DB). Idempotent: revoking an already
 // revoked device succeeds. Unknown IDs report found=false.
@@ -555,6 +725,9 @@ func HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Link the consumed token to its device row for the WebUI live-pairing
+	// poll (see linkEnrollTokenDevice: best-effort by design).
+	_ = linkEnrollTokenDevice(deviceDB, strings.TrimSpace(req.EnrollToken), deviceID)
 	// Only the opaque device ID is safe to log; the bearer token and the
 	// per-device key are shown once below and never logged.
 	w.Header().Set("Content-Type", "application/json")

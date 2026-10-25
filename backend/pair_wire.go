@@ -25,7 +25,10 @@ import (
 //   - Every other route here is operator-only behind webui.RequireAdmin:
 //     POST /api/v1/enroll-tokens (issue), GET /api/v1/devices (list),
 //     DELETE /api/v1/devices/{id} (revoke), GET /webui/pair,
-//     POST /webui/pair/revoke (CSRF-guarded form).
+//     POST /webui/pair/revoke (CSRF-guarded form),
+//     GET /webui/pair/token-status (live-pairing poll, read-only: session
+//     only, no CSRF — same as GET /api/v1/devices),
+//     POST /webui/pair/rename (CSRF-guarded form, same as revoke).
 //   - POST /api/v1/enroll-tokens, DELETE /api/v1/devices/{id}, and
 //     POST /api/v1/notify additionally require explicit
 //     non-browser intent via requireAPIWriteGuard (X-Requested-With or
@@ -66,6 +69,12 @@ func RegisterPairingRoutes(mux *http.ServeMux, sessions webui.SessionStore, csrf
 	})))
 	mux.Handle("POST /webui/pair/revoke", webui.RequireAdmin(sessions, webui.HandlePairRevoke(store, csrf)))
 	mux.Handle("POST /webui/pair/purge", webui.RequireAdmin(sessions, webui.HandlePairPurge(store, csrf)))
+	// Live pairing detection: the QR panel polls this read-only endpoint
+	// (~3s, only while a token is displayed) until the token is used or
+	// expired. No CSRF: safe GET, same as the devices list.
+	mux.Handle("GET /webui/pair/token-status", webui.RequireAdmin(sessions, webui.HandleTokenStatus(store)))
+	// Post-pairing rename: CSRF-guarded form POST, same pattern as revoke.
+	mux.Handle("POST /webui/pair/rename", webui.RequireAdmin(sessions, webui.HandlePairRename(store, csrf)))
 }
 
 // denyAllSessions fails closed when RegisterPairingRoutes is miswired with
@@ -125,6 +134,36 @@ func (webuiStoreAdapter) PurgeDevice(_ context.Context, id string) (bool, error)
 		return false, errors.New("device DB not wired")
 	}
 	return PurgeDevice(deviceDB, id)
+}
+
+func (webuiStoreAdapter) RenameDevice(_ context.Context, id, name string) (bool, error) {
+	if deviceDB == nil {
+		return false, errors.New("device DB not wired")
+	}
+	return RenameDevice(deviceDB, id, name)
+}
+
+func (webuiStoreAdapter) TokenStatus(_ context.Context, tokenHash string) (webui.TokenStatus, error) {
+	if deviceDB == nil {
+		return webui.TokenStatus{}, errors.New("device DB not wired")
+	}
+	rep, err := EnrollTokenStatus(deviceDB, tokenHash)
+	if err != nil {
+		return webui.TokenStatus{}, err
+	}
+	st := webui.TokenStatus{Status: webui.TokenUnknown}
+	switch rep.Status {
+	case tokenStatusLive, tokenStatusUsed, tokenStatusExpired:
+		st.Status = rep.Status
+	}
+	if st.Status == tokenStatusLive && !rep.ExpiresAt.IsZero() {
+		st.ExpiresAt = formatTime(rep.ExpiresAt)
+		st.ExpiresEpoch = rep.ExpiresAt.Unix()
+	}
+	if st.Status == tokenStatusUsed {
+		st.DeviceID, st.DeviceName = rep.DeviceID, rep.DeviceName
+	}
+	return st, nil
 }
 
 // apiWriteHeader is the conventional non-browser marker required on
