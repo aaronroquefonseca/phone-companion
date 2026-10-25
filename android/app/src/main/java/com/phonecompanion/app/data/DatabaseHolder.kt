@@ -50,11 +50,29 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
 }
 
 /**
+ * v3 -> v4: collapse the four per-type widget providers into the single
+ * `CompanionWidget`. Data-only: no schema change. Deletes every binding
+ * row keyed to the removed provider classes — their home-screen instances
+ * are gone with their receivers, so the pins can never render again;
+ * fresh instances bind on place/tap. Keeps only rows already keyed to the
+ * single provider (none can exist yet on upgrade, but the predicate keeps
+ * the migration idempotent and future-safe).
+ */
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "DELETE FROM `widget_binding` WHERE `providerClass` != " +
+                "'com.phonecompanion.app.widgets.CompanionWidget'",
+        )
+    }
+}
+
+/**
  * Process-wide Room singleton shared by the widgets and the poller.
  *
- * Uses the real [MIGRATION_1_2] and [MIGRATION_2_3] — never
- * fallbackToDestructiveMigration, so a version bump cannot silently wipe
- * the widget cache. Callers must NOT close the returned instance.
+ * Uses the real [MIGRATION_1_2], [MIGRATION_2_3], and [MIGRATION_3_4] —
+ * never fallbackToDestructiveMigration, so a version bump cannot silently
+ * wipe the widget cache. Callers must NOT close the returned instance.
  */
 object DatabaseHolder {
     @Volatile
@@ -66,6 +84,6 @@ object DatabaseHolder {
                 context.applicationContext,
                 AppDatabase::class.java,
                 DB_NAME,
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
         }
 }

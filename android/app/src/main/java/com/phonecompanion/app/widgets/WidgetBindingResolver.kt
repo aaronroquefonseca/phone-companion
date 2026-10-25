@@ -6,7 +6,7 @@ import com.phonecompanion.app.data.WidgetCacheEntity
 import kotlinx.coroutines.CancellationException
 
 /**
- * Per-instance row selection for the four Glance widgets.
+ * Per-instance row selection for the home-screen widget.
  *
  * Each home-screen instance carries its own binding (`widget_binding`
  * row), so adding/removing one widget never reshuffles the others. All

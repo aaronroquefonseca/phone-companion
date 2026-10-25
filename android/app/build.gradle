@@ -48,6 +48,25 @@ def loadFcmConfig() {
 }
 def fcmConfig = loadFcmConfig()
 
+// Short git SHA baked into BuildConfig for bug reports (About screen).
+// Best-effort at build time: any failure (no git, shallow export without
+// .git, unexpected output) falls back to "dev" so the build stays green.
+def loadGitSha() {
+    try {
+        def out = new ByteArrayOutputStream()
+        exec {
+            commandLine 'git', 'rev-parse', '--short', 'HEAD'
+            standardOutput = out
+        }
+        def sha = out.toString().trim()
+        if (sha ==~ /[0-9a-f]{4,40}/) return sha
+        return 'dev'
+    } catch (Exception ignored) {
+        return 'dev'
+    }
+}
+def gitSha = loadGitSha()
+
 // Escape a raw JSON string value for embedding in a Java string literal:
 // without this a backslash or double-quote (or control character) in a
 // sender field would break the generated BuildConfig or inject code.
@@ -87,6 +106,9 @@ android {
         buildConfigField 'String', 'FCM_PROJECT_ID', "\"${escJavaString(fcmConfig.projectId)}\""
         buildConfigField 'String', 'FCM_APP_ID', "\"${escJavaString(fcmConfig.appId)}\""
         buildConfigField 'String', 'FCM_API_KEY', "\"${escJavaString(fcmConfig.apiKey)}\""
+        // About-screen build identity (see ui/AppVersion). "dev" when git
+        // metadata is unavailable at build time.
+        buildConfigField 'String', 'GIT_SHA', "\"${escJavaString(gitSha)}\""
     }
 
     buildTypes {

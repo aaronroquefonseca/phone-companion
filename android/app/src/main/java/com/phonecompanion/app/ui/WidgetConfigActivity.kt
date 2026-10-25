@@ -29,8 +29,8 @@ import kotlinx.coroutines.launch
  * instance shows.
  *
  * Two entry modes, one chooser:
- * - Placement: the launcher opens this (see `android:configure` on all
- *   four widget_info XML files) with `EXTRA_APPWIDGET_ID`. The
+ * - Placement: the launcher opens this (see `android:configure` on the
+ *   single widget_info XML file) with `EXTRA_APPWIDGET_ID`. The
  *   provider is looked up from [AppWidgetManager.getAppWidgetInfo]; the
  *   user picks a row (or leaves the widget unassociated), the binding is
  *   stored, an immediate push is requested, and the activity returns
@@ -41,10 +41,11 @@ import kotlinx.coroutines.launch
  *   instance button, opens this via [editIntent] with the provider class
  *   and Glance key. Saving re-points the binding and pushes the instance.
  *
- * A stale pin (cached row gone from the server) shows its `was-<old id>`
- * re-point hint so the user knows which row disappeared. An empty cache
- * explains itself and offers only "Not associated". Secret rows are listed
- * by title like every other type (titles only, never values).
+ * The chooser lists every cached row (any type); secret rows are listed
+ * by title like every other type (titles only, never values). A stale pin
+ * (cached row gone from the server) shows its `was-<old id>` re-point
+ * hint so the user knows which row disappeared. An empty cache explains
+ * itself and offers only "Not associated".
  */
 class WidgetConfigActivity : AppCompatActivity() {
 
@@ -175,7 +176,7 @@ class WidgetConfigActivity : AppCompatActivity() {
             val pinned: String?
             try {
                 val db = DatabaseHolder.get(this@WidgetConfigActivity)
-                rows = db.widgetCacheDao().getByType(entry.type)
+                rows = db.widgetCacheDao().getAll()
                 pinned = db.widgetBindingDao().get(entry.providerClass, glanceKey)?.widgetId
             } catch (e: CancellationException) {
                 throw e
@@ -193,7 +194,7 @@ class WidgetConfigActivity : AppCompatActivity() {
             }
             hintView.visibility = if (staleHint != null) View.VISIBLE else View.GONE
             noteView.text = if (rows.isEmpty()) {
-                "No cached ${entry.type} rows yet — open Widgets to refresh first."
+                "No cached rows yet — open Widgets to refresh first."
             } else {
                 ""
             }
@@ -239,7 +240,7 @@ class WidgetConfigActivity : AppCompatActivity() {
             val freshRows: List<WidgetCacheEntity>
             try {
                 freshRows = DatabaseHolder.get(this@WidgetConfigActivity).widgetCacheDao()
-                    .getByType(entry.type)
+                    .getAll()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -329,8 +330,9 @@ class WidgetConfigActivity : AppCompatActivity() {
                 return entry to keyExtra
             }
             if (appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) return null
-            // The manager reports the *receiver* class (TextWidgetReceiver),
-            // while bindings key on the widget class (TextWidget.PROVIDER).
+            // The manager reports the *receiver* class
+            // (CompanionWidgetReceiver), while bindings key on the widget
+            // class (CompanionWidget.PROVIDER).
             val entry = managerProviderClass?.let(WidgetDirectory::forReceiverClass)
                 ?: return null
             return entry to null

@@ -133,53 +133,50 @@ class WidgetsActivity : AppCompatActivity() {
 
     /**
      * Per-instance assignment section: one header + one human-labelled
-     * button per bound home-screen instance of each type. Tapping a button
-     * opens the configuration chooser for that instance; saving there
-     * re-renders this screen on resume. Binding reads and Glance
-     * enumeration are best-effort (miss reads as unassociated); a failed
-     * section renders its note instead of blocking the others.
+     * button per bound home-screen instance. Tapping a button opens the
+     * configuration chooser for that instance; saving there re-renders
+     * this screen on resume. Binding reads and Glance enumeration are
+     * best-effort (miss reads as unassociated); a failed section renders
+     * its note instead of blocking the others.
      */
     private suspend fun renderInstances(cached: List<WidgetCacheEntity>) {
         instancesContainer.removeAllViews()
-        val rowsByType = cached.groupBy { it.type }
-        for (entry in WidgetDirectory.entries) {
-            val rows = rowsByType[entry.type].orEmpty()
-            val header = TextView(this).apply {
-                text = "${entry.label} widgets on home screen"
-            }
-            instancesContainer.addView(header)
-            val bound = boundInstances(entry)
-            if (bound == null) {
-                instancesContainer.addView(TextView(this).apply {
-                    text = "(${entry.label} instances unreadable — showing cached rows only)"
-                })
-                continue
-            }
-            if (bound.isEmpty()) {
-                instancesContainer.addView(TextView(this).apply {
-                    text = "(none — long-press home screen → Widgets to add one)"
-                })
-                continue
-            }
-            val bindings = bindingsFor(entry.providerClass)
-            for (id in bound) {
-                val key = glanceKey(id)
-                val pinned = bindings[key]
-                val hint = WidgetBindingResolver.staleHint(rows, pinned)
-                val button = Button(this).apply {
-                    text = WidgetListUi.instanceLabel(entry.label, rows, pinned, hint)
-                    setOnClickListener {
-                        startActivity(
-                            WidgetConfigActivity.editIntent(
-                                this@WidgetsActivity,
-                                entry.providerClass,
-                                key,
-                            ),
-                        )
-                    }
+        val entry = WidgetDirectory.entries.single()
+        val header = TextView(this).apply {
+            text = "Widgets on home screen"
+        }
+        instancesContainer.addView(header)
+        val bound = boundInstances(entry)
+        if (bound == null) {
+            instancesContainer.addView(TextView(this).apply {
+                text = "(instances unreadable — showing cached rows only)"
+            })
+            return
+        }
+        if (bound.isEmpty()) {
+            instancesContainer.addView(TextView(this).apply {
+                text = "(none — long-press home screen → Widgets to add one)"
+            })
+            return
+        }
+        val bindings = bindingsFor(entry.providerClass)
+        for (id in bound) {
+            val key = glanceKey(id)
+            val pinned = bindings[key]
+            val hint = WidgetBindingResolver.staleHint(cached, pinned)
+            val button = Button(this).apply {
+                text = WidgetListUi.instanceLabel(entry.label, cached, pinned, hint)
+                setOnClickListener {
+                    startActivity(
+                        WidgetConfigActivity.editIntent(
+                            this@WidgetsActivity,
+                            entry.providerClass,
+                            key,
+                        ),
+                    )
                 }
-                instancesContainer.addView(button)
             }
+            instancesContainer.addView(button)
         }
     }
 

@@ -61,46 +61,17 @@
             </intent-filter>
         </service>
 
-        <!-- Glance widget receivers. Per-type widgets (P7); shared poll feeds them. -->
+        <!-- Single Glance widget receiver. One picker entry ("Widget");
+              placement and tap-to-configure choose any cached row. -->
         <receiver
-            android:name=".widgets.TextWidgetReceiver"
+            android:name=".widgets.CompanionWidgetReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
-                android:resource="@xml/text_widget_info" />
-        </receiver>
-        <receiver
-            android:name=".widgets.SecretWidgetReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/secret_widget_info" />
-        </receiver>
-        <receiver
-            android:name=".widgets.ListWidgetReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/list_widget_info" />
-        </receiver>
-        <receiver
-            android:name=".widgets.StatusWidgetReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/status_widget_info" />
+                android:resource="@xml/widget_info" />
         </receiver>
     </application>
 </manifest>

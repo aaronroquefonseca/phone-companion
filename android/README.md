@@ -15,11 +15,12 @@ notifications. Contract: `docs/api-contract.md`.
   (kinds registry: `note`/`alert`, generic fallback for unknown kinds),
   `NotificationImages` (HTTPS `BigPictureStyle`, fails closed to
   `BigTextStyle`).
-- `widgets/` — one Glance implementation per type (`TextWidget`,
-  `ListWidget`, `StatusWidget`, `SecretWidget` + `SecretCrypto`
-  for per-device decrypt), never fully-generic. Per-instance row
-  selection via `WidgetBindingResolver` + the `widget_binding` table
-  (pinned in the Widgets screen).
+- `widgets/` — the single home-screen Glance widget (`CompanionWidget`
+  + `SecretCrypto` for per-device decrypt), with per-type render paths
+  (`WidgetContent` text/list/status/secret builders — never a
+  fully-generic renderer). Per-instance row selection via
+  `WidgetBindingResolver` + the `widget_binding` table (pinned in the
+  Widgets screen).
 - `work/` — `RefreshWorker` (hourly `WorkManager` poll: needs network +
   battery-not-low; screen-off returns retry, no exact alarms),
   `WidgetPoller` (shared fetch plumbing).
@@ -114,32 +115,34 @@ Backend side: `FCM_PROJECT_ID` + service-account JSON at
 
 - Phone screen: open Widgets (refreshes from cache on open; "Refresh
   now" button; hourly background poll when the screen is on). Each
-  home-screen instance gets a human-labelled button (type + chosen row
+  home-screen instance gets a human-labelled button (pinned row type +
   title, or "Not associated"); tapping it opens the same row chooser as
   placement.
-- Home screen: long-press → Widgets → Phone Companion → place per-type
-  widget. Placement opens the configuration: pick one cached row of that
-  type (title + id + human updated-at) or leave the widget unassociated,
-  then it updates immediately. Cancelling stores nothing — the widget
-  stays explicitly unassociated. Secret widgets render `•••••• needs
-  refresh` whenever decrypt fails (wrong key after re-pair, corrupt
-  payload) — never plaintext, never a crash; the next poll after a
-  re-pair fetches a freshly encrypted envelope.
+- Home screen: long-press → Widgets → Phone Companion → place the one
+  "Widget" entry. Placement opens the configuration: pick any cached row
+  (text/secret/list/status — title + id + human updated-at) or leave the
+  widget unassociated, then it updates immediately. Cancelling stores
+  nothing — the widget stays explicitly unassociated. Secret widgets
+  render `•••••• needs refresh` whenever decrypt fails (wrong key after
+  re-pair, corrupt payload) — never plaintext, never a crash; the next
+  poll after a re-pair fetches a freshly encrypted envelope.
 
 ## Per-instance widget selection
 
 Each home-screen widget shows exactly the cached row chosen for it at
 placement: tap the widget (when it shows "Not associated") or its button
 in the Widgets screen to open the chooser, and pick a row (or
-"Not associated" to clear the pick). Two instances of the same type may
-show the same row. A widget with no pick never shows another row's
-content. The Widgets screen and the chooser name rows by title + id +
-updated-at in human words — raw home-screen instance ids are never shown.
+"Not associated" to clear the pick). Two instances may show the same row.
+A widget with no pick never shows another row's content. The Widgets
+screen and the chooser name rows by title + id + updated-at in human
+words — raw home-screen instance ids are never shown.
 
 Where it is stored: the Room `widget_binding` table in the app database
 (`phone-companion.db`) maps one home-screen instance — provider class +
 Glance key — to one cached widget id (`widgetId` NULL = explicitly
-unassociated). There is no foreign key to the widget cache on purpose.
+unassociated). There is one provider class now (`CompanionWidget`);
+bindings keyed to the removed per-type providers were deleted by the v4
+migration. There is no foreign key to the widget cache on purpose.
 
 Gone-widget behavior: when the associated widget disappears from the
 server, the instance shows the unassociated state (never a stale render)

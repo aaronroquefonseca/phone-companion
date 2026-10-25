@@ -1,6 +1,7 @@
 package com.phonecompanion.app.ui
 
 import android.appwidget.AppWidgetManager
+import com.phonecompanion.app.widgets.CompanionWidget
 import com.phonecompanion.app.widgets.WidgetDirectory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -10,22 +11,22 @@ import org.junit.Test
 /**
  * Configuration routing: placement (system `android:configure`) and
  * re-configure (unassociated tap / Widgets-screen button) both resolve to
- * exactly one provider entry, or nothing (activity finishes cancelled and
+ * the single widget entry, or nothing (activity finishes cancelled and
  * stores nothing — the widget stays explicitly unassociated).
  */
 class WidgetConfigTargetTest {
 
-    private val textProvider = "com.phonecompanion.app.widgets.TextWidget"
+    private val provider = CompanionWidget.PROVIDER
 
     @Test
     fun `tap mode resolves provider plus glance key`() {
         val (entry, key) = WidgetConfigActivity.resolveTarget(
-            providerExtra = textProvider,
+            providerExtra = provider,
             keyExtra = "AppWidgetId(appWidgetId=51)",
             appWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID,
             managerProviderClass = null,
         )!!
-        assertEquals("text", entry.type)
+        assertEquals("all", entry.type)
         assertEquals("AppWidgetId(appWidgetId=51)", key)
     }
 
@@ -41,7 +42,7 @@ class WidgetConfigTargetTest {
         )
         assertNull(
             WidgetConfigActivity.resolveTarget(
-                providerExtra = textProvider,
+                providerExtra = provider,
                 keyExtra = null,
                 appWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID,
                 managerProviderClass = null,
@@ -49,7 +50,7 @@ class WidgetConfigTargetTest {
         )
         assertNull(
             WidgetConfigActivity.resolveTarget(
-                providerExtra = textProvider,
+                providerExtra = provider,
                 keyExtra = "",
                 appWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID,
                 managerProviderClass = null,
@@ -58,29 +59,57 @@ class WidgetConfigTargetTest {
     }
 
     @Test
-    fun `placement mode resolves via the managers receiver class`() {
+    fun `tap mode rejects the removed per-type providers`() {
+        for (old in listOf("TextWidget", "SecretWidget", "ListWidget", "StatusWidget")) {
+            assertNull(
+                WidgetConfigActivity.resolveTarget(
+                    providerExtra = "com.phonecompanion.app.widgets.$old",
+                    keyExtra = "AppWidgetId(appWidgetId=51)",
+                    appWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID,
+                    managerProviderClass = null,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `placement mode resolves via the single receiver class`() {
         val (entry, key) = WidgetConfigActivity.resolveTarget(
             providerExtra = null,
             keyExtra = null,
             appWidgetId = 51,
-            managerProviderClass = "com.phonecompanion.app.widgets.SecretWidgetReceiver",
+            managerProviderClass = "com.phonecompanion.app.widgets.CompanionWidgetReceiver",
         )!!
-        assertEquals("secret", entry.type)
+        assertEquals("all", entry.type)
         assertNull(key)
     }
 
     @Test
     fun `placement mode rejects widget class names that are not receivers`() {
-        // The manager reports TextWidgetReceiver, never the TextWidget
-        // binding key — a widget class name must not resolve here.
+        // The manager reports CompanionWidgetReceiver, never the widget
+        // class binding key — a widget class name must not resolve here.
         assertNull(
             WidgetConfigActivity.resolveTarget(
                 providerExtra = null,
                 keyExtra = null,
                 appWidgetId = 51,
-                managerProviderClass = "com.phonecompanion.app.widgets.SecretWidget",
+                managerProviderClass = "com.phonecompanion.app.widgets.CompanionWidget",
             ),
         )
+    }
+
+    @Test
+    fun `placement mode rejects the removed per-type receivers`() {
+        for (old in listOf("TextWidgetReceiver", "SecretWidgetReceiver", "ListWidgetReceiver", "StatusWidgetReceiver")) {
+            assertNull(
+                WidgetConfigActivity.resolveTarget(
+                    providerExtra = null,
+                    keyExtra = null,
+                    appWidgetId = 51,
+                    managerProviderClass = "com.phonecompanion.app.widgets.$old",
+                ),
+            )
+        }
     }
 
     @Test
@@ -112,17 +141,17 @@ class WidgetConfigTargetTest {
     }
 
     @Test
-    fun `directory covers all four types exactly once`() {
+    fun `directory holds exactly the single widget entry`() {
         val entries = WidgetDirectory.entries
-        assertEquals(listOf("text", "secret", "list", "status"), entries.map { it.type })
-        assertEquals(4, entries.map { it.providerClass }.toSet().size)
-        assertEquals(4, entries.map { it.receiverClass }.toSet().size)
-        assertEquals(4, entries.map { it.label }.toSet().size)
-        for (entry in entries) {
-            assertNotNull(WidgetDirectory.forType(entry.type))
-            assertNotNull(WidgetDirectory.forProviderClass(entry.providerClass))
-            assertNotNull(WidgetDirectory.forReceiverClass(entry.receiverClass.name))
-        }
+        assertEquals(1, entries.size)
+        val entry = entries.single()
+        assertEquals("all", entry.type)
+        assertEquals(provider, entry.providerClass)
+        assertEquals("Widget", entry.label)
+        assertNotNull(WidgetDirectory.forType("all"))
+        assertNotNull(WidgetDirectory.forProviderClass(provider))
+        assertNotNull(WidgetDirectory.forReceiverClass(entry.receiverClass.name))
+        assertNull(WidgetDirectory.forType("text"))
         assertNull(WidgetDirectory.forType("teleport"))
         assertNull(WidgetDirectory.forProviderClass("com.example.Nope"))
         assertNull(WidgetDirectory.forReceiverClass("com.example.Nope"))
