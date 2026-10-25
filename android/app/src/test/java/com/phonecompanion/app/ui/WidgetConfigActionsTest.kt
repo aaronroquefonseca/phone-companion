@@ -56,7 +56,7 @@ class WidgetConfigActionsTest {
         payloadJson = """{"body":"$id"}""",
     )
 
-    private val entry = WidgetDirectory.forType("text")!!
+    private val entry = WidgetDirectory.entries.single()
     private val glanceKey = "AppWidgetId(appWidgetId=51)"
 
     @Test
@@ -91,7 +91,34 @@ class WidgetConfigActionsTest {
 
         assertEquals(WidgetConfigActions.Outcome.Saved("b"), outcome)
         assertEquals("b", dao.get(entry.providerClass, glanceKey)!!.widgetId)
+        assertEquals("text", dao.get(entry.providerClass, glanceKey)!!.widgetType)
         assertEquals(listOf(entry.providerClass to glanceKey), pusher.pushes)
+    }
+
+    @Test
+    fun `save mirrors the picked rows cache type not the entry type`() = run {
+        val dao = FakeDao()
+        val pusher = FakePusher()
+        val rows = listOf(
+            row("a").copy(type = "secret"),
+            row("b").copy(type = "status"),
+        )
+
+        val outcome = WidgetConfigActions.save(
+            dao = dao,
+            pusher = pusher,
+            entry = entry,
+            glanceKey = glanceKey,
+            freshRows = rows,
+            pending = WidgetChooser.PendingPick.Chosen("b"),
+            fallbackPosition = 0,
+            snapshotRows = rows,
+            optionsLoaded = true,
+        )
+
+        assertEquals(WidgetConfigActions.Outcome.Saved("b"), outcome)
+        assertEquals("status", dao.get(entry.providerClass, glanceKey)!!.widgetType)
+        assertEquals(1, pusher.pushes.size)
     }
 
     @Test
@@ -113,6 +140,7 @@ class WidgetConfigActionsTest {
 
         assertEquals(WidgetConfigActions.Outcome.Saved(null), outcome)
         assertNull(dao.get(entry.providerClass, glanceKey)!!.widgetId)
+        assertEquals("none", dao.get(entry.providerClass, glanceKey)!!.widgetType)
         assertEquals(1, pusher.pushes.size)
     }
 

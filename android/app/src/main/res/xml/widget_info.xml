@@ -1,20 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Text widget: wide card for a title + body. Tap opens the app (bound:
+<!-- Single home-screen widget: shows whichever cached row the instance is
+      bound to (any type: text/secret/list/status). Tap opens the app (bound:
       tap router → Widgets screen when paired, Pair when unpaired;
       unassociated: the configuration activity to pick a row). Placing the
-      widget opens the configuration (android:configure): pick a cached
-      text row or leave it unassociated, then tap the widget to change it.
-      Clearing the pick (or a server-removed row) shows "Not associated". -->
+      widget opens the configuration (android:configure): pick any cached
+      row or leave it unassociated, then tap the widget to change it.
+      Clearing the pick (or a server-removed row) shows "Not associated".
+      No static preview: the picker shows icon + label + description only. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="40dp"
     android:minHeight="40dp"
     android:minResizeWidth="40dp"
     android:minResizeHeight="40dp"
-    android:targetCellWidth="3"
+    android:targetCellWidth="2"
     android:targetCellHeight="2"
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen"
     android:configure="com.phonecompanion.app.ui.WidgetConfigActivity"
-    android:label="@string/widget_text_label"
-    android:description="@string/widget_text_desc" />
+    android:label="@string/widget_label"
+    android:description="@string/widget_desc" />
 <!-- updatePeriodMillis=0: the app drives refresh via WorkManager. -->

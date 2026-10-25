@@ -45,6 +45,11 @@ object WidgetConfigActions {
      * [optionsLoaded] (the options DB read succeeded), so a failed render
      * can never wipe a pin via the no-check fallback.
      *
+     * The stored `widgetType` mirrors the picked row's cache type (or
+     * `"none"` for the explicitly-unassociated pick) so the assignment UI
+     * can group without joining; the renderer itself dispatches on the
+     * cached row's type at update time.
+     *
      * A failed pin propagates (the activity reports cancelled); a failed
      * push keeps the pin (see [WidgetBinder.pinAndPush]).
      */
@@ -70,7 +75,7 @@ object WidgetConfigActions {
             dao = dao,
             pusher = pusher,
             providerClass = entry.providerClass,
-            widgetType = entry.type,
+            widgetType = freshRows.find { it.id == widgetId }?.type ?: "none",
             glanceKey = glanceKey,
             widgetId = widgetId,
         )

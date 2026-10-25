@@ -7,12 +7,12 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Fix batch B: per-instance [SecretWidget] content.
+ * Fix batch B: per-instance [CompanionWidget] secret content.
  *
  * Row selection is the shared [WidgetBindingResolver.resolve] (same as the
- * other widgets); titles are bounded by
+ * other types); titles are bounded by
  * [WidgetPayloadParser.sanitizeTitle]. Resolution is fail-closed (null,
- * which the widget renders as [SecretWidget.MASKED]).
+ * which the widget renders as [CompanionWidget.MASKED]).
  */
 class SecretWidgetContentTest {
 

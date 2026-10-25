@@ -17,9 +17,11 @@ import org.junit.Test
 
 /**
  * Pins the structured-concurrency contract WidgetPoller.updateAllWidgets
- * relies on: [supervisorScope] isolates sibling failures while still
- * propagating parent cancellation — unlike a bare SupervisorJob(), which
- * detaches children from the parent scope so they outlive a dead worker.
+ * relies on: per-instance isolation (one broken instance cannot fail its
+ * siblings) while parent cancellation still propagates — unlike a bare
+ * SupervisorJob(), which detaches children from the parent scope so they
+ * outlive a dead worker. The first two tests pin the coroutine semantics;
+ * the third pins the poller's source shape.
  */
 class FanOutScopeTest {
 
@@ -73,7 +75,7 @@ class FanOutScopeTest {
     }
 
     @Test
-    fun `poller fans out under supervisorScope without detached SupervisorJobs`() {
+    fun `poller isolates per-instance failures without detached SupervisorJobs`() {
         val candidates = listOf(
             "src/main/java/com/phonecompanion/app/work/WidgetPoller.kt",
             "app/src/main/java/com/phonecompanion/app/work/WidgetPoller.kt",
@@ -82,10 +84,13 @@ class FanOutScopeTest {
         val source = candidates.map(::File).firstOrNull { it.isFile }
         assertTrue("WidgetPoller.kt not found from ${System.getProperty("user.dir")}", source != null)
         val text = source!!.readText()
-        assertTrue(text.contains("supervisorScope"))
         assertFalse(
             "bare SupervisorJob() detaches children from the parent scope",
             text.contains("SupervisorJob()"),
         )
+        // One try/catch per instance id: a broken instance logs
+        // shape-only and cannot fail its siblings.
+        assertTrue(text.contains("widget.update(context, id)"))
+        assertTrue(text.contains("update-failed"))
     }
 }

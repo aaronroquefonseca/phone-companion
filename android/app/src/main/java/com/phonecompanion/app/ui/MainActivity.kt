@@ -20,6 +20,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.phonecompanion.app.BuildConfig
 import com.phonecompanion.app.R
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
@@ -330,9 +331,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAbout() {
+        val body = getString(R.string.about_body) + "\n\n" +
+            AppVersion.line(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE, BuildConfig.GIT_SHA)
         AlertDialog.Builder(this)
             .setTitle(R.string.about_title)
-            .setMessage(R.string.about_body)
+            .setMessage(body)
             .setPositiveButton(android.R.string.ok, null)
             .show()
     }

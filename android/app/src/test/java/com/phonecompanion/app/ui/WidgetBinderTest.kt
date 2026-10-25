@@ -55,20 +55,20 @@ class WidgetBinderTest {
         WidgetBinder.pinAndPush(
             dao = dao,
             pusher = pusher,
-            providerClass = "com.phonecompanion.app.widgets.TextWidget",
+            providerClass = "com.phonecompanion.app.widgets.CompanionWidget",
             widgetType = "text",
             glanceKey = "AppWidgetId(appWidgetId=51)",
             widgetId = "hello",
         )
         val stored = dao.get(
-            "com.phonecompanion.app.widgets.TextWidget",
+            "com.phonecompanion.app.widgets.CompanionWidget",
             "AppWidgetId(appWidgetId=51)",
         )!!
         assertEquals("hello", stored.widgetId)
         assertEquals("text", stored.widgetType)
         assertEquals(
             listOf(
-                "com.phonecompanion.app.widgets.TextWidget" to "AppWidgetId(appWidgetId=51)",
+                "com.phonecompanion.app.widgets.CompanionWidget" to "AppWidgetId(appWidgetId=51)",
             ),
             pusher.pushes,
         )
@@ -81,12 +81,12 @@ class WidgetBinderTest {
         WidgetBinder.pinAndPush(
             dao = dao,
             pusher = pusher,
-            providerClass = "com.phonecompanion.app.widgets.TextWidget",
+            providerClass = "com.phonecompanion.app.widgets.CompanionWidget",
             widgetType = "text",
             glanceKey = "AppWidgetId(appWidgetId=51)",
             widgetId = null,
         )
-        assertNull(dao.get("com.phonecompanion.app.widgets.TextWidget", "AppWidgetId(appWidgetId=51)")!!.widgetId)
+        assertNull(dao.get("com.phonecompanion.app.widgets.CompanionWidget", "AppWidgetId(appWidgetId=51)")!!.widgetId)
         assertEquals(1, pusher.pushes.size)
     }
 
@@ -131,7 +131,7 @@ class WidgetBinderTest {
         val dao = FakeDao()
         val pusher = FakePusher()
         val args = arrayOf(
-            "com.phonecompanion.app.widgets.ListWidget", "list", "k1",
+            "com.phonecompanion.app.widgets.CompanionWidget", "secret", "k1",
         )
         WidgetBinder.pinAndPush(dao, pusher, args[0], args[1], args[2], "a")
         WidgetBinder.pinAndPush(dao, pusher, args[0], args[1], args[2], "b")
@@ -176,7 +176,7 @@ class WidgetBinderTest {
             glanceIdsFor = { throw RuntimeException("glance down") },
             onUpdate = { _, _ -> updates++ },
             logged = logged,
-        ).push("com.phonecompanion.app.widgets.TextWidget", "k")
+        ).push("com.phonecompanion.app.widgets.CompanionWidget", "k")
         assertEquals(0, updates)
         // Shape only: the exception class, never the instance key.
         assertEquals(listOf("chooser push lookup-failed error=RuntimeException"), logged)
@@ -188,7 +188,7 @@ class WidgetBinderTest {
         realPusher(
             glanceIdsFor = { listOf(fakeGlanceId("AppWidgetId(appWidgetId=7)")) },
             onUpdate = { _, _ -> updates++ },
-        ).push("com.phonecompanion.app.widgets.TextWidget", "AppWidgetId(appWidgetId=51)")
+        ).push("com.phonecompanion.app.widgets.CompanionWidget", "AppWidgetId(appWidgetId=51)")
         assertEquals(0, updates)
     }
 
@@ -199,7 +199,7 @@ class WidgetBinderTest {
             glanceIdsFor = { listOf(fakeGlanceId("AppWidgetId(appWidgetId=51)")) },
             onUpdate = { _, _ -> throw RuntimeException("update down") },
             logged = logged,
-        ).push("com.phonecompanion.app.widgets.TextWidget", "AppWidgetId(appWidgetId=51)")
+        ).push("com.phonecompanion.app.widgets.CompanionWidget", "AppWidgetId(appWidgetId=51)")
         assertEquals(listOf("chooser push update-failed error=RuntimeException"), logged)
     }
 
@@ -210,9 +210,9 @@ class WidgetBinderTest {
         realPusher(
             glanceIdsFor = { listOf(fakeGlanceId("AppWidgetId(appWidgetId=7)"), id) },
             onUpdate = { entry, target -> updated = entry to target },
-        ).push("com.phonecompanion.app.widgets.TextWidget", "AppWidgetId(appWidgetId=51)")
+        ).push("com.phonecompanion.app.widgets.CompanionWidget", "AppWidgetId(appWidgetId=51)")
         val (entry, target) = updated ?: throw AssertionError("no update requested")
-        assertEquals("text", entry.type)
+        assertEquals("all", entry.type)
         assertSame(id, target)
     }
 }

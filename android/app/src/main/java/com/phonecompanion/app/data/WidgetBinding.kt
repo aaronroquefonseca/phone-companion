@@ -18,12 +18,14 @@ import androidx.room.Query
  * binding must survive its row disappearing so the UI can show a
  * `was-<old id>` re-point hint instead of silently dropping the choice).
  *
- * - `providerClass`: `TextWidget::class.java.name` etc. (stable: no
- *   obfuscation — release builds keep `minifyEnabled false`).
+ * - `providerClass`: `CompanionWidget::class.java.name` (stable: no
+ *   obfuscation — release builds keep `minifyEnabled false`). Rows keyed
+ *   to the four removed per-type providers were deleted by `MIGRATION_3_4`.
  * - `glanceKey`: stable per-instance key from
  *   [com.phonecompanion.app.widgets.glanceKey] (`GlanceId.toString()`).
- * - `widgetType`: the cache type (`text|secret|list|status`), mirrored so
- *   the assignment UI can group without joining.
+ * - `widgetType`: the cache type (`text|secret|list|status`) of the pinned
+ *   row (`"none"` when explicitly unassociated), mirrored so the
+ *   assignment UI can group without joining.
  */
 @Entity(tableName = "widget_binding", primaryKeys = ["providerClass", "glanceKey"])
 data class WidgetBindingEntity(

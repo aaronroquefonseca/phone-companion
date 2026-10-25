@@ -4,7 +4,8 @@ import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.data.WidgetPayloadParser
 
 /**
- * Total load models for the four Glance widgets (broken-widget hardening).
+ * Total load models for the single home-screen widget's per-type render
+ * paths (broken-widget hardening).
  *
  * Every `provideGlance` path funnels through these pure functions before
  * touching Glance composition. Each model carries render-ready strings with

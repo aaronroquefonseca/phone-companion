@@ -2,7 +2,6 @@ package com.phonecompanion.app.work
 
 import android.content.Context
 import android.util.Log
-import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import com.phonecompanion.app.data.ApiClient
 import com.phonecompanion.app.data.AppMoshi
@@ -12,25 +11,19 @@ import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.data.WidgetEnvelope
 import com.phonecompanion.app.data.WidgetJson
-import com.phonecompanion.app.widgets.ListWidget
-import com.phonecompanion.app.widgets.SecretWidget
-import com.phonecompanion.app.widgets.StatusWidget
-import com.phonecompanion.app.widgets.TextWidget
+import com.phonecompanion.app.widgets.CompanionWidget
 import com.phonecompanion.app.widgets.WidgetBindingResolver
 import com.phonecompanion.app.widgets.glanceKey
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.supervisorScope
 
 /**
  * Shared generic polling plumbing (widgets PR / P7).
  *
  * Single code path used by both the hourly [RefreshWorker] and the manual
  * refresh entrypoint: fetch GET /api/v1/widgets with the device Bearer
- * token, upsert into the Room widget cache, then push it to every per-type
- * Glance widget. Per-type rendering lives in widgets/ — this file never
- * renders; it only fetches and fans out.
+ * token, upsert into the Room widget cache, then push it to the
+ * home-screen Glance widget. Per-type rendering lives in widgets/ — this
+ * file never renders; it only fetches and fans out.
  *
  * Revocation policy ([PollAuthPolicy]): HTTP 401/403 increments a
  * *persisted consecutive-auth-failure streak* (plain pref, not encrypted
@@ -414,39 +407,27 @@ object WidgetPoller {
     }
 
     /**
-     * Push cached state to each per-type widget. No fully-generic renderer.
-     *
-     * [supervisorScope] with one child per type: a failing type cannot cancel
-     * its siblings, while parent cancellation still propagates to every child
-     * (no detached jobs, nothing keeps running after the caller is gone).
-     * One try/catch per instance id so a broken instance cannot fail its type
-     * batch. Cancellation is always rethrown. Failures log the exception
-     * class at debug (shape only — never ids, titles, bodies, or keys): the
+     * Push cached state to the home-screen widget. One try/catch per
+     * instance id so a broken instance cannot fail its siblings.
+     * Cancellation is always rethrown. Failures log the exception class at
+     * debug (shape only — never ids, titles, bodies, or keys): the
      * previous zero-log swallows left stuck-fallback states undiagnosable.
      */
-    suspend fun updateAllWidgets(context: Context) = supervisorScope {
-        listOf(
-            async { updateAll(context, TextWidget(), TextWidget.PROVIDER) },
-            async { updateAll(context, SecretWidget(), SecretWidget.PROVIDER) },
-            async { updateAll(context, ListWidget(), ListWidget.PROVIDER) },
-            async { updateAll(context, StatusWidget(), StatusWidget.PROVIDER) },
-        ).awaitAll()
+    suspend fun updateAllWidgets(context: Context) {
+        updateAll(context)
     }
 
-    private suspend inline fun <reified T : GlanceAppWidget> updateAll(
-        context: Context,
-        widget: T,
-        provider: String,
-    ) {
+    private suspend fun updateAll(context: Context) {
         val ids = try {
-            GlanceAppWidgetManager(context).getGlanceIds(T::class.java)
+            GlanceAppWidgetManager(context).getGlanceIds(CompanionWidget::class.java)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.d(TAG, "widget push lookup-failed provider=${T::class.java.simpleName} error=${e.javaClass.simpleName}")
+            Log.d(TAG, "widget push lookup-failed provider=CompanionWidget error=${e.javaClass.simpleName}")
             return
         }
-        pruneStaleBindings(context, provider, ids.mapTo(HashSet(ids.size)) { glanceKey(it) })
+        pruneStaleBindings(context, CompanionWidget.PROVIDER, ids.mapTo(HashSet(ids.size)) { glanceKey(it) })
+        val widget = CompanionWidget()
         for (id in ids) {
             try {
                 widget.update(context, id)
@@ -454,7 +435,7 @@ object WidgetPoller {
                 throw e
             } catch (e: Exception) {
                 // One broken instance must not fail its siblings.
-                Log.d(TAG, "widget push update-failed provider=${T::class.java.simpleName} error=${e.javaClass.simpleName}")
+                Log.d(TAG, "widget push update-failed provider=CompanionWidget error=${e.javaClass.simpleName}")
             }
         }
     }

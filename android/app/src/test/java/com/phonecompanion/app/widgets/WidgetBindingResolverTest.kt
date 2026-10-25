@@ -29,7 +29,7 @@ class WidgetBindingResolverTest {
     private fun binding(
         key: String,
         widgetId: String?,
-        provider: String = "com.phonecompanion.app.widgets.TextWidget",
+        provider: String = "com.phonecompanion.app.widgets.CompanionWidget",
     ) = WidgetBindingEntity(
         providerClass = provider,
         glanceKey = key,

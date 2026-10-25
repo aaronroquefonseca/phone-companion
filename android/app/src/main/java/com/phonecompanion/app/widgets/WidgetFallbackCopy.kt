@@ -1,8 +1,8 @@
 package com.phonecompanion.app.widgets
 
 /**
- * Shared fallback-copy vocabulary for the four per-type Glance widgets
- * (finding 33). One voice everywhere: same "not paired yet" line, same
+ * Shared fallback-copy vocabulary for the home-screen widget's per-type
+ * render paths (finding 33). One voice everywhere: same "not paired yet" line, same
  * "nothing to show" line, same masked-secret line mentioning masking.
  *
  * Reason-aware where the reason is known locally: a widget that can see
