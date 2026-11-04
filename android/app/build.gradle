@@ -96,6 +96,7 @@ android {
         targetSdk 34
         versionCode 1
         versionName '0.1.0-skeleton'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
 
         // Runtime Firebase init inputs (see notify/FirebaseInit). Real
         // values only when the operator's local google-services.json was
@@ -127,6 +128,23 @@ android {
     }
     buildFeatures {
         buildConfig = true
+        // Glance uses Compose's compiler ABI even though activities use Views.
+        compose = true
+    }
+    composeOptions {
+        // Compose compiler 1.5.14 matches Kotlin 1.9.24 in ../build.gradle.
+        kotlinCompilerExtensionVersion = '1.5.14'
+    }
+    testOptions {
+        managedDevices {
+            devices {
+                pixel2api30(com.android.build.api.dsl.ManagedVirtualDevice) {
+                    device = 'Pixel 2'
+                    apiLevel = 30
+                    systemImageSource = 'aosp-atd'
+                }
+            }
+        }
     }
 }
 

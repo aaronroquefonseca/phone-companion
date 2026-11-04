@@ -1,7 +1,6 @@
 name: CI
 
-# Fast, cheap PR checks. No emulator anywhere here — Android runs unit tests
-# only (see android/README.md "CI"); emulator coverage is future work.
+# Fast unit checks followed by a small Android runtime rendering suite.
 #
 # Local repro for every step is echoed into the job log by each step.
 
@@ -60,7 +59,7 @@ jobs:
           docker build -t phone-companion-backend:ci "$GITHUB_WORKSPACE/backend"
 
   android:
-    name: android (assembleDebug · unit tests)
+    name: android (assembleDebug · unit tests · widget runtime)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -83,8 +82,6 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@6cfc8b8e8bb586cc164bef1c478c1eea3a4d6a19 # v3
 
-      # Unit tests only — no emulator (slow/flaky on free runners).
-      # Instrumented tests under androidTest/ are NOT run here.
       - name: assembleDebug
         run: |
           echo 'Local repro: cd android && ./gradlew assembleDebug   (needs JDK 17 + Android SDK)'
@@ -94,3 +91,13 @@ jobs:
         run: |
           echo 'Local repro: cd android && ./gradlew testDebugUnitTest   (needs JDK 17 + Android SDK)'
           ./gradlew testDebugUnitTest --console=plain
+
+      - name: Enable KVM for the managed test device
+        run: sudo chmod a+rw /dev/kvm
+
+      # ATD is a minimal headless Android image; these tests require no
+      # Firebase credentials, backend or Google Play services.
+      - name: Widget runtime tests
+        run: |
+          ./gradlew pixel2api30DebugAndroidTest --console=plain \
+            -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect
