@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Widget cache (widgets PR / P7).
@@ -44,6 +45,12 @@ interface WidgetCacheDao {
 
     @Query("SELECT * FROM widget_cache WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): WidgetCacheEntity?
+
+    // Observe both tables: a running Glance session must react to a new
+    // selection as well as new payloads (including removal of either row).
+    @Query("SELECT c.* FROM widget_cache c INNER JOIN widget_binding b ON c.id = b.widgetId " +
+        "WHERE b.providerClass = :provider AND b.glanceKey = :key LIMIT 1")
+    fun observeSelected(provider: String, key: String): Flow<WidgetCacheEntity?>
 
     @Query("DELETE FROM widget_cache")
     suspend fun clearAll()

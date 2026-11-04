@@ -45,14 +45,34 @@ cd android
 
 ## CI
 
-PR checks (`.github/workflows/ci.yml`) run unit tests only — no emulator.
+PR checks (`.github/workflows/ci.yml`) build the app, run JVM unit tests,
+then run the widget rendering suite on a Gradle-managed API 30 test device.
 Same commands locally (needs JDK 17 and the Android SDK, see above):
 
 ```sh
 cd android
 ./gradlew assembleDebug            # debug APK
-./gradlew testDebugUnitTest        # unit tests (androidTest/ NOT run in CI)
+./gradlew testDebugUnitTest        # includes the Compose compiler ABI guard
+./gradlew connectedDebugAndroidTest # use an already running test emulator
+# Or provision an isolated managed test device (requires virtualization):
+./gradlew pixel2api30DebugAndroidTest -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect
 ```
+
+The instrumented suite executes the production `provideGlance`, reads real
+Room bindings/cache, and inflates the resulting RemoteViews into Android
+views. It checks all four payload types at small and large sizes, live
+selection/payload changes, key rotation, and unpairing. It uses fixture
+credentials and clears the test app's credentials/cache; run it on a test
+emulator, not a paired personal device. No Firebase project or live server
+is needed. Launcher placement, camera scanning, and FCM delivery still need
+their own end-to-end device checks.
+
+Glance requires `buildFeatures.compose = true` even though the activities
+use Android Views. The Compose compiler version must match Kotlin (currently
+1.5.14 / 1.9.24). Without it, ordinary Kotlin compilation succeeds but
+`provideContent` fails with `NoSuchMethodError` on Android. A running widget
+composition observes the binding/cache and credentials; a one-time read
+before `provideContent` would stay stale during an active Glance session.
 
 ## Pairing from the app
 

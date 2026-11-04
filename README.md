@@ -188,8 +188,11 @@ the backend refuses to boot on weak/missing secrets.
 
 ## Verification status
 
-Verified in this PR's environment: `docker build ./backend`, full
-compose quickstart (`up -d --build`, `/healthz`, bcrypt-hash login →
-`303`, session-cookie + `X-Requested-With` `POST /api/v1/notify` → `202`),
-`go vet` + `go test` clean. NOT run here: Android build (no SDK in this environment) and the
-Caddy/nginx snippets above (standard proxy config, adjust paths/hosts).
+Automated checks cover the backend tests, Android build/JVM tests, and
+actual Glance composition plus RemoteViews inflation on an Android test
+device. The widget runtime suite also checks updates within an active
+composition and credential invalidation; see [Android verification](android/README.md#ci).
+Backend HTTP tests simulate paired devices and delivery; they do not prove
+FCM delivery to physical phones. Camera QR scanning, launcher placement on
+each supported device, production push delivery, and the Caddy/nginx
+deployment snippets require separate end-to-end verification.

@@ -2,6 +2,9 @@ package com.phonecompanion.app.widgets
 
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.unit.dp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
@@ -17,12 +20,10 @@ import androidx.glance.layout.Spacer
 import androidx.glance.layout.height
 import androidx.glance.layout.padding
 import androidx.glance.text.Text
-import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.WidgetCacheEntity
-import com.phonecompanion.app.data.loadOrFallback
 import com.phonecompanion.app.ui.WidgetConfigActivity
 import com.phonecompanion.app.ui.WidgetTapRouterActivity
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 
 /**
  * Single home-screen widget: one picker entry ("Widget") that can show any
@@ -41,46 +42,30 @@ import kotlinx.coroutines.CancellationException
  * to the smallest sizes). Unknown types fall back to the unassociated state
  * (tap-to-configure) rather than another row's content.
  *
- * Hardening: [loadModel] funnels through [loadOrFallback] (storage failure
- * yields a valid unbound model), and [provideGlance] wraps the composition
- * with a second-chance static [provideContent] so no state — unbound,
- * empty cache, stale binding, unknown type, malformed payload, decrypt
- * failure, missing credentials — can throw or post null RemoteViews to the
- * launcher.
+ * The composition observes Room and credential changes for its entire
+ * session. update() alone does not re-run provideGlance while it is active.
  */
 class CompanionWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        // Load outside the composition try (as before): loadOrFallback maps
-        // every storage failure to a valid model, and the extra catch below
-        // covers the non-Exception paths loadOrFallback cannot see.
-        val model = try {
-            loadModel(context, id)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            CompanionContent.unboundFallback()
+        val models = widgetRenderModels(context, id)
+        val initial = models.first()
+        provideContent {
+            val model by models.collectAsState(initial)
+            CompanionComposition(model, tapAction(context, id, model))
         }
-        try {
-            provideContent {
-                CompanionComposition(model, tapAction(context, id, model))
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            // Fail closed to static copy: never throw, never post null.
-            // Router (no extras) so the fallback itself cannot fail on an
-            // Intent extra.
-            provideContent {
-                Column(
-                    modifier = GlanceModifier.padding(12.dp)
-                        .clickable(actionStartActivity<WidgetTapRouterActivity>()),
-                ) {
-                    Text("Widget")
-                    Text(WidgetFallbackCopy.bodyFor(WidgetFallbackCopy.Reason.LOAD_FAILED))
-                }
-            }
-        }
+    }
+
+    override fun onCompositionError(
+        context: Context,
+        glanceId: GlanceId,
+        appWidgetId: Int,
+        throwable: Throwable,
+    ) {
+        // Composition runs asynchronously; a try/catch around provideContent
+        // cannot handle it. Log only the class, never payload-bearing messages.
+        Log.e("CompanionWidget", "widget composition failed error=${throwable.javaClass.simpleName}")
+        super.onCompositionError(context, glanceId, appWidgetId, throwable)
     }
 
     private fun tapAction(
@@ -99,40 +84,6 @@ class CompanionWidget : GlanceAppWidget() {
         }
     }
 
-    private suspend fun loadModel(context: Context, id: GlanceId): CompanionContent.Render =
-        loadOrFallback(CompanionContent.unboundFallback()) {
-            val paired = isPairedNow(context)
-            val db = DatabaseHolder.get(context)
-            val widgetId = loadBindingWidgetId {
-                db.widgetBindingDao().get(PROVIDER, glanceKey(id))?.widgetId
-            } ?: return@loadOrFallback CompanionContent.unboundFor(paired)
-            val row = try {
-                db.widgetCacheDao().getById(widgetId)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
-            } ?: return@loadOrFallback CompanionContent.unboundFor(paired)
-            if (row.type == "secret") {
-                val visible = loadVisibleSecret(context, row)
-                return@loadOrFallback CompanionContent.resolveForRow(row, paired, visible)
-            }
-            CompanionContent.resolveForRow(row, paired, null)
-        }
-
-    /** Fail-closed secret read: every failure yields null (masked state). */
-    private suspend fun loadVisibleSecret(context: Context, row: WidgetCacheEntity): String? {
-        return try {
-            val storage = com.phonecompanion.app.data.SecureStorage.getInstance(context)
-            if (!storage.isPaired) return null
-            resolveVisibleSecret(storage.deviceId, storage.deviceKey, row)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     companion object {
         /** Stable provider key for the `widget_binding` table (the only one). */
         val PROVIDER: String = CompanionWidget::class.java.name
@@ -141,14 +92,6 @@ class CompanionWidget : GlanceAppWidget() {
         const val MASKED = WidgetFallbackCopy.SECRET_MASKED
     }
 }
-
-/** Local pairing check for reason-aware fallbacks; read failure fails closed to paired. */
-internal fun isPairedNow(context: Context): Boolean =
-    try {
-        com.phonecompanion.app.data.SecureStorage.getInstance(context).isPaired
-    } catch (_: Exception) {
-        true
-    }
 
 /**
  * Pure dispatch for the single widget: which render does one bound row (or

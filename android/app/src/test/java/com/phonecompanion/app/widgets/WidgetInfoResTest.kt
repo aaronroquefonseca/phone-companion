@@ -55,8 +55,8 @@ class WidgetInfoResTest {
         assertTrue(xml.contains("android:minResizeWidth=\"40dp\""))
         assertTrue(xml.contains("android:minResizeHeight=\"40dp\""))
         assertTrue(xml.contains("android:resizeMode=\"horizontal|vertical\""))
-        assertTrue(xml.contains("android:targetCellWidth="))
-        assertTrue(xml.contains("android:targetCellHeight="))
+        assertTrue(xml.contains("android:targetCellWidth=\"1\""))
+        assertTrue(xml.contains("android:targetCellHeight=\"1\""))
     }
 
     @Test

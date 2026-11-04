@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
 
 /**
  * Encrypted store for this device's credentials.
@@ -70,6 +74,18 @@ class SecureStorage private constructor(context: Context) : EnrollmentStore {
     val isPaired: Boolean
         get() = !deviceId.isNullOrBlank() && !deviceToken.isNullOrBlank() &&
             !deviceKey.isNullOrBlank() && !baseUrl.isNullOrBlank()
+
+    /** Invalidate active widget compositions on enroll, key rotation or unpair. */
+    fun credentialChanges(): Flow<Unit> = callbackFlow {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key in setOf(KEY_BASE_URL, KEY_DEVICE_ID, KEY_DEVICE_TOKEN, KEY_DEVICE_KEY)) {
+                trySend(Unit)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(Unit)
+        awaitClose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }.conflate()
 
     /**
      * Persists a fresh enrollment, overwriting any previous credentials.
