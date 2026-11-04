@@ -20,13 +20,21 @@ internal fun widgetRenderModels(context: Context, id: GlanceId): Flow<CompanionC
     val selected = DatabaseHolder.get(context).widgetCacheDao()
         .observeSelected(CompanionWidget.PROVIDER, glanceKey(id))
     emitAll(combine(selected, storage.credentialChanges()) { row, _ ->
-        if (!storage.isPaired) {
-            CompanionContent.unboundFor(paired = false)
-        } else {
-            val visible = if (row?.type == "secret") {
-                resolveVisibleSecret(storage.deviceId, storage.deviceKey, row)
-            } else null
-            CompanionContent.resolveForRow(row, paired = true, visibleSecret = visible)
+        try {
+            if (!storage.isPaired) {
+                CompanionContent.unboundFor(paired = false)
+            } else {
+                val visible = if (row?.type == "secret") {
+                    resolveVisibleSecret(storage.deviceId, storage.deviceKey, row)
+                } else null
+                CompanionContent.resolveForRow(row, paired = true, visibleSecret = visible)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            // Keep observing: a later enrollment can repair unreadable credentials.
+            Log.e("CompanionWidget", "widget model read failed error=${error.javaClass.simpleName}")
+            CompanionContent.unboundFallback()
         }
     })
 }.catch { error ->

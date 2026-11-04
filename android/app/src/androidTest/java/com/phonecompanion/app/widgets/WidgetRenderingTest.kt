@@ -3,6 +3,7 @@ package com.phonecompanion.app.widgets
 import android.view.View
 import android.appwidget.AppWidgetManager
 import android.content.Intent
+import android.content.SharedPreferences
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -72,6 +73,25 @@ class WidgetRenderingTest {
             val secret = secretRow()
             db.widgetCacheDao().upsert(secret)
             db.widgetBindingDao().upsert(WidgetBindingEntity(CompanionWidget.PROVIDER, key, "secret", secret.id))
+            awaitText("hello secret")
+            // Inject an unreadable credential without adding a production test hook.
+            // Use the same encrypted prefs instance so real listeners are notified.
+            val prefsField = SecureStorage::class.java.getDeclaredField("prefs").apply { isAccessible = true }
+            val prefs = prefsField.get(storage) as SharedPreferences
+            val unreadable = object : SharedPreferences by prefs {
+                override fun getString(key: String?, defValue: String?): String? {
+                    if (key == "device_key") throw SecurityException("Credential read fixture")
+                    return prefs.getString(key, defValue)
+                }
+            }
+            try {
+                prefsField.set(storage, unreadable)
+                db.widgetCacheDao().upsert(secret.copy(updatedAt = "unreadable"))
+                awaitText("Not associated")
+            } finally {
+                prefsField.set(storage, prefs)
+            }
+            storage.saveEnrollment("https://example.invalid/", "dev-1", "repaired-token", TEST_KEY)
             awaitText("hello secret")
             // Rotating credentials must invalidate plaintext already on screen.
             storage.saveEnrollment("https://example.invalid/", "dev-1", "test-token", "wrong-key")
