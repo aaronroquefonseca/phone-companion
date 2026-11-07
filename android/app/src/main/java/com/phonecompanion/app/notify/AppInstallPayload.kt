@@ -3,17 +3,17 @@ package com.phonecompanion.app.notify
 /**
  * Remote APK install push ("app_install") wire payload.
  *
- * Frozen wire contract (see task brief): the app receives an FCM data
- * message with string fields `type=app_install`, `push_id`, `apk_url`
- * (https only), `sha256` (64 lowercase hex), `package` (e.g.
- * com.example.app), `version` (optional), `label` (required,
- * human-readable).
+ * Frozen wire contract (see the task brief / docs): the app polls
+ * `GET /api/v1/commands` and each `app_install` command entry carries
+ * string fields `type=app_install`, `push_id`, `apk_url` (https only),
+ * `sha256` (64 lowercase hex), `package` (e.g. com.example.app),
+ * `version` (optional), `label` (required, human-readable).
  *
  * Pure Kotlin, zero Android imports: JVM-testable without an emulator,
  * Firebase, or credentials. Parsing never throws — invalid payloads
  * (missing/oversized/invalid fields) yield null (rejected, no crash) and
- * the caller falls back to the generic [NotificationPayload] rendering so
- * unknown/invalid kinds keep rendering generically.
+ * the caller skips the entry with shape-only logging, so unknown or
+ * malformed command entries never break the poll.
  */
 data class AppInstallPayload(
     val pushId: String,
@@ -63,7 +63,7 @@ data class AppInstallPayload(
     fun cacheFileName(): String = cacheFileNameFor(pushId)
 
     companion object {
-        /** FCM data discriminator for this flow (frozen contract). */
+        /** Command discriminator for this flow (frozen contract). */
         const val TYPE = "app_install"
 
         /** Hard cap on downloaded APK bytes (100 MB, frozen contract). */
@@ -126,10 +126,10 @@ data class AppInstallPayload(
         }
 
         /**
-         * True when this FCM data map is an app-install push. Accepts the
-         * frozen `type` discriminator and, for tolerance, the legacy `kind`
-         * spelling — anything else (including absent) is a generic
-         * notification, never an install.
+         * True when a polled command entry is an app-install command.
+         * Accepts the frozen `type` discriminator and, for tolerance,
+         * the legacy `kind` spelling — anything else (including absent)
+         * is an unknown kind, ignored by the poll (never an install).
          */
         fun isAppInstall(data: Map<String, String>): Boolean =
             data["type"]?.trim() == TYPE || data["kind"]?.trim() == TYPE

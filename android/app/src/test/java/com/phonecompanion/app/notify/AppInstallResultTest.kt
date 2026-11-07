@@ -39,11 +39,15 @@ class AppInstallResultTest {
     }
 
     @Test
-    fun `unknown and pending codes fail closed`() {
-        assertTrue(
-            AppInstallResult.classify(AppInstallResult.STATUS_PENDING, null)
-                is AppInstallResult.Outcome.Failed,
+    fun `pending user action is not terminal`() {
+        assertEquals(
+            AppInstallResult.Outcome.PendingUserAction,
+            AppInstallResult.classify(AppInstallResult.STATUS_PENDING_USER_ACTION, null),
         )
+    }
+
+    @Test
+    fun `unknown codes fail closed`() {
         assertTrue(
             AppInstallResult.classify(999, "weird") is AppInstallResult.Outcome.Failed,
         )

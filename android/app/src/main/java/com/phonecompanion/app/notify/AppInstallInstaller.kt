@@ -25,6 +25,22 @@ object AppInstallInstaller {
     const val TAG = "AppInstallInstaller"
     const val ACTION_INSTALL_RESULT = "pc_app_install_result"
 
+    /**
+     * PendingIntent mutability for the installer-result intent. The
+     * PackageInstaller fills the result extras (status, message) into our
+     * intent via fillIn, which an IMMUTABLE PendingIntent would drop —
+     * so API 31+ (where mutability must be declared) asks for MUTABLE.
+     * Below 31 the flag does not exist and plain UPDATE_CURRENT keeps the
+     * historical behavior. Pure ([sdkInt]-injected) so the branch is
+     * unit-testable without Robolectric.
+     */
+    internal fun resultIntentFlags(sdkInt: Int): Int =
+        if (sdkInt >= 31) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+
     fun commit(context: Context, payload: AppInstallPayload, apkFile: File, attempt: String?): Boolean {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(
@@ -52,7 +68,7 @@ object AppInstallInstaller {
                         ACTION_INSTALL_RESULT,
                     ),
                     resultIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    resultIntentFlags(android.os.Build.VERSION.SDK_INT),
                 )
                 session.commit(result.intentSender)
             }

@@ -8,10 +8,13 @@ import android.util.Log
 
 /**
  * PackageInstaller result receiver: the terminal state of the install
- * phase. Thin forwarder: deletes the cached APK on every path, classifies
- * the status, and funnels the single user-visible notification through
- * [AppInstallNotifications.notifyTerminal] (claimed per attempt, so a
- * retried system broadcast can never double-post). No retry on any path —
+ * phase. Thin forwarder: deletes the cached APK on every terminal path,
+ * classifies the status, and funnels the single user-visible notification
+ * through [AppInstallNotifications.notifyTerminal] (claimed per attempt,
+ * so a retried system broadcast can never double-post). The one
+ * exception is `STATUS_PENDING_USER_ACTION`: the system's confirmation
+ * intent is launched with the cached APK kept and no terminal claimed —
+ * the follow-up result owns the terminal. No retry on any path —
  * user-cancelled is plain informational, failures carry the installer
  * status message.
  *
@@ -32,6 +35,16 @@ class AppInstallResultReceiver : BroadcastReceiver() {
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, AppInstallResult.STATUS_FAILURE)
         val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
 
+        // The system wants the user to confirm first: launch its
+        // confirmation intent (carried under Intent.EXTRA_INTENT) and
+        // return WITHOUT deleting the cached APK and WITHOUT claiming a
+        // terminal — the follow-up result re-enters this receiver and
+        // owns the terminal then.
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            launchConfirmation(app, intent, packageName)
+            return
+        }
+
         // The verified APK is single-use: drop it whatever the outcome.
         runCatching { AppInstallFiles.apkFile(app, pushId).delete() }
 
@@ -47,11 +60,38 @@ class AppInstallResultReceiver : BroadcastReceiver() {
                     Log.i(TAG, "app_install user-cancelled for $packageName")
                 }
             }
+            is AppInstallResult.Outcome.PendingUserAction -> {
+                // Unreachable: STATUS_PENDING_USER_ACTION returns above
+                // before classification. Fail silent, never terminal.
+                Log.w(TAG, "app_install unexpected pending state for $packageName")
+            }
             is AppInstallResult.Outcome.Failed -> {
                 if (notify(app, AppInstallFlow.TerminalKind.FAILED, target, attempt, outcome.statusMessage)) {
                     Log.w(TAG, "app_install failed for $packageName")
                 }
             }
+        }
+    }
+
+    /**
+     * Launches the system's install-confirmation activity (carried under
+     * [Intent.EXTRA_INTENT] on `STATUS_PENDING_USER_ACTION`). The cached
+     * APK stays on disk for the follow-up result; no terminal is claimed.
+     * Never throws.
+     */
+    private fun launchConfirmation(app: Context, intent: Intent, packageName: String) {
+        try {
+            @Suppress("DEPRECATION")
+            val confirm: Intent? = intent.getParcelableExtra(Intent.EXTRA_INTENT)
+            if (confirm == null) {
+                Log.w(TAG, "app_install pending action without confirmation intent for $packageName")
+                return
+            }
+            confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            app.startActivity(confirm)
+            Log.i(TAG, "app_install launched confirmation for $packageName")
+        } catch (_: Exception) {
+            Log.w(TAG, "app_install confirmation launch failed for $packageName")
         }
     }
 

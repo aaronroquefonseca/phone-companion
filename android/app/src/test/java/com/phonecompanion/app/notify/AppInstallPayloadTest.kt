@@ -126,8 +126,8 @@ class AppInstallPayloadTest {
 
     @Test
     fun `never crashes on hostile input`() {
-        // Nulls are impossible from FCM (Map<String, String>), but empty and
-        // extreme maps must still return null rather than throw.
+        // Nulls are impossible from the stringified command map, but empty
+        // and extreme maps must still return null rather than throw.
         assertNull(AppInstallPayload.fromMap(emptyMap()))
         assertNull(AppInstallPayload.fromMap(mapOf("type" to "app_install")))
         val huge = valid() + ("label" to "x".repeat(100000))
