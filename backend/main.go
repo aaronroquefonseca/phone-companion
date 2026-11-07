@@ -34,6 +34,9 @@ func main() {
 	if err := notify.Migrate(db); err != nil {
 		log.Fatalf("migrate notifications: %v", err)
 	}
+	if err := MigrateOutbox(db); err != nil {
+		log.Fatalf("migrate outbox: %v", err)
+	}
 
 	// Notifications (P4): fail fast on unknown NOTIFY_DRIVER so a typo can
 	// never silently become a black hole.
@@ -55,6 +58,11 @@ func main() {
 
 	SetDeviceDB(db)
 
+	// Operator machine credential for the shared operator chain
+	// (Config.Validate already refused to boot on a missing/weak token).
+	SetOperatorAPIToken(cfg.OperatorAPIToken)
+	SetOperatorSessionUser(cfg.AdminUser)
+
 	sessionStore, err := NewSessionStore(db, cfg.SessionSecret)
 	if err != nil {
 		log.Fatalf("session store: %v", err)
@@ -70,10 +78,11 @@ func main() {
 	}
 
 	base := newBaseMux(DefaultWidgetRegistry(), sessionStore, csrf)
-	// Same notify wiring as NewMux (kept inline: webui.RegisterRoutes below
+	// Same notify + push-outbox wiring as NewMux (kept inline: webui.RegisterRoutes below
 	// needs the bare *http.ServeMux, while ListenAndServe takes the
 	// no-store-wrapped handler).
-	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, csrf, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/notify", operatorAdminChain(sessionStore, csrf, handleNotify(db, sender)))
+	registerPushOutboxRoutes(base, db, sessionStore, csrf)
 	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,

@@ -35,6 +35,9 @@ func setupWebUITestMux(t *testing.T) (mux http.Handler, db *sql.DB, csrf *webui.
 	if err := notify.Migrate(db); err != nil {
 		t.Fatal(err)
 	}
+	if err := MigrateOutbox(db); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { db.Close() })
 	oldDB := deviceDB
 	SetDeviceDB(db)
@@ -58,7 +61,8 @@ func setupWebUITestMux(t *testing.T) (mux http.Handler, db *sql.DB, csrf *webui.
 	}
 
 	base := newBaseMux(reg, sessions, csrf)
-	base.Handle("POST /api/v1/notify", notifyAdminChain(sessions, csrf, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/notify", operatorAdminChain(sessions, csrf, handleNotify(db, sender)))
+	registerPushOutboxRoutes(base, db, sessions, csrf)
 	RegisterNotifyWebUIRoutes(base, db, sender, sessions, csrf)
 	webui.RegisterRoutes(base, sessions, webui.Credentials{Username: "op", Password: "op-pass"}, csrf)
 	mux = withAuthNoStore(base)
@@ -256,8 +260,8 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 		t.Errorf("notify form Cache-Control %q, want no-store", cc)
 	}
 
-	// Plaintext round-trip: PRG 303 + GET confirmation + history row +
-	// payload. Refreshing the confirmation must not re-send (no-resubmit).
+	// Plaintext round-trip: PRG 303 + GET confirmation + outbox row.
+	// Refreshing the confirmation must not re-send (no-resubmit).
 	w = webuiFormPost(t, mux, "/webui/notify", cookie, url.Values{
 		"csrf_token": {tok},
 		"target":     {id},
@@ -289,14 +293,18 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 	if rw.Code != http.StatusOK {
 		t.Fatalf("refresh GET: got %d, want 200", rw.Code)
 	}
-	if n, st := e2eHistoryRows(t, db, m[1], id); n != 1 || st[0] != notify.StatusQueued {
-		t.Fatalf("history rows = %d %v, want 1 queued (no-resubmit)", n, st)
+	if n, st := e2eOutboxRows(t, db, m[1], id); n != 1 || st[0] != outboxStatusPending {
+		t.Fatalf("outbox rows = %d %v, want 1 pending (no-resubmit)", n, st)
 	}
-	if len(sender.payloads) != 1 || sender.payloads[0]["title"] != "Hello form" {
-		t.Fatalf("captured payloads = %v, want plaintext title", sender.payloads)
+	// The queued flat map carries the plaintext title (non-FCM drivers
+	// are never called, so assert the stored row, not a captured send).
+	payload := outboxPayload(t, db, m[1], id)
+	if payload["title"] != "Hello form" || payload["body"] != "from the operator console" {
+		t.Fatalf("stored payload = %v, want plaintext title/body", payload)
 	}
 
-	// Secret round-trip: envelopes only, never plaintext.
+	// Secret round-trip: envelopes only, never plaintext (asserted on the
+	// stored outbox row — non-FCM drivers are never called).
 	sender.payloads = nil
 	w = webuiFormPost(t, mux, "/webui/notify", cookie, url.Values{
 		"csrf_token": {tok},
@@ -314,18 +322,26 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 	if sw.Code != http.StatusOK {
 		t.Fatalf("secret confirmation GET: got %d, want 200", sw.Code)
 	}
-	if len(sender.payloads) != 1 {
-		t.Fatalf("want 1 captured payload, got %d", len(sender.payloads))
+	sm := notifyIDRe.FindStringSubmatch(sw.Body.String())
+	if len(sm) != 2 || sm[1] == "" {
+		t.Fatalf("secret confirmation page must show the notification id (%s)", sw.Body.String())
 	}
-	if sender.payloads[0][notify.SecretFlagKey] != "true" {
-		t.Fatalf("missing secret flag: %v", sender.payloads[0])
+	stored := outboxPayload(t, db, sm[1], id)
+	if stored[notify.SecretFlagKey] != "true" {
+		t.Fatalf("missing secret flag: %v", stored)
 	}
-	if _, ok := sender.payloads[0]["title"]; ok {
-		t.Fatal("secret form post carries plaintext title")
+	if _, ok := stored["title"]; ok {
+		t.Fatal("stored secret payload carries plaintext title")
+	}
+	if _, ok := stored["body"]; ok {
+		t.Fatal("stored secret payload carries plaintext body")
 	}
 
-	// Validation failure: 422 + operator copy, echoed form, nothing sent.
-	sender.payloads = nil
+	// Validation failure: 422 + operator copy, echoed form, nothing queued.
+	var pendingBefore int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM outbox`).Scan(&pendingBefore); err != nil {
+		t.Fatal(err)
+	}
 	w = webuiFormPost(t, mux, "/webui/notify", cookie, url.Values{
 		"csrf_token": {tok},
 		"target":     {"all"},
@@ -342,5 +358,12 @@ func TestWebUINotifyFormRoundTrip(t *testing.T) {
 	}
 	if len(sender.payloads) != 0 {
 		t.Errorf("failed validation sent %d payloads, want 0", len(sender.payloads))
+	}
+	var pendingAfter int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM outbox`).Scan(&pendingAfter); err != nil {
+		t.Fatal(err)
+	}
+	if pendingAfter != pendingBefore {
+		t.Errorf("failed validation queued %d rows, want 0", pendingAfter-pendingBefore)
 	}
 }

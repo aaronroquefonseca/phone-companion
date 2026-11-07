@@ -18,7 +18,12 @@ model: `docs/threat-model.md`.
 - `session.go` — WebUI cookie sessions (`pc_session`, 24h TTL, only
   token hashes in DB).
 - `widgets.go` — `$WIDGET_DIR` loader + device-authed poll endpoints.
-- `notify_handler.go` / `notify_auth.go` — `POST /api/v1/notify`.
+- `notify_handler.go` / `notify_auth.go` — `POST /api/v1/notify`
+  (operator-only chain: WebUI session or `OPERATOR_API_TOKEN`).
+- `app_push.go` / `outbox.go` / `outbox_handlers.go` — `POST
+  /api/v1/app-push` + the device poll surface (`GET /api/v1/outbox`,
+  `GET /api/v1/events/wait`, `POST /api/v1/commands/ack`); the outbox
+  table is the poll-based delivery leg (no FCM required).
 - `notify/` — message validation, fan-out drivers, delivery history.
 - `crypto/` — AES-256-GCM per-device encryption (shared with the app's
   Kotlin side byte-for-byte via AAD construction).
@@ -41,7 +46,11 @@ model: `docs/threat-model.md`.
 | `DELETE /api/v1/devices/{id}` | admin session + write-guard proof (missing `X-Requested-With`/CSRF → `403`) | Revoke; idempotent; unknown id → `404 device_not_found` |
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
-| `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/notify` | operator session + write-guard proof, or `OPERATOR_API_TOKEN` Bearer (`401` without either; any other Bearer → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202. Delivery leg is the poll outbox (no FCM required); FCM driver (if configured) is only a best-effort wake hint |
+| `POST /api/v1/app-push` | operator session + write-guard proof, or `OPERATOR_API_TOKEN` Bearer (same `401`/`403` split) | `202 {push_id, accepted}`; per-device cap overflow is `429 too_many_pending` with nothing queued |
+| `GET /api/v1/outbox` | device Bearer (`401` missing/invalid/revoked; operator token → `403`) | `200 {"commands":[...]}` — caller's own pending unexpired commands only; `Cache-Control: no-store, private` |
+| `GET /api/v1/events/wait` | device Bearer (same `401`/`403`) | `200 {"events":["outbox"]}` immediately when pending, else held up to 300s, `{"events":[]}` on timeout |
+| `POST /api/v1/commands/ack` | device Bearer (same `401`/`403`) | `200 {"acked":N}`; unknown/other-device ids silently ignored |
 | `GET /webui/notify` | admin session (else `303 /login`) | Test-notification form (target dropdown from the live registry; revoked devices excluded) + PRG confirmation banner. `accepted:0` renders neutral guidance (pair first), never green |
 | `POST /webui/notify` | admin session + CSRF token | PRG: `303` to `/webui/notify?sent=<id>&accepted=<n>` (whitelisted params); refreshing the confirmation never re-sends |
 
@@ -75,7 +84,8 @@ resolves here):
 
 ```sh
 cp backend/docker-compose.example.yml docker-compose.yml
-# fill ADMIN_USER / ADMIN_PASSWORD_HASH (preferred) / SESSION_SECRET
+# fill ADMIN_USER / ADMIN_PASSWORD_HASH (preferred) / SESSION_SECRET /
+# OPERATOR_API_TOKEN
 docker compose up -d --build
 docker compose logs backend
 ```
@@ -143,6 +153,13 @@ htpasswd -bnBC 10 admin 'your-password' | cut -d: -f2
 `SESSION_SECRET`: `openssl rand -hex 32` (min 32 bytes, no `CHANGEME`
 prefix). It signs session cookies AND (domain-separated) CSRF tokens.
 
+`OPERATOR_API_TOKEN`: `openssl rand -hex 32` (min 32 bytes, no `CHANGEME`
+prefix, never logged, never returned). Machine credential for the
+operator POST endpoints (`POST /api/v1/notify`, `POST /api/v1/app-push`)
+as an alternative to the WebUI session: `Authorization: Bearer
+<token>`. The backend refuses to boot without it (fail closed, same as
+`SESSION_SECRET`).
+
 Session cookies are `Secure` by default (browsers only send them over
 HTTPS — correct behind the TLS proxy). Plain-HTTP development (loopback /
 LAN without TLS) needs the explicit escape hatch or the browser will not
@@ -166,14 +183,47 @@ device credentials must ride TLS. Loopback `http://` (`localhost`,
 with the dev-only override `EXTERNAL_BASE_URL_ALLOW_HTTP=1` (never enable
 in production).
 
-## Notifications (`POST /api/v1/notify`)
+## Notifications (`POST /api/v1/notify`) and app push (`POST /api/v1/app-push`)
 
 Operator-only (see Routes). Caps: 1 MiB body, max 500 explicit
-`device_ids`, field-length validation, HTTPS-only `image_url`. Drivers via
-`NOTIFY_DRIVER`: `log` (default), `noop` (CI), `fcm` (real FCM HTTPv1;
-needs `FCM_PROJECT_ID` + `FCM_CREDENTIALS_FILE`). Fan-out is sequential;
-delivery history is pruned to 90 days / 20,000 newest rows best-effort
-after fan-out.
+`device_ids`, field-length validation, HTTPS-only `image_url`. Delivery
+is poll-based: every valid request `202`s with the devices queued in the
+server-side outbox, which devices fetch via `GET /api/v1/outbox` (wake
+via `GET /api/v1/events/wait`, confirm via `POST /api/v1/commands/ack`).
+Drivers via `NOTIFY_DRIVER`: `log` (default), `noop` (CI), `fcm` (real
+FCM HTTPv1 wake hint; needs `FCM_PROJECT_ID` +
+`FCM_CREDENTIALS_FILE`). Fan-out is sequential; notification history is
+pruned to 90 days / 20,000 newest rows best-effort after fan-out; the
+outbox is pruned to its 7-day TTL on every enqueue and every poll, with
+max 20 pending commands per device.
+
+Operator curls (placeholder token — never commit a real one):
+
+```sh
+# Queue a notification for every device (session cookie or token):
+curl -X POST localhost:8080/api/v1/notify \
+  -H 'Authorization: Bearer OPERATOR_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"target":{"all":true},"title":"Dinner","body":"Ready in 10 minutes"}'
+# → {"notification_id":"…","accepted":2}
+
+# Queue a remote install push for two devices:
+curl -X POST localhost:8080/api/v1/app-push \
+  -H 'Authorization: Bearer OPERATOR_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"target":{"device_ids":["dev-id-1","dev-id-2"]},
+       "apk_url":"https://example.com/app.apk",
+       "sha256":"<64-lowercase-hex>",
+       "package":"com.example.app","version":"1.0","label":"Example"}'
+# → {"push_id":"…","accepted":2}
+
+# Device poll / ack (device Bearer from enroll, shown once at pairing):
+curl localhost:8080/api/v1/outbox -H 'Authorization: Bearer DEVICE_TOKEN'
+curl -X POST localhost:8080/api/v1/commands/ack \
+  -H 'Authorization: Bearer DEVICE_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"ids":["<command_id>"]}'
+```
 
 ### Push via FCM (`NOTIFY_DRIVER=fcm`)
 
@@ -210,9 +260,10 @@ package touches client-side FCM artifacts.
   `fcm-unregistered` / `fcm-invalid-token` / `fcm-missing-token` to find
   devices that need a fresh token. The driver **never revokes**: healing
   is the token backfill (`POST /api/v1/device/fcm-token`, re-pair, or the
-  app's post-poll backfill). No device accepting means the handler answers
-  `500 driver_unavailable` (fail closed); genuinely zero targets stay
-  `202 accepted:0` behind any driver.
+  app's post-poll backfill). The FCM leg is a hint only: hint failures are
+  logged, never fail the operator request — the outbox row (not the hint)
+  is the delivery leg, so valid requests always `202` whether or not FCM
+  is configured.
 
 ## Log viewing
 

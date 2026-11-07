@@ -38,6 +38,8 @@ services:
       ADMIN_PASSWORD_HASH: "CHANGEME-bcrypt-hash"
       # ADMIN_PASSWORD: "CHANGEME-bootstrap-only"
       SESSION_SECRET: "CHANGEME-long-random-secret-min-32-bytes"
+      # Machine credential for POST /api/v1/notify + /api/v1/app-push (fail-closed at boot like SESSION_SECRET; never commit a real one).
+      OPERATOR_API_TOKEN: "CHANGEME-long-random-token-min-32-bytes"
       DB_PATH: "/data/phone-companion.db"
       WIDGET_DIR: "/widgets"
       # Public origin used to build the pairing QR enroll_url.
@@ -50,6 +52,7 @@ services:
       # see docs/setup.md "Plain-HTTP development").
       # ALLOW_INSECURE_COOKIES: "1"
       # --- Push (notifications; leave unset for log-driver default) ---
+      # Delivery is poll-based (outbox) with or without FCM; FCM only adds a best-effort wake hint.
       # NOTIFY_DRIVER: "fcm"
       # FCM_PROJECT_ID: ""
       # FCM_CREDENTIALS_FILE: "/run/secrets/fcm.json"
