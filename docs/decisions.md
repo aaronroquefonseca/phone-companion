@@ -150,8 +150,9 @@ linked docs; this file is the index of decisions.
 - Android: covered by CI (`assembleDebug`, `testDebugUnitTest`,
   managed-device ATD API-30 Glance suite) — last green Nov 4 (PR #43);
   NOT re-verified today: every repo CI run today fails at job startup
-  repo-wide (infra — the workflow file is unchanged since the last
-  green run). See `android/README.md#ci`.
+  repo-wide (account billing lock blocks all job starts per the GitHub
+  annotation — the workflow file is unchanged since the last green run).
+  See `android/README.md#ci`.
 - Still needs physical hardware (no phones/emulator with Play here):
   camera QR scan, launcher placement per device, production FCM
   delivery, proxy deployment. Manual checklists:
