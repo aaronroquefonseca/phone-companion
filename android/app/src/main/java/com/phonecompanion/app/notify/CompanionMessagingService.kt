@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -109,6 +110,14 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     private fun onMessageReceivedInternal(message: RemoteMessage) {
+        // Remote APK install pushes branch here: a valid payload posts the
+        // `Install <label>?` prompt on the general channel and returns. An
+        // invalid install payload falls through to generic rendering so an
+        // operator typo still surfaces something — never silence, never a
+        // crash. Unknown kinds keep the existing generic fallback below.
+        if (AppInstallPayload.isAppInstall(message.data)) {
+            if (handleAppInstall(message.data)) return
+        }
         val payload = NotificationPayload.from(message)
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         ensureChannel(manager, payload)
@@ -171,6 +180,30 @@ class CompanionMessagingService : FirebaseMessagingService() {
             )
             manager.notify(payload.notifyId(), builder.build())
         }
+    }
+
+    /**
+     * Remote APK install prompt. Returns true when the push was a valid
+     * install payload and the prompt was posted (caller returns, skipping
+     * generic rendering). Invalid payloads return false so the caller
+     * falls back to the generic notification. Tapping the prompt opens
+     * [com.phonecompanion.app.ui.AppInstallActivity] — the ONLY entry to
+     * the flow: never auto-install, never install on receive/boot.
+     * Logs package names only, never URLs or hashes.
+     */
+    private fun handleAppInstall(data: Map<String, String>): Boolean {
+        val payload = AppInstallPayload.fromMap(data)
+        if (payload == null) {
+            Log.w(TAG, "app_install invalid payload; rendering generically")
+            return false
+        }
+        try {
+            AppInstallNotifications.notifyPrompt(this, payload)
+        } catch (_: Throwable) {
+            return false
+        }
+        Log.w(TAG, "app_install prompt posted for ${payload.packageName}")
+        return true
     }
 
     /**
@@ -253,6 +286,8 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     companion object {
+        private const val TAG = "CompanionMessaging"
+
         /**
          * Stable, collision-resistant request codes (finding 26).
          *
