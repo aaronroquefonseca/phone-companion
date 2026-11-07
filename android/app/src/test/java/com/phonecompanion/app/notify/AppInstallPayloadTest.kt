@@ -152,4 +152,71 @@ class AppInstallPayloadTest {
         assertTrue(name.endsWith(".apk"))
         assertTrue(name.startsWith("app-push-"))
     }
+
+    @Test
+    fun `prompt extras round-trip through fromExtras with intent keys`() {
+        // promptIntent writes exactly toExtras(); the activity reads via
+        // fromExtras. Before the fix these key domains disagreed and every
+        // activity launch parsed to null (Install unreachable).
+        val original = AppInstallPayload.fromMap(valid())!!
+        val roundTripped = AppInstallPayload.fromExtras(original.toExtras())
+        assertNotNull(roundTripped)
+        assertEquals(original, roundTripped)
+    }
+
+    @Test
+    fun `fromExtras accepts wire spellings too`() {
+        val roundTripped = AppInstallPayload.fromExtras(valid())
+        assertNotNull(roundTripped)
+        assertEquals("push-1", roundTripped!!.pushId)
+        assertEquals("Beta", roundTripped.label)
+    }
+
+    @Test
+    fun `fromExtras prefers intent keys and rejects tampered bundles`() {
+        val original = AppInstallPayload.fromMap(valid())!!
+        // Tampered URL in intent spelling: re-validation rejects.
+        assertNull(
+            AppInstallPayload.fromExtras(
+                original.toExtras() + (AppInstallPayload.EXTRA_APK_URL to "http://evil.example/x.apk"),
+            ),
+        )
+        // Missing key in both spellings: rejected, never trusted.
+        assertNull(AppInstallPayload.fromExtras(original.toExtras() - AppInstallPayload.EXTRA_SHA256))
+    }
+
+    @Test
+    fun `attempt nonce round-trips outside the validated payload`() {
+        val extras = AppInstallPayload.fromMap(valid())!!.toExtras() +
+            (AppInstallPayload.EXTRA_ATTEMPT to "nonce-1")
+        assertEquals("nonce-1", AppInstallPayload.attemptFromExtras(extras))
+        // No attempt on the fresh prompt tap.
+        assertNull(AppInstallPayload.attemptFromExtras(AppInstallPayload.fromMap(valid())!!.toExtras()))
+    }
+
+    @Test
+    fun `label and version with newlines are single-line sanitized`() {
+        val p = AppInstallPayload.fromMap(
+            valid() + ("label" to "Beta\nEvil line") + ("version" to "2.1\rcarriage"),
+        )
+        assertNotNull(p)
+        assertFalse(p!!.label.contains("\n"))
+        assertFalse(p.version!!.contains("\r"))
+        assertEquals("Beta Evil line", p.label)
+    }
+
+    @Test
+    fun `bidi and format controls are stripped from consent text`() {
+        val p = AppInstallPayload.fromMap(
+            valid() + ("label" to "Be\u202Eta") + ("version" to "1\u200E.0"),
+        )
+        assertNotNull(p)
+        assertEquals("Beta", p!!.label)
+        assertEquals("1.0", p.version)
+    }
+
+    @Test
+    fun `label that is only controls is rejected as blank`() {
+        assertNull(AppInstallPayload.fromMap(valid() + ("label" to "\u202E\u200E")))
+    }
 }

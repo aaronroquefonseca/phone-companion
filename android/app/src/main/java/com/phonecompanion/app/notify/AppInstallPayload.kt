@@ -30,11 +30,28 @@ data class AppInstallPayload(
     fun shortSha(): String = sha256.take(SHORT_SHA_CHARS) + "…"
 
     /**
+     * Single key owner for outbound intents: every component writes
+     * extras through this map (never hand-rolled putExtra chains that
+     * can drift from [fromExtras]). No attempt nonce here — the
+     * attempt is created per Install tap, after the prompt tap.
+     */
+    fun toExtras(): Map<String, String> {
+        val out = HashMap<String, String>(6)
+        out[EXTRA_PUSH_ID] = pushId
+        out[EXTRA_APK_URL] = apkUrl
+        out[EXTRA_SHA256] = sha256
+        out[EXTRA_PACKAGE] = packageName
+        if (!version.isNullOrEmpty()) out[EXTRA_VERSION] = version
+        out[EXTRA_LABEL] = label
+        return out
+    }
+
+    /**
      * Stable notification id so re-deliveries of the same push replace
      * rather than stack. Namespaced so it never collides with the generic
      * [NotificationPayload.notifyId] space in practice.
      */
-    fun notifyId(): Int = ("app_install:$pushId").hashCode()
+    fun notifyId(): Int = notifyIdFor(pushId)
 
     /**
      * Cache file name for the downloaded APK. Sanitized: [pushId] is
@@ -61,6 +78,16 @@ data class AppInstallPayload(
         const val EXTRA_LABEL = "pc_app_label"
 
         /**
+         * Per-Install-tap attempt nonce. Created by [AppInstallSessions]
+         * when the user taps Install and carried through the progress
+         * Cancel intent and the installer result intent into every
+         * terminal claim, so exactly-once is scoped per attempt — never
+         * per push id per minute. Absent on the prompt tap (no attempt
+         * exists yet); receivers tolerate it missing (legacy single key).
+         */
+        const val EXTRA_ATTEMPT = "pc_app_attempt"
+
+        /**
          * Traversal-safe cache file name for [pushId] (see
          * [AppInstallPayload.cacheFileName]). Single owner so every
          * component computes the identical path from a push id string.
@@ -81,6 +108,22 @@ data class AppInstallPayload(
         private const val SHORT_SHA_CHARS = 12
         private val SHA256_REGEX = Regex("^[0-9a-f]{64}$")
         private val PACKAGE_REGEX = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        private val MULTI_SPACE_REGEX = Regex(" {2,}")
+
+        /**
+         * Bidi/format controls stripped from consent-screen text (see
+         * [sanitizeSingleLine]). Explicit set — not all of Cf — so ZWJ
+         * emoji sequences keep rendering.
+         */
+        private val BIDI_FORMAT_STRIP: Set<Char> = buildSet {
+            add('\u200E'); add('\u200F') // LRM/RLM
+            for (c in '\u202A'..'\u202E') add(c) // embeddings/overrides
+            for (c in '\u2060'..'\u2064') add(c) // word joiner etc.
+            for (c in '\u2066'..'\u2069') add(c) // isolates
+            add('\u061C') // arabic letter mark
+            add('\uFEFF') // zero-width no-break space
+            add('\u180E') // mongolian vowel separator
+        }
 
         /**
          * True when this FCM data map is an app-install push. Accepts the
@@ -116,10 +159,16 @@ data class AppInstallPayload(
             if (packageName.isEmpty() || packageName.length > MAX_PACKAGE_CHARS) return null
             if (!PACKAGE_REGEX.matches(packageName)) return null
 
-            val label = data["label"]?.trim().orEmpty()
+            // Consent-screen hardening: label/version render on the
+            // pre-install screen, so newlines, carriage returns and
+            // bidi/format controls are sanitized to a single line here —
+            // a hostile operator must not be able to spoof or re-order
+            // the consent text. The consent screen shows
+            // package/version/short-SHA (kept verbatim: validated shapes).
+            val label = sanitizeSingleLine(data["label"]?.trim().orEmpty())
             if (label.isEmpty() || label.length > MAX_LABEL_CHARS) return null
 
-            val version = data["version"]?.trim()?.takeIf { it.isNotEmpty() }
+            val version = data["version"]?.trim()?.let(::sanitizeSingleLine)?.takeIf { it.isNotEmpty() }
             if (version != null && version.length > MAX_VERSION_CHARS) return null
 
             return AppInstallPayload(
@@ -134,15 +183,53 @@ data class AppInstallPayload(
 
         /**
          * Rebuilds a validated payload from Intent extras (or any nullable
-         * string map). Nulls are dropped; the result is re-validated, so a
-         * tampered or truncated extras bundle is rejected, never trusted.
+         * string map). Accepts BOTH spellings: the [EXTRA_*] intent keys
+         * written by [toExtras] (single key owner) and the wire keys
+         * (`push_id`, `apk_url`, …) — intent first, wire fallback — then
+         * re-validates, so a tampered or truncated extras bundle is
+         * rejected, never trusted.
          */
         fun fromExtras(extras: Map<String, String?>): AppInstallPayload? {
-            val data = HashMap<String, String>(extras.size)
-            for ((k, v) in extras) {
-                if (v != null) data[k] = v
+            val wire = HashMap<String, String>(extras.size)
+            fun take(wireKey: String, intentKey: String, wireSpelling: String) {
+                val v = extras[intentKey] ?: extras[wireSpelling]
+                if (!v.isNullOrEmpty()) wire[wireKey] = v
             }
-            return fromMap(data)
+            take("push_id", EXTRA_PUSH_ID, "push_id")
+            take("apk_url", EXTRA_APK_URL, "apk_url")
+            take("sha256", EXTRA_SHA256, "sha256")
+            take("package", EXTRA_PACKAGE, "package")
+            take("version", EXTRA_VERSION, "version")
+            take("label", EXTRA_LABEL, "label")
+            return fromMap(wire)
+        }
+
+        /** Attempt nonce from prompt/activity extras, if one was attached. */
+        fun attemptFromExtras(extras: Map<String, String?>): String? =
+            extras[EXTRA_ATTEMPT]?.takeIf { it.isNotBlank() }
+                ?: extras["attempt"]?.takeIf { it.isNotBlank() }
+
+        /** Stable notification id for [pushId]: single owner (see [notifyId]). */
+        fun notifyIdFor(pushId: String): Int = ("app_install:$pushId").hashCode()
+
+        /**
+         * Single-line sanitizer for consent-screen text (label/version):
+         * CR/LF/TAB fold to one space, other C0/C1 controls and the
+         * bidi/format controls (U+200E/F, U+202A–E, U+2060–69, U+061C,
+         * U+FEFF, U+180E) are dropped. ZWJ and other Cf outside this set
+         * are kept so emoji sequences still render.
+         */
+        internal fun sanitizeSingleLine(raw: String): String {
+            val sb = StringBuilder(raw.length)
+            for (c in raw) {
+                when {
+                    c == '\n' || c == '\r' || c == '\t' -> sb.append(' ')
+                    c.isISOControl() -> { /* drop other C0/C1 */ }
+                    c in BIDI_FORMAT_STRIP -> { /* drop spoof-capable controls */ }
+                    else -> sb.append(c)
+                }
+            }
+            return sb.toString().trim().replace(MULTI_SPACE_REGEX, " ")
         }
 
         /** HTTPS-only, host required; anything else fails closed to false. */
