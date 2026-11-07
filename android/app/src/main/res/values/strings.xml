@@ -67,4 +67,45 @@
 
     <string name="widget_label">Widget</string>
     <string name="widget_desc">Shows one of your server widgets.</string>
+
+    <string name="app_install_title">Install app?</string>
+    <string name="app_install_invalid">That install request was invalid or incomplete. Ask the operator to send it again.</string>
+    <string name="app_install_package_label">Package: %1$s</string>
+    <string name="app_install_version_label">Version: %1$s</string>
+    <string name="app_install_sha_label">SHA-256: %1$s</string>
+    <string name="app_install_source_label">Source: %1$s</string>
+    <string name="app_install_verify_note">Check that the package and version match what you expect before installing — a swapped download link would show here.</string>
+    <string name="app_install_unknown_sources_title">Permission needed: install unknown apps</string>
+    <string name="app_install_unknown_sources_body">Android only lets chosen apps install other apps. To install %1$s, allow “Install unknown apps” for Phone Companion on the next screen, then come back here.</string>
+    <string name="app_install_allow_unknown">Allow installs</string>
+    <string name="app_install_install">Download and install</string>
+    <string name="app_install_cancel">Cancel</string>
+    <string name="app_install_downloading">Downloading… %1$d%%</string>
+    <string name="app_install_verifying">Verifying download…</string>
+    <string name="app_install_installing">Installing… check the system install dialog.</string>
+    <string name="app_install_error_invalid">Invalid install request — nothing was downloaded.</string>
+    <string name="app_install_error_download">Download failed. Nothing was installed — tap Download and install to try once more.</string>
+    <string name="app_install_error_too_large">That file is over the 100 MB limit. Nothing was installed.</string>
+    <string name="app_install_error_mismatch">That file failed verification and was deleted. Nothing was installed — ask the operator to re-send the update.</string>
+    <string name="app_install_error_install">Install could not start. Nothing was installed.</string>
+    <string name="app_install_error_cancelled">Download cancelled. Nothing was installed.</string>
+    <string name="app_install_error_unknown_sources">Permission to install unknown apps was revoked before install could start. Nothing was installed — re-allow it and try again.</string>
+    <string name="app_install_close">Close</string>
+
+    <string name="app_install_progress_title">Downloading %1$s…</string>
+    <string name="app_install_success_title">Installed %1$s</string>
+    <string name="app_install_success_body">%1$s installed.</string>
+    <string name="app_install_user_cancelled_title">Install cancelled</string>
+    <string name="app_install_user_cancelled_body">%1$s was not installed.</string>
+    <string name="app_install_failed_title">Install failed</string>
+    <string name="app_install_failed_body">%1$s could not be installed: %2$s</string>
+    <string name="app_install_failed_body_plain">%1$s could not be installed.</string>
+    <string name="app_install_blocked_title">Install blocked</string>
+    <string name="app_install_blocked_body">%1$s failed verification and was not installed.</string>
+    <string name="app_install_download_failed_title">Download failed</string>
+    <string name="app_install_download_failed_body">%1$s could not be downloaded.</string>
+    <string name="app_install_too_large_title">Download too large</string>
+    <string name="app_install_too_large_body">%1$s is over the 100 MB limit and was not downloaded.</string>
+    <string name="app_install_cancelled_title">Download cancelled</string>
+    <string name="app_install_cancelled_body">%1$s download was cancelled.</string>
 </resources>

@@ -74,18 +74,8 @@ object ApiClient {
             chain.proceed(request)
         }
 
-        val http = OkHttpClient.Builder()
+        val http = baseBuilder()
             .addInterceptor(auth)
-            .apply {
-                // Debug-only body logging would leak the Bearer token and the
-                // enroll response's device_key: BASIC logs method/URL/status
-                // only, and is compiled out of release builds entirely.
-                if (BuildConfig.DEBUG) {
-                    addInterceptor(HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BASIC))
-                }
-            }
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
             .build()
 
         return Retrofit.Builder()
@@ -95,4 +85,28 @@ object ApiClient {
             .build()
             .create(ApiService::class.java)
     }
+
+    /**
+     * Shared OkHttp stack for non-API downloads (APK fetch). Same timeouts
+     * as the API client, but deliberately WITHOUT the auth interceptor
+     * (APK URLs may be signed third-party URLs, and the device Bearer
+     * token must never be sent to a non-server host) and WITHOUT any
+     * logging interceptor (Level.NONE even in debug builds: APK URLs may
+     * carry signed query tokens that must never reach logcat).
+     */
+    fun downloadClient(): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    private fun baseBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
+        .apply {
+            // Debug-only BASIC logs method/URL/status only, compiled out of
+            // release builds entirely (see create()).
+            if (BuildConfig.DEBUG) {
+                addInterceptor(HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BASIC))
+            }
+        }
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
 }

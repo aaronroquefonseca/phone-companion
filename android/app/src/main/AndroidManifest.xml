@@ -11,6 +11,12 @@
     <!-- No CAMERA permission: pairing scans with the Play services code
         scanner (GmsBarcodeScanning), which runs Google's own scanner
         activity and needs no app-side camera permission or boilerplate. -->
+    <!-- Install gate for remote APK pushes (app_install): the pre-install
+        UI checks packageManager.canRequestPackageInstalls() and routes to
+        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES first; install is never
+        attempted without the grant. PackageInstaller sessions need this to
+        commit. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- No RECEIVE_BOOT_COMPLETED: WorkManager persists the hourly poll
         across reboots on its own; no boot receiver is promised or needed. -->
 
@@ -60,6 +66,24 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
+
+        <!-- Remote APK install (app_install push): pre-install UI opened
+            ONLY by an explicit tap on the install prompt — never
+            auto-started, no boot receiver. Exported=false: explicit
+            in-app PendingIntents only. -->
+        <activity
+            android:name=".ui.AppInstallActivity"
+            android:exported="false" />
+
+        <!-- PackageInstaller result + download-cancel receivers for the
+            install flow. Exported=false: explicit PendingIntents from this
+            app only (installer status, notification Cancel action). -->
+        <receiver
+            android:name=".notify.AppInstallResultReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".notify.AppInstallCancelReceiver"
+            android:exported="false" />
 
         <!-- Single Glance widget receiver. One picker entry ("Widget");
               placement and tap-to-configure choose any cached row. -->

@@ -1,0 +1,69 @@
+package com.phonecompanion.app.notify
+
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageInstaller
+import android.util.Log
+import java.io.File
+
+/**
+ * APK install via [PackageInstaller.Session] (MODE_FULL_INSTALL).
+ *
+ * Never called without the unknown-sources grant (the activity checks
+ * `packageManager.canRequestPackageInstalls()` first) and never
+ * automatically — only from the explicit Install tap after download +
+ * SHA-256 verification. Streams the verified file into the session,
+ * commits with a result [PendingIntent] to [AppInstallResultReceiver],
+ * and returns: the terminal outcome is posted by the receiver (exactly
+ * one notification), never here. Call off the main thread. Never throws —
+ * a commit failure deletes the cached APK and returns false so the caller
+ * can post the error state. Logging discipline: package names only.
+ */
+object AppInstallInstaller {
+
+    const val TAG = "AppInstallInstaller"
+    const val ACTION_INSTALL_RESULT = "pc_app_install_result"
+
+    fun commit(context: Context, payload: AppInstallPayload, apkFile: File, attempt: String?): Boolean {
+        val installer = context.packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(
+            PackageInstaller.SessionParams.MODE_FULL_INSTALL,
+        )
+        params.setAppPackageName(payload.packageName)
+        var sessionId = -1
+        try {
+            sessionId = installer.createSession(params)
+            installer.openSession(sessionId).use { session ->
+                session.openWrite("apk", 0, -1).use { out ->
+                    apkFile.inputStream().use { input -> input.copyTo(out) }
+                    session.fsync(out)
+                }
+                val resultIntent = Intent(context, AppInstallResultReceiver::class.java)
+                    .setAction(ACTION_INSTALL_RESULT)
+                    .putExtra(AppInstallPayload.EXTRA_PUSH_ID, payload.pushId)
+                    .putExtra(AppInstallPayload.EXTRA_PACKAGE, payload.packageName)
+                    .putExtra(AppInstallPayload.EXTRA_LABEL, payload.label)
+                    .putExtra(AppInstallPayload.EXTRA_ATTEMPT, attempt)
+                val result = PendingIntent.getBroadcast(
+                    context,
+                    CompanionMessagingService.actionRequestCode(
+                        payload.notifyId(),
+                        ACTION_INSTALL_RESULT,
+                    ),
+                    resultIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+                session.commit(result.intentSender)
+            }
+            Log.i(TAG, "app_install committed session for ${payload.packageName}")
+            return true
+        } catch (e: Exception) {
+            // Class name only — never paths, URLs, or hashes.
+            Log.w(TAG, "app_install commit failed for ${payload.packageName} [${e.javaClass.simpleName}]")
+            if (sessionId >= 0) runCatching { installer.abandonSession(sessionId) }
+            runCatching { apkFile.delete() }
+            return false
+        }
+    }
+}

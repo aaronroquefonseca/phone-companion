@@ -131,6 +131,65 @@ material in either line. Token lifecycle in the app:
 Backend side: `FCM_PROJECT_ID` + service-account JSON at
 `FCM_CREDENTIALS_FILE` (see `backend/README.md`).
 
+### Remote APK install push (`app_install`)
+
+FCM data message with string fields `type=app_install`, `push_id`,
+`apk_url` (https only), `sha256` (64 lowercase hex), `package`,
+`version` (optional), `label` (required). The app validates the payload
+(missing/oversized/invalid fields are rejected, never crash) and posts an
+`Install <label>?` prompt on the general channel (`pc_general` — no new
+channel; unknown kinds keep the generic fallback untouched).
+
+- Permission: `REQUEST_INSTALL_PACKAGES` (manifest). Onboarding: tapping
+  the prompt opens a pre-install screen showing package, version (or
+  `unknown version`), short SHA-256 (first 12 chars + `…`), and source
+  host. If `packageManager.canRequestPackageInstalls()` is false, Install
+  stays disabled behind a short explanation plus a deep-link to this
+  app's `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` page; the grant is
+  re-checked on return, and install is never attempted without it.
+- Tapping Install (and only that explicit tap — never auto-install, never
+  on boot/reboot/receive) downloads over HTTPS via the shared OkHttp
+  stack (redirects followed https-only) to the app cache dir with a
+  progress notification + Cancel action, 100 MB hard cap (abort + error
+  above it), then verifies SHA-256 BEFORE install (mismatch = hard
+  refuse, error notification naming the package, file deleted, no hashes
+  in logcat — package + match/mismatch only).
+- Install goes through `PackageInstaller.Session` (`MODE_FULL_INSTALL` +
+  `setAppPackageName`); the installer-result receiver deletes the cached
+  APK on every path and posts exactly one notification (success /
+  plain user-cancelled with NO retry / failure with installer message).
+  The download-cancel receiver and the activity race to post at most one
+  terminal state per Install-tap attempt (fresh nonce per tap, carried
+  through the Cancel and installer-result intents — never two, never
+  silent, never a retry, and a re-push is never suppressed). The transfer
+  lives in a retained ViewModel, so rotation neither cancels the
+  download nor spawns a second flow. The unknown-sources grant is
+  re-checked after verify, before commit (revoked → onboarding gate,
+  fail closed); stale `app_push/` entries are purged on prompt/activity
+  entry (24 h retention).
+
+Manual test checklist (needs a paired device + operator backend):
+
+1. Pair the app, then open system Settings → Apps → Phone Companion →
+   “Install unknown apps” and leave it OFF.
+2. Operator sends a test push for a small APK you built yourself
+   (`type=app_install` + real `push_id`/`apk_url`/`sha256`/`package`/
+   `version`/`label`).
+3. Notification arrives titled exactly `Install <label>?` on the general
+   channel; tap it (nothing installs on receive).
+4. Pre-install screen shows package, version, short SHA-256, source host;
+   Install is disabled behind the unknown-sources explainer → tap Allow,
+   grant in Settings, return → Install enables.
+5. Tap Install → progress notification grows; SHA shown matches the file
+   you uploaded (`sha256sum` the APK and compare the first 12 chars).
+6. System install dialog appears → Accept → success notification, app
+   installed; `cacheDir/app_push/` holds no leftover APK
+   (`adb shell ls /data/data/com.phonecompanion.app/cache/app_push`).
+7. Negative paths: send a push with a wrong `sha256` → blocked error
+   naming the package, no install attempt, cache clean. Cancel mid-
+   download → single cancelled notification, partial file gone. Deny at
+   the system dialog → single plain cancelled note, no retry.
+
 ## Adding widgets
 
 - Phone screen: open Widgets (refreshes from cache on open; "Refresh
