@@ -9,7 +9,7 @@ their PR lands.
 
 ## Auth schemes
 
-Two independent schemes; they are never interchangeable:
+Three independent schemes; they are never interchangeable:
 
 1. **WebUI session** — cookie-based. `POST /login` (WebUI PR) sets an
    `HttpOnly; Secure; SameSite=Lax` session cookie signed with
@@ -20,8 +20,20 @@ Two independent schemes; they are never interchangeable:
    `GET /api/v1/widgets` (and future device calls). Tokens are individually
    revocable; the server stores only a hash (`token_hash`, see `db.go`).
 
+3. **Operator API token (Bearer)** — machine credential for operator
+   automation, sent as `Authorization: Bearer <token>`
+   (`OPERATOR_API_TOKEN`). Accepted on the operator POST endpoints
+   (`POST /api/v1/notify`, `POST /api/v1/app-push`) as an alternative to
+   the WebUI session. It is never a device token: a live device Bearer on
+   an operator endpoint is rejected with `403`.
+
 Unauthenticated responses use `401` (missing/invalid credential) and `403`
-(valid credential, not allowed). Error bodies: `{"error": "<code>"}` with a
+(valid credential, not allowed). No scheme substitutes for
+another: a device token never authorizes operator endpoints, and a
+session/token mix-up across surfaces fails closed. On the operator
+endpoints (`POST /api/v1/notify`, `POST /api/v1/app-push`) any Bearer value
+other than the operator token is `403` — only a missing credential is
+`401`. Error bodies: `{"error": "<code>"}` with a
 stable machine-readable code plus HTTP status.
 
 ## Endpoints
@@ -127,11 +139,15 @@ the widgets PR's call.
 
 ### `POST /api/v1/notify` (notifications PR)
 
-Enqueues fan-out to devices. Auth (v1): WebUI session (operator) ONLY —
-never a device token (a request carrying a Bearer token is rejected
-with `403`, even alongside a session). The automation credential named
-in earlier drafts does not exist yet; when it lands it will be a
-separate v1-compatible auth scheme, not a device token.
+Enqueues fan-out to devices. Auth (v1): WebUI session (operator) or the
+operator API token (`OPERATOR_API_TOKEN`, sent as
+`Authorization: Bearer <token>`) — never a device token. Any Bearer
+value that is not the operator token is rejected with `403` (no lookup,
+no fallthrough to the session, even alongside one); no credential at all
+is `401`. The token path needs no
+write-guard header; the session path requires `X-Requested-With:
+XMLHttpRequest` (or a session-bound CSRF token), same as the other
+operator POST routes.
 
 Request:
 
@@ -163,6 +179,132 @@ Request:
   shows it where sensible.
 
 Response `202`: `{"notification_id": "<opaque-id>", "accepted": 2}`.
+
+### `POST /api/v1/app-push` (poll-based remote APK install push, additive v1)
+
+Queues a remote APK install directive that devices pick up on their next
+poll (`GET /api/v1/commands`). There is deliberately NO push transport in
+this flow: no FCM, no Google services, no `google-services.json` — the
+operator pushes, the app polls (hourly WorkManager + manual refresh),
+same cadence as the widgets poll.
+
+Auth (v1): WebUI session (operator) with the write-guard header, OR the
+operator API token (`OPERATOR_API_TOKEN`, sent as
+`Authorization: Bearer <token>`, no write-guard header needed) — never a
+device token. Any Bearer value that is not the operator token is rejected
+with `403` (no lookup, no fallthrough to the session, even alongside
+one); no credential at all is `401`; a session without the write-guard
+header is `403`.
+
+Request:
+
+```json
+{
+  "target": { "all": true },
+  "apk_url": "https://example.com/app-release.apk",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "package": "com.example.app",
+  "version": "1.2.3",
+  "label": "Test App"
+}
+```
+
+- `target`: exactly one of `{ "all": true }` or
+  `{ "device_ids": ["<id>", ...] }` (same union rule as notify: both
+  forms together are `422` `ambiguous_target`, empty is `422`
+  `empty_target`). `{ "all": true }` with an empty/absent `device_ids`
+  still means all. Unknown ids are tolerated and skipped, revoked devices
+  are always excluded — same semantics as `POST /api/v1/notify`.
+- `apk_url`: required, `https://` only (no other scheme, no credentials
+  in the URL), max 2048 characters.
+- `sha256`: required, exactly 64 lowercase hex characters (the expected
+  digest of the APK bytes; the backend stores the digest, never the APK).
+- `package`: required, reverse-DNS shape (at least one dot, only
+  `[A-Za-z0-9_.]`), max 256 characters.
+- `version`: optional, max 64 characters; absent rides as an empty
+  string in the queued command.
+- `label`: required, 1..100 characters (operator display name).
+- The marshaled command must fit the notify size budget (same ~3.5KB
+  bound): over-budget requests are `422` `payload_too_long`.
+
+Validation failures are `422` with a machine-readable `{"error":
+"<code>"}` (`empty_target`, `ambiguous_target`, `too_many_targets`,
+`missing_apk_url`, `invalid_apk_url`, `missing_sha256`,
+`invalid_sha256`, `missing_package`, `invalid_package`,
+`invalid_version`, `missing_label`, `invalid_label`,
+`payload_too_long`). Undecodable bodies are `400` `invalid_json`
+(unknown fields are tolerated); oversize bodies are `413`
+`body_too_large`.
+
+Response `202`: `{"push_id": "<opaque-id>", "accepted": 2}` where
+`accepted` counts devices queued. `accepted: 0` is a normal `202`
+strictly when no devices resolve (unknown ids, or an empty registry) —
+not an error. Every enqueue is recorded in the server-side `app_pushes`
+audit table (`push_id`, timestamp, operator identity, target, the request
+fields, and the final `accepted` count); `notification_history` is
+untouched by this endpoint. Audit is written BEFORE any command is
+servable: the audit row and the per-device pending rows commit
+atomically — a DB failure answers `500` with nothing queued.
+
+Caps: at most 20 pending commands per device. An enqueue touching a
+device already at its budget is rejected wholesale with `429`
+`too_many_pending` (nothing queued, no audit row). Commands expire 7 days
+after enqueue; expired rows are pruned best-effort on enqueue and on
+every poll, and are never served.
+
+### `GET /api/v1/commands` (device poll for queued install directives)
+
+Poll endpoint for the app. Auth: device Bearer token ONLY
+(missing/invalid/revoked Bearer is `401`; the operator API token is a
+valid credential on the wrong surface and is rejected with `403`; a
+session cookie alone is `401`). Returns the caller's pending (unexpired,
+unacked) commands — that device's rows only — oldest-first. `Cache-Control:
+no-store, private`.
+
+Response `200`:
+
+```json
+{
+  "commands": [
+    {
+      "command_id": "<per-device-opaque-id>",
+      "type": "app_install",
+      "push_id": "<opaque-id>",
+      "apk_url": "https://example.com/app-release.apk",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "package": "com.example.app",
+      "version": "1.2.3",
+      "label": "Test App"
+    }
+  ]
+}
+```
+
+The queued command map is the exact flat string data-map shape the
+FCM-based variant fanned out (plus the per-device `command_id`), so the
+client parser is transport-agnostic: `type` is `app_install`, unknown
+`type` values must be ignored (not crash) by the app. An empty queue is
+`{"commands": []}`.
+
+### `POST /api/v1/commands/ack` (device ack for a queued install directive)
+
+Marks one of the caller's commands received. Auth: device Bearer token
+ONLY (same 401/403 rules as `GET /api/v1/commands`).
+
+Request: `{"command_id": "<per-device-opaque-id>"}`.
+
+Response `200`: `{"acked": true}`. Acking is idempotent: re-acking an
+already-acked command still 200s. Unknown ids — or ids queued for another
+device — are `404` `{"error": "command_not_found"}` with no distinction
+(no oracle across devices). Malformed bodies are `400`
+`{"error": "invalid_request"}`.
+
+Lifecycle: operator `POST /api/v1/app-push` queues one pending row per
+resolved device → each device sees its rows on `GET /api/v1/commands`
+until it acks (or they expire after 7 days) → `POST
+/api/v1/commands/ack` marks that device's row received. Revoked devices
+fail device auth, so their queued rows sit unserved until the TTL prune
+collects them.
 
 ## Widget types + envelope
 

@@ -34,6 +34,12 @@ func main() {
 	if err := notify.Migrate(db); err != nil {
 		log.Fatalf("migrate notifications: %v", err)
 	}
+	if err := MigrateAppPush(db); err != nil {
+		log.Fatalf("migrate app pushes: %v", err)
+	}
+	if err := MigrateAppPushCommands(db); err != nil {
+		log.Fatalf("migrate app-push commands: %v", err)
+	}
 
 	// Notifications (P4): fail fast on unknown NOTIFY_DRIVER so a typo can
 	// never silently become a black hole.
@@ -55,6 +61,13 @@ func main() {
 
 	SetDeviceDB(db)
 
+	// Operator API token (fail-closed boot gate lives in Config.Validate
+	// above: the process never serves with a missing/weak token). The raw
+	// value stays in this variable only — it is never logged and never
+	// leaves in a response; audit rows record "operator-token".
+	SetOperatorAPIToken(cfg.OperatorAPIToken)
+	SetOperatorSessionUser(cfg.AdminUser)
+
 	sessionStore, err := NewSessionStore(db, cfg.SessionSecret)
 	if err != nil {
 		log.Fatalf("session store: %v", err)
@@ -73,7 +86,10 @@ func main() {
 	// Same notify wiring as NewMux (kept inline: webui.RegisterRoutes below
 	// needs the bare *http.ServeMux, while ListenAndServe takes the
 	// no-store-wrapped handler).
-	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, csrf, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/notify", operatorAdminChain(sessionStore, csrf, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/app-push", operatorAdminChain(sessionStore, csrf, handleAppPush(db)))
+	base.Handle("GET /api/v1/commands", http.HandlerFunc(handleAppPushCommandsPoll(db)))
+	base.Handle("POST /api/v1/commands/ack", http.HandlerFunc(handleAppPushCommandsAck(db)))
 	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,

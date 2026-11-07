@@ -193,7 +193,7 @@ func TestE2EDoneCriteria(t *testing.T) {
 	// Log/NoopSender fail closed in the handler now): rows still land in
 	// notification_history.
 	base.Handle("POST /api/v1/notify",
-		notifyAdminChain(sessions, csrf, handleNotify(db, &captureSender{})))
+		operatorAdminChain(sessions, csrf, handleNotify(db, &captureSender{})))
 	webui.RegisterRoutes(base, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",

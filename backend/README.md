@@ -41,7 +41,10 @@ model: `docs/threat-model.md`.
 | `DELETE /api/v1/devices/{id}` | admin session + write-guard proof (missing `X-Requested-With`/CSRF → `403`) | Revoke; idempotent; unknown id → `404 device_not_found` |
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
-| `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/notify` | operator only: admin session + write-guard proof (`401` without session; any non-operator Bearer → `403`; missing `X-Requested-With`/CSRF → `403`), OR `OPERATOR_API_TOKEN` Bearer (no guard needed) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/app-push` | operator only: admin session + write-guard proof, OR `OPERATOR_API_TOKEN` Bearer (any non-operator Bearer → `403`) | `202 {push_id, accepted}`; queues per-device rows for `GET /api/v1/commands`; audit row in `app_pushes` (atomic with the queue); `notification_history` untouched |
+| `GET /api/v1/commands` | device Bearer only (`401` missing/invalid/revoked; operator token → `403`) | `200 {commands:[...]}` pending install directives for that device; `Cache-Control: no-store, private` |
+| `POST /api/v1/commands/ack` | device Bearer only (same 401/403 rules) | `200 {acked:true}` for `{command_id}`; idempotent; unknown/other-device id → `404` |
 | `GET /webui/notify` | admin session (else `303 /login`) | Test-notification form (target dropdown from the live registry; revoked devices excluded) + PRG confirmation banner. `accepted:0` renders neutral guidance (pair first), never green |
 | `POST /webui/notify` | admin session + CSRF token | PRG: `303` to `/webui/notify?sent=<id>&accepted=<n>` (whitelisted params); refreshing the confirmation never re-sends |
 
@@ -66,6 +69,7 @@ docker build -t phone-companion-backend:local ./backend
 docker run --rm -p 8080:8080 \
   -e ADMIN_USER=admin -e ADMIN_PASSWORD='at-least-12-chars' \
   -e SESSION_SECRET="$(openssl rand -hex 32)" \
+  -e OPERATOR_API_TOKEN="$(openssl rand -hex 32)" \
   phone-companion-backend:local
 curl localhost:8080/healthz   # {"status":"ok"}
 ```
@@ -143,6 +147,13 @@ htpasswd -bnBC 10 admin 'your-password' | cut -d: -f2
 `SESSION_SECRET`: `openssl rand -hex 32` (min 32 bytes, no `CHANGEME`
 prefix). It signs session cookies AND (domain-separated) CSRF tokens.
 
+`OPERATOR_API_TOKEN`: `openssl rand -hex 32` (min 32 bytes, no
+`CHANGEME` prefix, never committed, never logged). Machine credential
+for operator automation — accepted as `Authorization: Bearer` on
+`POST /api/v1/notify` and `POST /api/v1/app-push` as an alternative to
+the WebUI session. The backend refuses to boot without a strong value
+(fail closed, same as `SESSION_SECRET`).
+
 Session cookies are `Secure` by default (browsers only send them over
 HTTPS — correct behind the TLS proxy). Plain-HTTP development (loopback /
 LAN without TLS) needs the explicit escape hatch or the browser will not
@@ -213,6 +224,47 @@ package touches client-side FCM artifacts.
   app's post-poll backfill). No device accepting means the handler answers
   `500 driver_unavailable` (fail closed); genuinely zero targets stay
   `202 accepted:0` behind any driver.
+
+### Poll-based remote APK install push (`POST /api/v1/app-push`, `GET /api/v1/commands`)
+
+No FCM, no Google services anywhere in this flow: the operator queues an
+APK install directive and each device picks it up on its next poll
+(hourly WorkManager + manual refresh, same cadence as widgets).
+
+Operator-only (session + write guard, or `OPERATOR_API_TOKEN` Bearer;
+any other Bearer gets `403`). `POST /api/v1/app-push` records one audit
+row in the `app_pushes` table (`push_id`, timestamp, operator identity —
+`operator-token` or `session:<username>`, never the secret — target, and
+the request fields) atomically with one pending per-device row in
+`app_push_commands`; no APK bytes are stored or proxied and
+`notification_history` is untouched. Caps: max 20 pending commands per
+device (`429 too_many_pending` rejects the whole enqueue), 7-day TTL
+with prune on enqueue and on poll. Error codes and caps: see
+`docs/api-contract.md` ("POST /api/v1/app-push", "GET /api/v1/commands").
+
+```sh
+# Placeholder token below — export the real OPERATOR_API_TOKEN value
+# from your secret store instead of pasting it into shell history.
+curl -s -X POST localhost:8080/api/v1/app-push \
+  -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":{"all":true},
+       "apk_url":"https://example.com/app-release.apk",
+       "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "package":"com.example.app",
+       "version":"1.2.3",
+       "label":"Test App"}'
+# {"push_id":"<opaque-id>","accepted":2}
+
+# Device side (Bearer = the per-device token from enroll):
+curl -s localhost:8080/api/v1/commands -H "Authorization: Bearer $DEVICE_TOKEN"
+# {"commands":[{"command_id":"...","type":"app_install","push_id":"...", ...}]}
+curl -s -X POST localhost:8080/api/v1/commands/ack \
+  -H "Authorization: Bearer $DEVICE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"command_id":"<command-id-from-poll>"}'
+# {"acked":true}
+```
 
 ## Log viewing
 

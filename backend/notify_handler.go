@@ -3,7 +3,7 @@
 // Request/response shapes follow docs/api-contract.md ("notify" section).
 // Target resolution queries the devices table directly here: only the
 // P0-stable columns (id, name) are selected. Admin gating wraps at
-// registration time via notifyAdminChain (see notify_auth.go): the WebUI
+// registration time via operatorAdminChain (see notify_auth.go): the WebUI
 // session is required (401 without one) and device Bearer tokens are
 // rejected with 403.
 package main

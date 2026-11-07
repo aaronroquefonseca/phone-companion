@@ -58,7 +58,7 @@ func setupWebUITestMux(t *testing.T) (mux http.Handler, db *sql.DB, csrf *webui.
 	}
 
 	base := newBaseMux(reg, sessions, csrf)
-	base.Handle("POST /api/v1/notify", notifyAdminChain(sessions, csrf, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/notify", operatorAdminChain(sessions, csrf, handleNotify(db, sender)))
 	RegisterNotifyWebUIRoutes(base, db, sender, sessions, csrf)
 	webui.RegisterRoutes(base, sessions, webui.Credentials{Username: "op", Password: "op-pass"}, csrf)
 	mux = withAuthNoStore(base)

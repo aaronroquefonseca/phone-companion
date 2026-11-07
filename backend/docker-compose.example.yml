@@ -2,7 +2,7 @@
 # in the placeholders. NEVER commit the filled-in file (it holds secrets).
 #
 #   cp backend/docker-compose.example.yml docker-compose.yml
-#   # edit ADMIN_* / SESSION_SECRET, then:
+#   # edit ADMIN_* / SESSION_SECRET / OPERATOR_API_TOKEN, then:
 #   docker compose up --build -d
 #
 # Reverse-proxy hint: in production put a TLS-terminating reverse proxy
@@ -38,6 +38,13 @@ services:
       ADMIN_PASSWORD_HASH: "CHANGEME-bcrypt-hash"
       # ADMIN_PASSWORD: "CHANGEME-bootstrap-only"
       SESSION_SECRET: "CHANGEME-long-random-secret-min-32-bytes"
+      # Machine operator credential for POST /api/v1/notify and
+      # POST /api/v1/app-push (Authorization: Bearer). REQUIRED at boot
+      # (fail closed like SESSION_SECRET): generate with
+      # `openssl rand -hex 32`, never commit the real value. Any other
+      # Bearer value on those endpoints is 403 (no lookup, no session
+      # fallthrough).
+      OPERATOR_API_TOKEN: "CHANGEME-operator-api-token-min-32-bytes"
       DB_PATH: "/data/phone-companion.db"
       WIDGET_DIR: "/widgets"
       # Public origin used to build the pairing QR enroll_url.
@@ -53,6 +60,8 @@ services:
       # NOTIFY_DRIVER: "fcm"
       # FCM_PROJECT_ID: ""
       # FCM_CREDENTIALS_FILE: "/run/secrets/fcm.json"
+      # (Poll-based APK install push needs no push driver: directives are
+      # queued via POST /api/v1/app-push and picked up on device poll.)
     volumes:
       # sqlite state (survives rebuilds).
       - phone-companion-data:/data
