@@ -9,7 +9,7 @@ their PR lands.
 
 ## Auth schemes
 
-Two independent schemes; they are never interchangeable:
+Three schemes; they are never interchangeable:
 
 1. **WebUI session** — cookie-based. `POST /login` (WebUI PR) sets an
    `HttpOnly; Secure; SameSite=Lax` session cookie signed with
@@ -17,8 +17,21 @@ Two independent schemes; they are never interchangeable:
    list, notify composer. Never sent by the Android app.
 2. **Device token (Bearer)** — per-device opaque token issued at enroll,
    sent as `Authorization: Bearer <token>`. Used by the Android app for
-   `GET /api/v1/widgets` (and future device calls). Tokens are individually
+   `GET /api/v1/widgets` and the poll-based push outbox
+   (`GET /api/v1/events/wait`, `GET /api/v1/outbox`,
+   `POST /api/v1/commands/ack`). Tokens are individually
    revocable; the server stores only a hash (`token_hash`, see `db.go`).
+3. **Operator token (Bearer)** — single machine credential from
+   `OPERATOR_API_TOKEN`, sent as `Authorization: Bearer <token>`. Accepted
+   on the operator POST endpoints (`POST /api/v1/notify`,
+   `POST /api/v1/app-push`) as an alternative to the WebUI session (a
+   valid operator token needs no session and no `X-Requested-With`
+   proof — CSRF proofs are for ambient cookies, not Bearers). ANY other
+   Bearer value on an operator endpoint is `403` (valid credential, not
+   allowed): device tokens, revoked tokens, and garbage are all refused
+   with no further lookup and never fall through to the session. On
+   device endpoints the operator token is likewise `403` — operator
+   credentials never act as a device.
 
 Unauthenticated responses use `401` (missing/invalid credential) and `403`
 (valid credential, not allowed). Error bodies: `{"error": "<code>"}` with a
@@ -127,11 +140,9 @@ the widgets PR's call.
 
 ### `POST /api/v1/notify` (notifications PR)
 
-Enqueues fan-out to devices. Auth (v1): WebUI session (operator) ONLY —
-never a device token (a request carrying a Bearer token is rejected
-with `403`, even alongside a session). The automation credential named
-in earlier drafts does not exist yet; when it lands it will be a
-separate v1-compatible auth scheme, not a device token.
+Enqueues fan-out to devices. Auth (v1): WebUI session (operator) or the
+operator token — never a device token (a request carrying any other Bearer
+is rejected with `403`, even alongside a session).
 
 Request:
 
@@ -163,6 +174,145 @@ Request:
   shows it where sensible.
 
 Response `202`: `{"notification_id": "<opaque-id>", "accepted": 2}`.
+
+Delivery is poll-based (see "Push outbox" below): a valid request ALWAYS
+returns `202` with `accepted` counting the devices queued in the outbox —
+the outbox is the delivery leg and needs no FCM, no Google services. FCM,
+when the server runs the `fcm` driver, is only a best-effort wake hint per
+device (failures never fail the request). The old `500
+driver_unavailable` stub-driver failure is gone BY DESIGN: `202` now means
+"queued", which is literally true, so there is nothing to lie about (this
+is an intentional contract change, not a regression — servers without FCM
+configured answer `202` exactly like servers with it).
+
+### Push outbox (poll-based delivery, no FCM required)
+
+`POST /api/v1/app-push` and `POST /api/v1/notify` enqueue one pending
+command per target device into the same outbox table; devices fetch their
+own commands by polling. No step here needs FCM, a service-account key,
+or any Google service — a server with the default `log` driver delivers
+exactly like one with the `fcm` driver (which only adds a best-effort
+wake hint on the notify path).
+
+#### `POST /api/v1/app-push` (remote install push)
+
+Operator-only: WebUI session + `X-Requested-With` (or session CSRF token),
+or the operator token (no session needed). Device Bearers are always
+`403`; missing credentials are `401`.
+
+Request:
+
+```json
+{
+  "target": { "device_ids": ["<id>", ...] },
+  "apk_url": "https://example.com/app.apk",
+  "sha256": "64-lowercase-hex-chars…",
+  "package": "com.example.app",
+  "version": "1.0",
+  "label": "Example"
+}
+```
+
+- `target`: either `{ "all": true }` or `{ "device_ids": ["<id>", ...] }`
+  (empty/absent `device_ids` with `all:true` means all; `all:true` with
+  non-empty `device_ids` is `422 ambiguous_target`; neither form is `422
+  empty_target`; over 500 explicit ids is `422 too_many_targets`).
+  Unknown ids are skipped (never an error); revoked devices are always
+  excluded.
+- `apk_url` (required): `https` URL with a host, no userinfo, max 2048
+  characters (`422 missing_apk_url` / `invalid_apk_url`).
+- `sha256` (required): exactly 64 lowercase hex chars
+  (`422 missing_sha256` / `invalid_sha256`).
+- `package` (required): reverse-DNS-ish — at least one dot, charset
+  `[A-Za-z0-9._-]`, max 256 characters (`422 missing_package` /
+  `invalid_package`).
+- `version` (optional): max 64 characters (`422 invalid_version`;
+  absent/empty is stored as `""`).
+- `label` (required): 1–100 characters (`422 missing_label` /
+  `invalid_label`).
+- The marshaled flat command map must fit the shared 3500-byte payload
+  budget (`422 payload_too_large`); undecodable bodies are `400
+  invalid_json`, oversize bodies `413 body_too_large`.
+
+Response `202`: `{"push_id": "<opaque-id>", "accepted": 2}` where
+`accepted` counts the devices queued. Genuinely zero targets (unknown
+ids, empty registry) are a normal `202 accepted:0`, never an error. A
+device already holding 20 pending commands fails the WHOLE request
+closed: `429 too_many_pending` with nothing queued (no partial push, no
+audit row for the attempt). Any DB failure before the response is `500`
+with nothing queued.
+
+#### `GET /api/v1/events/wait` (device long-poll wake)
+
+Auth: device Bearer only (`401` missing/invalid/revoked, `403`
+operator token). Behavior:
+
+- If the caller has pending unacked unexpired commands, returns
+  immediately `200 {"events":["outbox"]}`.
+- Else holds the request up to 300s for a per-device wake signal, then
+  returns `200 {"events":[]}` on timeout. The server holds no DB
+  connection while waiting; the wake fires only when an enqueue lands
+  for THIS device (a push to other devices never wakes this waiter).
+- Revoked devices authenticate nowhere: they get `401` and their
+  waiters never fire.
+
+#### `GET /api/v1/outbox` (device poll)
+
+Auth: device Bearer only (`401` / `403` as above). Returns `200` with
+ONLY the caller's own pending unexpired commands in queue order:
+
+```json
+{
+  "commands": [
+    {
+      "command_id": "<opaque-per-device-id>",
+      "type": "app_install",
+      "push_id": "<opaque-id>",
+      "apk_url": "https://example.com/app.apk",
+      "sha256": "64-lowercase-hex-chars…",
+      "package": "com.example.app",
+      "version": "1.0",
+      "label": "Example"
+    }
+  ]
+}
+```
+
+`notify`-type rows carry the same envelope (`command_id`, `push_id` =
+notification id, `type`) with the notification data map as their other
+keys; the app ignores unknown `type` values. Empty poll is `200
+{"commands":[]}` (never null). Headers pin `Cache-Control: no-store,
+private`.
+
+#### `POST /api/v1/commands/ack` (device acknowledge)
+
+Auth: device Bearer only. Request `{"ids": ["<command_id>", ...]}` marks
+the caller's OWN pending unexpired rows `received` (idempotent —
+re-acking yields `acked:0`). Unknown ids, other devices' ids, and expired
+rows are silently ignored. Response `200 {"acked": N}` with N counting
+owned rows flipped. Malformed bodies are `400`; over 1000 ids are `400`.
+
+#### Lifecycle, ordering, caps (all four endpoints)
+
+- Poll → act → ack: a device polls `GET /api/v1/outbox`, performs the
+  commands (e.g. download → verify sha256 → install), then acks their
+  `command_id`s. Acked commands never poll again; unacked commands
+  re-poll until acked or expired.
+- Wake shortcut: instead of polling blind, a device may hold `GET
+  /api/v1/events/wait` (up to 300s); `["outbox"]` means "poll now".
+  Wake is a hint, not a guarantee — a device that missed it just polls.
+- Ordering: commands poll in queue (rowid) order per device; no ordering
+  is promised across devices or across pushes.
+- Caps/TTL/prune: max 20 pending commands per device (app-push: `429`;
+  notify: capped devices are skipped, still `202`); 7-day TTL per row;
+  expired rows are pruned on every enqueue AND every outbox fetch.
+- Auditing: every accepted operator request writes one `pushes` row
+  (id, type, operator label — never a secret, canonical target JSON,
+  final accepted count) before any per-device row (a DB failure answers
+  `500` with nothing queued).
+- Explicit no-FCM statement: no endpoint in this section requires, reads,
+  or returns anything from Google services. `google-services.json` must
+  not exist anywhere in the tree (pinned by test).
 
 ## Widget types + envelope
 
