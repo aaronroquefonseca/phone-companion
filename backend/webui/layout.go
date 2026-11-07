@@ -22,7 +22,7 @@ import (
 // left-aligned below the fields — never inline with inputs. All text
 // controls share one max-width (min(100%, 28rem)) with identical
 // padding/border so their left/right edges align vertically.
-const sharedCSS = `*{box-sizing:border-box}
+const sharedCSS = `:root{color-scheme:light dark}*{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:52rem;margin:0 auto;padding:0 1rem 3rem;line-height:1.5;color:#1a1a1a;background:#fff}
 .topbar{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1.2rem;border-bottom:2px solid #1a1a1a;padding:.9rem 0;margin-bottom:1.4rem}
 .brand a{font-weight:700;font-size:1.15rem;color:#1a1a1a;text-decoration:none}
@@ -30,10 +30,13 @@ nav{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem .9rem}
 nav a{color:#0b5fff;text-decoration:none;padding:.15rem .1rem}
 nav a[aria-current="page"]{font-weight:700;text-decoration:underline}
 nav a:hover{text-decoration:underline}
+main a{color:#0b5fff}
+main a:visited{color:#5b21b6}
 .logout{margin:0 0 0 auto}
 button{font:inherit;padding:.35rem .8rem;border:1px solid #1a1a1a;border-radius:.35rem;background:#1a1a1a;color:#fff;cursor:pointer}
 button:hover{background:#333}
 button.secondary{background:#fff;color:#1a1a1a}
+button.secondary:hover{background:#e0e0e0}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #0b5fff;outline-offset:2px}
 form{margin:0}
 input[type="hidden"]{display:none!important}
@@ -50,7 +53,8 @@ input[type="hidden"]{display:none!important}
 .error{background:#fdecea;border:1px solid #b3261e;color:#7a1f1a;padding:.6rem .9rem;border-radius:.4rem}
 .success{background:#e6f4ea;border:1px solid #1e7e34;color:#0d5c22;padding:.6rem .9rem;border-radius:.4rem}
 .notice a,.error a,.success a{color:inherit;text-decoration:underline}
-@media (prefers-color-scheme:dark){body{color:#e8e8e8;background:#121212}.brand a{color:#e8e8e8}.topbar{border-color:#555}nav a{color:#8ab4ff}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline-color:#8ab4ff}.field input[type="text"],.field input[type="password"],.field select,.field textarea{background:#1e1e1e;color:#e8e8e8;border-color:#999}.field .hint{color:#b0b0b0}.field-error{color:#ffb4ab}.field input[aria-invalid="true"],.field select[aria-invalid="true"],.field textarea[aria-invalid="true"]{border-color:#ffb4ab}.error{background:#3b1215;border-color:#ffb4ab;color:#ffdad6}.notice{background:#1e1e1e;border-color:#555;color:#e8e8e8}.success{background:#0f2e1a;border-color:#7bd88f;color:#a8e6b3}.muted{color:#b0b0b0}th{background:#1e1e1e}.card p{color:#c9c9c9}footer{border-color:#555}}
+.notice a:visited,.error a:visited,.success a:visited{color:inherit}
+@media (prefers-color-scheme:dark){body{color:#e8e8e8;background:#121212}.brand a{color:#e8e8e8}.topbar{border-color:#555}nav a{color:#8ab4ff}main a{color:#8ab4ff}main a:visited{color:#c4b5fd}button{background:#2b2b2b;border-color:#999}button:hover{background:#3d3d3d}button.secondary{border-color:#fff}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline-color:#8ab4ff}.field input[type="text"],.field input[type="password"],.field select,.field textarea{background:#1e1e1e;color:#e8e8e8;border-color:#999}.field .hint{color:#b0b0b0}.field-error{color:#ffb4ab}.field input[aria-invalid="true"],.field select[aria-invalid="true"],.field textarea[aria-invalid="true"]{border-color:#ffb4ab}.error{background:#3b1215;border-color:#ffb4ab;color:#ffdad6}.notice{background:#1e1e1e;border-color:#555;color:#e8e8e8}.success{background:#0f2e1a;border-color:#7bd88f;color:#a8e6b3}.muted{color:#b0b0b0}.revoked{color:#a8a8a8}th{background:#1e1e1e}.card p{color:#c9c9c9}footer{border-color:#555}}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));gap:1rem;margin:1rem 0}
 .card{border:1px solid #999;border-radius:.5rem;padding:1rem}
 .card h2{margin:0 0 .3rem;font-size:1.05rem}
@@ -61,7 +65,6 @@ table{border-collapse:collapse;width:100%;margin:1rem 0}
 th,td{border:1px solid #999;padding:.4rem .6rem;text-align:left;vertical-align:top;word-break:break-word}
 th{background:#f0f0f0}
 .revoked{color:#666}
-tr.revoked{opacity:.62}
 @media (max-width:40rem){
 table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
 code{word-break:break-all}
