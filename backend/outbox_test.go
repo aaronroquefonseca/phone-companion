@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +18,14 @@ import (
 	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
+
+// gitLsFiles runs `git ls-files -z` in dir and returns the command so
+// callers can read NUL-separated tracked paths from its output.
+func gitLsFiles(dir string) *exec.Cmd {
+	cmd := exec.Command("git", "ls-files", "-z")
+	cmd.Dir = dir
+	return cmd
+}
 
 // openOutboxMux is openAuthedMux with single-connection :memory: semantics
 // (all queries share one sqlite memory DB, so concurrent long-poll
@@ -511,32 +519,41 @@ func TestFCMUnconfiguredStill202(t *testing.T) {
 }
 
 // No Google services in the tree: the poll-based delivery must not depend
-// on (or accidentally vendor) a google-services.json anywhere.
+// on (or accidentally vendor) a google-services.json anywhere. Scoped to
+// git-tracked files on purpose: a developer's own gitignored local config
+// (needed to build FCM flavors locally) must not fail this test — only
+// a vendored copy would.
 func TestNoGoogleServicesJSON(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found []string
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // unreadable subtree: not our file
-		}
-		if info.IsDir() && info.Name() == ".git" {
-			return filepath.SkipDir
-		}
-		if !info.IsDir() && info.Name() == "google-services.json" {
-			rel, _ := filepath.Rel(root, path)
-			found = append(found, rel)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	found := trackedGoogleServicesJSON(t, root)
 	if len(found) != 0 {
-		t.Fatalf("google-services.json must not exist in the tree: %v", found)
+		t.Fatalf("google-services.json must not be vendored in the tree: %v", found)
 	}
+}
+
+// trackedGoogleServicesJSON lists repo-tracked files named
+// google-services.json (any directory). Untracked or gitignored local
+// copies are the developer's own and are not the test's business.
+func trackedGoogleServicesJSON(t *testing.T, root string) []string {
+	t.Helper()
+	cmd := gitLsFiles(root)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git ls-files failed: %v", err)
+	}
+	var found []string
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f == "" {
+			continue
+		}
+		if filepath.Base(f) == "google-services.json" {
+			found = append(found, f)
+		}
+	}
+	return found
 }
 
 // deviceLogID exposes at most an 8-hex-char prefix: stable, lowercase hex,
