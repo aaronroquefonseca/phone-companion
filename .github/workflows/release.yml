@@ -102,6 +102,14 @@ jobs:
       - name: build APK
         run: |
           echo 'Local repro: cd android && ./gradlew assembleDebug   (needs JDK 17 + Android SDK)'
+          # Version identity for APK-push updates: versionName comes from
+          # the tag (v0.3.0 -> 0.3.0); versionCode is the commit count,
+          # monotonic across tags so a pushed release always counts as an
+          # update over anything installed from an earlier tag. Dev builds
+          # (no env) keep the build.gradle defaults 1 / 0.1.0-skeleton.
+          export VERSION_NAME="${GITHUB_REF_NAME#v}"
+          export VERSION_CODE="$(git rev-list --count HEAD)"
+          echo "versionName=$VERSION_NAME versionCode=$VERSION_CODE"
           ./gradlew assembleDebug --console=plain
           OUT="phone-companion-${GITHUB_REF_NAME}.apk"
           cp "app/build/outputs/apk/debug/app-debug.apk" "$GITHUB_WORKSPACE/$OUT"

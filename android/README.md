@@ -217,6 +217,32 @@ FCM/`google-services.json` steps anywhere in this flow):
    → no duplicate prompt for an already-posted id; the re-offer is
    acked as a no-op.
 
+### Pushing this app's own release APK (self-update)
+
+Each GitHub Release attaches `phone-companion-vX.Y.Z.apk` with a real
+`versionName` (the tag) and a monotonic `versionCode` (commit count, so
+every release counts as an update over earlier ones). Push it to paired
+phones with the operator endpoint (placeholder token — never commit a
+real one; `sha256sum` the downloaded asset for the real hash):
+
+```sh
+curl -X POST https://YOUR-HOST/api/v1/app-push \
+  -H 'Authorization: Bearer OPERATOR_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"target":{"all":true},
+       "apk_url":"https://github.com/<you>/phone-companion/releases/download/vX.Y.Z/phone-companion-vX.Y.Z.apk",
+       "sha256":"<sha256-of-the-asset>",
+       "package":"com.phonecompanion.app","version":"X.Y.Z",
+       "label":"Phone Companion X.Y.Z"}'
+```
+
+Two hard rules (Android-enforced, not our choice): the pushed APK only
+updates an installed build signed with the **same key** (release assets
+are debug-signed by the CI runner — a phone carrying a locally built
+APK must uninstall first, which wipes pairing, then re-pair), and the
+pushed `versionCode` must exceed the installed one (guaranteed across
+releases by the commit-count scheme above).
+
 ## Adding widgets
 
 - Phone screen: open Widgets (refreshes from cache on open; "Refresh
