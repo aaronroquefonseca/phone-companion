@@ -17,8 +17,9 @@ import java.io.File
  * commits with a result [PendingIntent] to [AppInstallResultReceiver],
  * and returns: the terminal outcome is posted by the receiver (exactly
  * one notification), never here. Call off the main thread. Never throws —
- * a commit failure deletes the cached APK and returns false so the caller
- * can post the error state. Logging discipline: package names only.
+ * a commit failure abandons the session, keeps the verified APK cached
+ * (the failure notification's Retry resumes from it), and returns false
+ * so the caller can post the error state. Logging discipline: package names only.
  */
 object AppInstallInstaller {
 
@@ -61,6 +62,11 @@ object AppInstallInstaller {
                     .putExtra(AppInstallPayload.EXTRA_PACKAGE, payload.packageName)
                     .putExtra(AppInstallPayload.EXTRA_LABEL, payload.label)
                     .putExtra(AppInstallPayload.EXTRA_ATTEMPT, attempt)
+                // Full payload extras (validated shapes, re-checked by the
+                // receiver): the failure notification's Retry action needs
+                // the pre-install tap target, which receivers otherwise
+                // never see.
+                for ((k, v) in payload.toExtras()) resultIntent.putExtra(k, v)
                 val result = PendingIntent.getBroadcast(
                     context,
                     CompanionMessagingService.actionRequestCode(
@@ -78,7 +84,10 @@ object AppInstallInstaller {
             // Class name only — never paths, URLs, or hashes.
             Log.w(TAG, "app_install commit failed for ${payload.packageName} [${e.javaClass.simpleName}]")
             if (sessionId >= 0) runCatching { installer.abandonSession(sessionId) }
-            runCatching { apkFile.delete() }
+            // The verified APK stays cached: a commit-time failure
+            // (installer unavailable, session abort, IO) is transient and
+            // the failure notification's Retry resumes from it via the
+            // runResume path (which re-verifies before reuse).
             return false
         }
     }

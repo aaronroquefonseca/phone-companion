@@ -149,6 +149,7 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
                 kind,
                 AppInstallNotifications.TerminalTarget.from(payload),
                 attempt,
+                payload = payload,
             )
         }
         _uiState.value = InstallUiState.Finished(messageFor(outcome))

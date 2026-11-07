@@ -4,6 +4,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.phonecompanion.app.R
 import com.phonecompanion.app.ui.AppInstallActivity
@@ -24,12 +26,28 @@ import com.phonecompanion.app.ui.AppInstallActivity
  * system broadcast or a racing receiver can never double-post. Nothing
  * here retries.
  *
+ * Install-failure notifications are cause-aware ([AppInstallResult.failureKindOf]):
+ * a signature/update-incompatible failure is deterministic (retrying the
+ * same bytes can never succeed), so it explains in plain words and offers
+ * the update target's system App-info screen (where Uninstall lives) with
+ * NO Retry; any other commit/install failure keeps the existing copy and
+ * adds a Retry action that re-opens the pre-install UI, whose Install tap
+ * resumes via the runResume path (verified cache reused, re-download only
+ * on a miss). The raw installer message rides along as secondary expanded
+ * text only — never the primary explanation. User-cancelled,
+ * hash-mismatch, blocked, and too-large posts stay exactly as they were
+ * (no actions).
+ *
  * Logging discipline: package names and push ids only — never APK URLs,
  * hashes, tokens, or credentials.
  */
 object AppInstallNotifications {
 
     const val ACTION_CANCEL_DOWNLOAD = "pc_app_install_cancel"
+
+    /** Stable action ids for the failure-notification buttons (request codes). */
+    const val ACTION_RETRY = "pc_app_install_retry"
+    const val ACTION_APP_INFO = "pc_app_install_app_info"
 
     /** Detail text is truncated to this many chars (operator-influenced). */
     const val MAX_DETAIL_CHARS = 200
@@ -160,6 +178,12 @@ object AppInstallNotifications {
      * funnels through here with a consistent (kind, target, attempt,
      * detail?) order. Returns true when this caller won the claim and
      * posted; losers stay silent.
+     *
+     * @param payload when non-null and [kind] is FAILED, builds the Retry
+     * tap target (the pre-install UI, whose Install tap resumes via the
+     * runResume path). Receivers rebuild it from their intent extras; the
+     * activity and auto-download pass what they already hold. A null
+     * payload (or a non-FAILED kind) posts action-less, as before.
      */
     fun notifyTerminal(
         context: Context,
@@ -167,58 +191,186 @@ object AppInstallNotifications {
         target: TerminalTarget,
         attempt: String?,
         detail: String? = null,
+        payload: AppInstallPayload? = null,
     ): Boolean {
         if (!AppInstallSessions.claimTerminal(target.pushId, attempt)) return false
         val display = target.label ?: target.packageName
-        val (title, body) = when (kind) {
+        val (title, content, expanded) = when (kind) {
             AppInstallFlow.TerminalKind.SUCCESS ->
-                context.getString(R.string.app_install_success_title, display) to
-                    context.getString(R.string.app_install_success_body, display)
+                Triple(
+                    context.getString(R.string.app_install_success_title, display),
+                    context.getString(R.string.app_install_success_body, display),
+                    context.getString(R.string.app_install_success_body, display),
+                )
             AppInstallFlow.TerminalKind.USER_CANCELLED ->
-                context.getString(R.string.app_install_user_cancelled_title) to
-                    context.getString(R.string.app_install_user_cancelled_body, display)
-            AppInstallFlow.TerminalKind.FAILED -> {
-                val clean = detail?.take(MAX_DETAIL_CHARS)?.ifBlank { null }
-                context.getString(R.string.app_install_failed_title) to
-                    if (clean != null) {
-                        context.getString(R.string.app_install_failed_body, display, clean)
-                    } else {
-                        context.getString(R.string.app_install_failed_body_plain, display)
-                    }
-            }
+                Triple(
+                    context.getString(R.string.app_install_user_cancelled_title),
+                    context.getString(R.string.app_install_user_cancelled_body, display),
+                    context.getString(R.string.app_install_user_cancelled_body, display),
+                )
+            AppInstallFlow.TerminalKind.FAILED ->
+                failureCopy(context, display, detail)
             // Hard refuse naming the package; the file is deleted by the caller.
             AppInstallFlow.TerminalKind.HASH_MISMATCH ->
-                context.getString(R.string.app_install_blocked_title) to
-                    context.getString(R.string.app_install_blocked_body, target.packageName)
+                Triple(
+                    context.getString(R.string.app_install_blocked_title),
+                    context.getString(R.string.app_install_blocked_body, target.packageName),
+                    context.getString(R.string.app_install_blocked_body, target.packageName),
+                )
             AppInstallFlow.TerminalKind.DOWNLOAD_FAILED ->
-                context.getString(R.string.app_install_download_failed_title) to
-                    context.getString(R.string.app_install_download_failed_body, target.packageName)
+                Triple(
+                    context.getString(R.string.app_install_download_failed_title),
+                    context.getString(R.string.app_install_download_failed_body, target.packageName),
+                    context.getString(R.string.app_install_download_failed_body, target.packageName),
+                )
             AppInstallFlow.TerminalKind.TOO_LARGE ->
-                context.getString(R.string.app_install_too_large_title) to
-                    context.getString(R.string.app_install_too_large_body, target.packageName)
+                Triple(
+                    context.getString(R.string.app_install_too_large_title),
+                    context.getString(R.string.app_install_too_large_body, target.packageName),
+                    context.getString(R.string.app_install_too_large_body, target.packageName),
+                )
             AppInstallFlow.TerminalKind.DOWNLOAD_CANCELLED ->
-                context.getString(R.string.app_install_cancelled_title) to
-                    context.getString(R.string.app_install_cancelled_body, target.packageName)
+                Triple(
+                    context.getString(R.string.app_install_cancelled_title),
+                    context.getString(R.string.app_install_cancelled_body, target.packageName),
+                    context.getString(R.string.app_install_cancelled_body, target.packageName),
+                )
         }
-        postTerminal(context, target.pushId, title, body)
+        val contentIntent =
+            if (kind == AppInstallFlow.TerminalKind.FAILED) {
+                payload?.let { retryPendingIntent(context, it) }
+            } else {
+                null
+            }
+        postTerminal(
+            context,
+            target.pushId,
+            title,
+            content,
+            expanded,
+            contentIntent,
+            failureActions(context, target, payload, detail).takeIf {
+                kind == AppInstallFlow.TerminalKind.FAILED
+            }.orEmpty(),
+        )
         return true
     }
 
-    private fun postTerminal(context: Context, pushId: String, title: String, body: String) {
+    /**
+     * Cause-aware copy for an install failure: plain-words primary
+     * explanation plus the raw installer message as secondary expanded
+     * text (transparency for bug reports — never the primary). Signature
+     * mismatch names the label and the uninstall-first recovery; transient
+     * failures keep the long-standing copy.
+     */
+    private fun failureCopy(
+        context: Context,
+        display: String,
+        detail: String?,
+    ): Triple<String, String, String> {
+        val raw = detail?.take(MAX_DETAIL_CHARS)?.ifBlank { null }
+        val (title, primary) = when (AppInstallResult.failureKindOf(raw)) {
+            AppInstallResult.FailureKind.SIGNATURE_MISMATCH ->
+                context.getString(R.string.app_install_signature_title, display) to
+                    context.getString(R.string.app_install_signature_body, display)
+            AppInstallResult.FailureKind.TRANSIENT ->
+                context.getString(R.string.app_install_failed_title) to
+                    context.getString(R.string.app_install_failed_body_plain, display)
+        }
+        val expanded = if (raw != null) {
+            context.getString(R.string.app_install_failed_expanded_body, primary, raw)
+        } else {
+            primary
+        }
+        return Triple(title, primary, expanded)
+    }
+
+    /**
+     * Action buttons for an install failure ([AppInstallResult.failureActions]):
+     * signature mismatch offers the update target's system App-info screen
+     * (where Uninstall lives) with NO Retry; transient failures offer
+     * Retry (the pre-install UI → runResume path) when the full payload is
+     * available to build its tap target — without it the post stays
+     * action-less rather than pointing nowhere.
+     */
+    private fun failureActions(
+        context: Context,
+        target: TerminalTarget,
+        payload: AppInstallPayload?,
+        detail: String?,
+    ): List<Pair<String, PendingIntent>> {
+        val raw = detail?.take(MAX_DETAIL_CHARS)?.ifBlank { null }
+        return when (AppInstallResult.failureKindOf(raw)) {
+            AppInstallResult.FailureKind.SIGNATURE_MISMATCH -> listOf(
+                context.getString(R.string.app_install_app_info) to
+                    appInfoPendingIntent(context, target),
+            )
+            AppInstallResult.FailureKind.TRANSIENT -> {
+                val retry = payload?.let { retryPendingIntent(context, it) }
+                    ?: return emptyList()
+                listOf(context.getString(R.string.app_install_retry) to retry)
+            }
+        }
+    }
+
+    /**
+     * Retry tap target: the pre-install UI as explicit action. Its Install
+     * tap resumes via the runResume path — a still-intact verified APK
+     * commits without re-fetching, otherwise the full download runs.
+     */
+    private fun retryPendingIntent(context: Context, payload: AppInstallPayload): PendingIntent {
+        return PendingIntent.getActivity(
+            context,
+            CompanionMessagingService.actionRequestCode(payload.notifyId(), ACTION_RETRY),
+            AppInstallActivity.detailIntent(context, payload),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    /**
+     * App-info tap target: the update target's system App-info screen,
+     * where Uninstall lives. The package is installed (that is why an
+     * update-incompatible failure exists), so the screen resolves; if it
+     * was removed since, the tap harmlessly shows "not installed".
+     */
+    private fun appInfoPendingIntent(context: Context, target: TerminalTarget): PendingIntent {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${target.packageName}"),
+        )
+        return PendingIntent.getActivity(
+            context,
+            CompanionMessagingService.actionRequestCode(
+                AppInstallPayload.notifyIdFor(target.pushId),
+                ACTION_APP_INFO,
+            ),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun postTerminal(
+        context: Context,
+        pushId: String,
+        title: String,
+        content: String,
+        expanded: String,
+        contentIntent: PendingIntent?,
+        actions: List<Pair<String, PendingIntent>>,
+    ) {
         val manager = context.notificationManager()
         NotificationChannels.ensureGeneral(manager)
         // The single notifyId owner is the payload ([AppInstallPayload.notifyIdFor]):
         // the terminal replaces the progress rather than stacking.
-        manager.notify(
-            AppInstallPayload.notifyIdFor(pushId),
-            NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-                .setAutoCancel(true)
-                .build(),
-        )
+        val builder = NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expanded))
+            .setAutoCancel(true)
+        if (contentIntent != null) builder.setContentIntent(contentIntent)
+        for ((label, intent) in actions) builder.addAction(0, label, intent)
+        manager.notify(AppInstallPayload.notifyIdFor(pushId), builder.build())
     }
 
     private fun Context.notificationManager(): NotificationManager =

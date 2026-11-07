@@ -118,6 +118,7 @@ object AppInstallAutoDownload {
                         kind,
                         AppInstallNotifications.TerminalTarget.from(payload),
                         attempt,
+                        payload = payload,
                     )
                 }
             }

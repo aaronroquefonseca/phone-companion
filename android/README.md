@@ -186,9 +186,12 @@ The FCM token upload paths stay as-is for the notification feature.
 - Install goes through `PackageInstaller.Session` (`MODE_FULL_INSTALL` +
   `setAppPackageName`) with a MUTABLE result PendingIntent on API 31+
   (so the system-filled status extras arrive); the installer-result
-  receiver deletes the cached APK on every terminal path and posts
-  exactly one notification (success / plain user-cancelled with NO
-  retry / failure with installer message). A
+  receiver deletes the cached APK on success/cancel but keeps it on
+  failure, and posts exactly one notification (success / plain
+  user-cancelled with NO retry / cause-aware failure: transient offers
+  Retry from the cached verified APK, signature/update-incompatible
+  offers the target's system App-info screen with NO Retry — raw
+  installer message stays secondary detail). A
   `STATUS_PENDING_USER_ACTION` result launches the system's
   confirmation intent WITHOUT deleting the APK or claiming a terminal
   — the follow-up result owns the terminal. The download-cancel

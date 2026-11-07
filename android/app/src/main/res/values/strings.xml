@@ -98,8 +98,16 @@
     <string name="app_install_user_cancelled_title">Install cancelled</string>
     <string name="app_install_user_cancelled_body">%1$s was not installed.</string>
     <string name="app_install_failed_title">Install failed</string>
-    <string name="app_install_failed_body">%1$s could not be installed: %2$s</string>
     <string name="app_install_failed_body_plain">%1$s could not be installed.</string>
+    <!-- Expanded failure text: plain primary copy first, raw installer
+        message as secondary transparency for bug reports (never primary). -->
+    <string name="app_install_failed_expanded_body">%1$s\nDetails: %2$s</string>
+    <!-- Signature/update-incompatible failure: deterministic (retrying the
+        same bytes can never succeed), so no Retry — App-info instead. -->
+    <string name="app_install_signature_title">Install %1$s failed</string>
+    <string name="app_install_signature_body">%1$s was built with a different signature — uninstall the old app first, then install fresh. The old build’s data can’t transfer.</string>
+    <string name="app_install_retry">Retry</string>
+    <string name="app_install_app_info">App info</string>
     <string name="app_install_blocked_title">Install blocked</string>
     <string name="app_install_blocked_body">%1$s failed verification and was not installed.</string>
     <string name="app_install_download_failed_title">Download failed</string>
