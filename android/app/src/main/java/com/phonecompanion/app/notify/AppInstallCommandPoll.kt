@@ -12,17 +12,20 @@ import kotlinx.coroutines.CancellationException
  *
  * Runs inside the existing poll cycle ([com.phonecompanion.app.work.WidgetPoller.refresh]
  * — same worker/cadence as the widget poll, no new periodic work): each
- * poll GETs `/api/v1/commands` with the device Bearer token, posts the
+ * poll GETs `/api/v1/outbox` with the device Bearer token, posts the
  * SAME local notification flow as the install prompt
  * ([AppInstallNotifications.notifyPrompt] on the shared general channel;
- * tap opens the pre-install UI), then acks prompted ids via
- * `POST /api/v1/commands/ack` so they are not re-offered.
+ * tap opens the pre-install UI), then acks resolved command ids via
+ * `POST /api/v1/commands/ack` (per-device `command_id`s) so they are
+ * not re-offered.
  *
- * Idempotence story: prompted ids persist in a plain-prefs set
+ * Idempotence story: resolved command ids persist in a plain-prefs set
  * ([AppInstallPostedStore], pruned). If the app dies before acking, the
  * next poll re-offers and the persisted set suppresses a duplicate
  * notification (the re-offered id is still acked — a harmless no-op
- * server-side). Ack failures likewise retry on the next poll.
+ * server-side). Ack failures likewise retry on the next poll. Unknown
+ * kinds are acked-and-ignored (never prompted) so the server stops
+ * re-offering them.
  *
  * Auth failures here (401/403) only skip the commands step with a
  * shape-only log line — revocation policy belongs to the widget poll,
@@ -141,11 +144,12 @@ object AppInstallCommandPoll {
 
     /**
      * Testable commands-poll core: prompts every valid payload not already
-     * posted, then acks every valid offered id already prompted (this
-     * round or an earlier one — the ack is idempotent, so failed acks
-     * converge on the next poll). A prompt failure skips that id for both
-     * the posted set and the ack (the server re-offers it next poll).
-     * Cancellation is always rethrown.
+     * resolved, then acks every valid offered command id already resolved
+     * (this round or an earlier one — the ack is idempotent, so failed
+     * acks converge on the next poll) plus every unknown-kind command id
+     * (acked-and-ignored, never prompted). A prompt failure skips that id
+     * for both the posted set and the ack (the server re-offers it next
+     * poll). Cancellation is always rethrown.
      */
     internal suspend fun pollOnceWith(
         deps: Collaborators,
@@ -169,11 +173,12 @@ object AppInstallCommandPoll {
             return PollResult(0, 0, 0, 0, 0, acked = true)
         }
         val parsed = outcome.parsed
-        // Dupes suppressed: already prompted before this round.
-        val skipped = parsed.valid.count { posted.isPosted(it.pushId) }
+        // Dupes suppressed: already resolved before this round (keyed by
+        // per-device command id — the same id the ack body carries).
+        val skipped = parsed.valid.count { posted.isPosted(it.commandId) }
         var postedCount = 0
         for (payload in parsed.valid) {
-            if (posted.isPosted(payload.pushId)) continue
+            if (posted.isPosted(payload.commandId)) continue
             try {
                 deps.postPrompt(payload)
             } catch (e: CancellationException) {
@@ -183,14 +188,16 @@ object AppInstallCommandPoll {
                 logInfo("commands poll prompt-failed error=${e.javaClass.simpleName}")
                 continue
             }
-            posted.markPosted(listOf(payload.pushId))
+            posted.markPosted(listOf(payload.commandId))
             postedCount++
         }
-        // Ack every valid offered id already prompted (this round or an
+        // Ack every valid offered id already resolved (this round or an
         // earlier one): the ack is idempotent, so failed acks converge
-        // on the next poll. Never-acked ids (prompt failed) are left
-        // for the server to re-offer.
-        val ackIds = parsed.valid.map { it.pushId }.filter { posted.isPosted(it) }
+        // on the next poll. Never-resolved ids (prompt failed) are left
+        // for the server to re-offer. Unknown kinds are acked-and-ignored
+        // (never prompted) so the server stops re-offering them.
+        val ackIds = (parsed.valid.map { it.commandId }.filter { posted.isPosted(it) } +
+            parsed.unknownIds).distinct()
         val acked = if (ackIds.isEmpty()) {
             true
         } else {

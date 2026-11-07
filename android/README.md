@@ -136,12 +136,13 @@ Backend side: `FCM_PROJECT_ID` + service-account JSON at
 No Firebase/FCM is involved in this flow: no `google-services.json`,
 no new dependencies, no Play-services-gated paths. The existing poll
 cycle (`RefreshWorker` → `WidgetPoller.refresh`, hourly + manual
-refresh) also GETs `/api/v1/commands` with the device Bearer token.
+refresh) also GETs `/api/v1/outbox` with the device Bearer token.
 Each `app_install` command entry carries string fields
-`type=app_install`, `push_id`, `apk_url` (https only), `sha256` (64
+`type=app_install`, `command_id` (per-device id used for dedupe and
+ack), `push_id`, `apk_url` (https only), `sha256` (64
 lowercase hex), `package`, `version` (optional), `label` (required).
-Unknown command kinds are ignored and malformed entries are skipped
-with shape-only logging (same lenient/strict discipline as the
+Unknown command kinds are acked-and-ignored and malformed entries are
+skipped with shape-only logging (same lenient/strict discipline as the
 notification parser).
 
 For every fresh (never-prompted) command id the app posts the SAME

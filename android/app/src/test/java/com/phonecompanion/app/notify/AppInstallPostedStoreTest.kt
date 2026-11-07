@@ -18,14 +18,14 @@ class AppInstallPostedStoreTest {
     /** Memory-backed store sharing one backing slot (simulates prefs). */
     private class MemoryPostedStore(private val disk: MutableMap<String, String>) :
         AppInstallPostedStore {
-        override fun isPosted(pushId: String): Boolean {
-            if (pushId.isBlank()) return false
-            return AppInstallPostedIds.decode(disk[KEY]).contains(pushId)
+        override fun isPosted(commandId: String): Boolean {
+            if (commandId.isBlank()) return false
+            return AppInstallPostedIds.decode(disk[KEY]).contains(commandId)
         }
 
-        override fun markPosted(pushIds: Collection<String>) {
-            if (pushIds.isEmpty()) return
-            val merged = AppInstallPostedIds.prune(AppInstallPostedIds.decode(disk[KEY]) + pushIds)
+        override fun markPosted(commandIds: Collection<String>) {
+            if (commandIds.isEmpty()) return
+            val merged = AppInstallPostedIds.prune(AppInstallPostedIds.decode(disk[KEY]) + commandIds)
             disk[KEY] = AppInstallPostedIds.encode(merged)
         }
 

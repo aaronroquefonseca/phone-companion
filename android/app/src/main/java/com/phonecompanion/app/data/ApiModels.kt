@@ -63,16 +63,18 @@ data class WidgetEnvelope(
     @Json(name = "secret_ref") val secretRef: String? = null,
 )
 
-// --- GET /api/v1/commands + POST /api/v1/commands/ack ---
+// --- GET /api/v1/outbox + POST /api/v1/commands/ack ---
 
 // Poll-triggered command queue (FCM-free install path). The app polls
 // GET with the device Bearer token; each entry is an untyped string map
-// on the wire (see AppInstallCommands: unknown kinds ignored, malformed
-// app_install entries skipped with shape-only logging). The ack body
-// lists push ids the app has prompted for; the server treats it as
-// idempotent (re-acks are harmless no-ops).
+// on the wire (see AppInstallCommands: unknown kinds acked-and-ignored,
+// malformed app_install entries skipped with shape-only logging). The ack
+// body lists the per-device command ids the app has resolved (prompted
+// valid entries plus ignored unknown kinds); the server treats it as
+// idempotent (unknown/foreign ids silently ignored, re-acks are harmless
+// no-ops).
 data class CommandsAckRequest(
-    @Json(name = "push_ids") val pushIds: List<String> = emptyList(),
+    @Json(name = "ids") val ids: List<String> = emptyList(),
 )
 
 // --- Error bodies: {"error": "<code>"} ---

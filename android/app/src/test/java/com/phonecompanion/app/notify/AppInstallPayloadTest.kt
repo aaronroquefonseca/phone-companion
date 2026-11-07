@@ -11,6 +11,7 @@ class AppInstallPayloadTest {
 
     private fun valid(): Map<String, String> = mapOf(
         "type" to "app_install",
+        "command_id" to "cmd-1",
         "push_id" to "push-1",
         "apk_url" to "https://example.com/app.apk",
         "sha256" to "a".repeat(64),
@@ -24,6 +25,7 @@ class AppInstallPayloadTest {
         val p = AppInstallPayload.fromMap(valid())
         assertNotNull(p)
         p!!
+        assertEquals("cmd-1", p.commandId)
         assertEquals("push-1", p.pushId)
         assertEquals("https://example.com/app.apk", p.apkUrl)
         assertEquals("a".repeat(64), p.sha256)
@@ -57,11 +59,11 @@ class AppInstallPayloadTest {
 
     @Test
     fun `missing required fields are rejected`() {
-        for (key in listOf("push_id", "apk_url", "sha256", "package", "label")) {
+        for (key in listOf("command_id", "push_id", "apk_url", "sha256", "package", "label")) {
             assertNull(key, AppInstallPayload.fromMap(valid() - key))
         }
         // Blank-only values are missing too.
-        for (key in listOf("push_id", "package", "label")) {
+        for (key in listOf("command_id", "push_id", "package", "label")) {
             assertNull("blank $key", AppInstallPayload.fromMap(valid() + (key to "   ")))
         }
         // Wrong discriminator is not an install payload at all.
@@ -113,6 +115,7 @@ class AppInstallPayloadTest {
 
     @Test
     fun `oversized fields are rejected not truncated`() {
+        assertNull(AppInstallPayload.fromMap(valid() + ("command_id" to "c".repeat(129))))
         assertNull(AppInstallPayload.fromMap(valid() + ("push_id" to "p".repeat(129))))
         assertNull(AppInstallPayload.fromMap(valid() + ("label" to "l".repeat(201))))
         assertNull(AppInstallPayload.fromMap(valid() + ("version" to "v".repeat(65))))

@@ -4,7 +4,7 @@ import com.phonecompanion.app.data.AppMoshi
 import com.squareup.moshi.Types
 
 /**
- * Poll-triggered command parsing (`GET /api/v1/commands`).
+ * Poll-triggered command parsing (`GET /api/v1/outbox`).
  *
  * Same lenient-unknown-kinds / strict-known-fields discipline as the
  * notification parser ([NotificationPayload]): entries whose `type` is
@@ -23,12 +23,19 @@ import com.squareup.moshi.Types
  */
 object AppInstallCommands {
 
-    /** One parsed `GET /api/v1/commands` body. */
+    /** One parsed `GET /api/v1/outbox` body. */
     data class ParsedCommands(
         /** Validated `app_install` payloads, in response order. */
         val valid: List<AppInstallPayload>,
         /** Entries with a non-`app_install` (or absent) discriminator. */
         val unknownKinds: Int,
+        /**
+         * Per-device command ids of unknown-kind entries that carried
+         * one: the poll acks these (ignored, never prompted) so the
+         * server stops re-offering them. Entries without any id cannot
+         * be addressed and stay unacked.
+         */
+        val unknownIds: List<String> = emptyList(),
         /** `app_install` entries failing [AppInstallPayload] validation. */
         val malformed: Int,
         /** True when the body was not decodable JSON at all. */
@@ -48,17 +55,18 @@ object AppInstallCommands {
      * non-object entry counts as malformed.
      */
     fun parseResponse(raw: String): ParsedCommands {
-        if (raw.isBlank()) return ParsedCommands(emptyList(), 0, 0, syntaxError = false)
+        if (raw.isBlank()) return ParsedCommands(emptyList(), 0, emptyList(), 0, syntaxError = false)
         val envelope = try {
             envelopeAdapter.fromJson(raw)
         } catch (_: Exception) {
-            return ParsedCommands(emptyList(), 0, 0, syntaxError = true)
-        } ?: return ParsedCommands(emptyList(), 0, 0, syntaxError = true)
+            return ParsedCommands(emptyList(), 0, emptyList(), 0, syntaxError = true)
+        } ?: return ParsedCommands(emptyList(), 0, emptyList(), 0, syntaxError = true)
         val entries = envelope["commands"] as? List<*> ?: return ParsedCommands(
-            emptyList(), 0, 0, syntaxError = true,
+            emptyList(), 0, emptyList(), 0, syntaxError = true,
         )
         val valid = ArrayList<AppInstallPayload>(entries.size)
         var unknown = 0
+        val unknownIds = ArrayList<String>()
         var malformed = 0
         for (entry in entries) {
             val map = if (entry is Map<*, *>) stringify(entry) else null
@@ -68,6 +76,9 @@ object AppInstallCommands {
             }
             if (!AppInstallPayload.isAppInstall(map)) {
                 unknown++
+                // Ack-and-ignore: a command id lets the poll tell the
+                // server this entry is resolved without prompting.
+                map["command_id"]?.trim()?.takeIf { it.isNotEmpty() }?.let { unknownIds.add(it) }
                 continue
             }
             val payload = AppInstallPayload.fromMap(map)
@@ -77,7 +88,7 @@ object AppInstallCommands {
                 valid.add(payload)
             }
         }
-        return ParsedCommands(valid, unknown, malformed, syntaxError = false)
+        return ParsedCommands(valid, unknown, unknownIds, malformed, syntaxError = false)
     }
 
     /**

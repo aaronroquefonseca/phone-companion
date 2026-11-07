@@ -22,16 +22,18 @@ import java.io.IOException
  */
 class AppInstallCommandPollTest {
 
-    private fun payload(id: String): AppInstallPayload = AppInstallPayload.fromMap(
-        mapOf(
-            "type" to "app_install",
-            "push_id" to id,
-            "apk_url" to "https://example.com/$id.apk",
-            "sha256" to "b".repeat(64),
-            "package" to "com.example.app",
-            "label" to "App $id",
-        ),
-    )!!
+    private fun payload(pushId: String, commandId: String = "cmd-$pushId"): AppInstallPayload =
+        AppInstallPayload.fromMap(
+            mapOf(
+                "type" to "app_install",
+                "command_id" to commandId,
+                "push_id" to pushId,
+                "apk_url" to "https://example.com/$pushId.apk",
+                "sha256" to "b".repeat(64),
+                "package" to "com.example.app",
+                "label" to "App $pushId",
+            ),
+        )!!
 
     private fun parsed(vararg ids: String) = AppInstallCommands.ParsedCommands(
         valid = ids.map(::payload),
@@ -64,9 +66,9 @@ class AppInstallCommandPollTest {
 
     private class MemPosted : AppInstallPostedStore {
         private val ids = LinkedHashSet<String>()
-        override fun isPosted(pushId: String): Boolean = pushId in ids
-        override fun markPosted(pushIds: Collection<String>) {
-            ids.addAll(pushIds.filter { it.isNotBlank() })
+        override fun isPosted(commandId: String): Boolean = commandId in ids
+        override fun markPosted(commandIds: Collection<String>) {
+            ids.addAll(commandIds.filter { it.isNotBlank() })
         }
     }
 
@@ -84,9 +86,11 @@ class AppInstallCommandPollTest {
         val result = AppInstallCommandPoll.pollOnceWith(deps, posted) { deps.logs.add(it) }
 
         assertEquals(listOf("p1", "p2"), deps.prompted)
-        assertTrue(posted.isPosted("p1"))
-        assertTrue(posted.isPosted("p2"))
-        assertEquals(listOf(listOf("p1", "p2")), deps.ackedBatches)
+        assertTrue(posted.isPosted("cmd-p1"))
+        assertTrue(posted.isPosted("cmd-p2"))
+        // The ack carries per-device command ids (what the server reads),
+        // not push ids.
+        assertEquals(listOf(listOf("cmd-p1", "cmd-p2")), deps.ackedBatches)
         assertEquals(2, result.offered)
         assertEquals(2, result.posted)
         assertEquals(0, result.skipped)
@@ -96,7 +100,7 @@ class AppInstallCommandPollTest {
     @Test
     fun `already-posted re-offer skips the prompt but still acks`() {
         val posted = MemPosted()
-        posted.markPosted(listOf("p1"))
+        posted.markPosted(listOf("cmd-p1"))
         val deps = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(parsed("p1", "p2")))
         val result = runPoll(deps, posted)
 
@@ -105,7 +109,7 @@ class AppInstallCommandPollTest {
         assertEquals(1, result.posted)
         // The re-offered id is acked too: a lost ack converges instead
         // of re-offering forever.
-        assertEquals(listOf(listOf("p1", "p2")), deps.ackedBatches)
+        assertEquals(listOf(listOf("cmd-p1", "cmd-p2")), deps.ackedBatches)
         assertTrue(result.acked)
     }
 
@@ -119,11 +123,11 @@ class AppInstallCommandPollTest {
         val result = runPoll(deps, posted)
 
         assertEquals(listOf("good"), deps.prompted)
-        assertFalse(posted.isPosted("bad"))
-        assertTrue(posted.isPosted("good"))
+        assertFalse(posted.isPosted("cmd-bad"))
+        assertTrue(posted.isPosted("cmd-good"))
         // Only the prompted id is acked; the failed one stays offered
         // server-side for the next poll.
-        assertEquals(listOf(listOf("good")), deps.ackedBatches)
+        assertEquals(listOf(listOf("cmd-good")), deps.ackedBatches)
         assertEquals(1, result.posted)
         assertTrue(result.acked)
     }
@@ -137,7 +141,7 @@ class AppInstallCommandPollTest {
         )
         val first = runPoll(failing, posted)
         assertEquals(listOf("p1"), failing.prompted)
-        assertTrue(posted.isPosted("p1"))
+        assertTrue(posted.isPosted("cmd-p1"))
         assertFalse(first.acked)
 
         // Next poll: the server re-offers; no duplicate prompt, ack retried.
@@ -147,8 +151,29 @@ class AppInstallCommandPollTest {
         }
         assertTrue(retry.prompted.isEmpty())
         assertEquals(1, second.skipped)
-        assertEquals(listOf(listOf("p1")), retry.ackedBatches)
+        assertEquals(listOf(listOf("cmd-p1")), retry.ackedBatches)
         assertTrue(second.acked)
+    }
+
+    @Test
+    fun `unknown kinds are acked and ignored never prompted`() {
+        // The server stops re-offering an unknown entry once its command
+        // id is acked; the app must never post a notification for it.
+        // Unknown entries without any command id cannot be addressed and
+        // stay unacked (the server-side TTL still collects them).
+        val shapes = AppInstallCommands.ParsedCommands(
+            valid = listOf(payload("p1")),
+            unknownKinds = 2,
+            unknownIds = listOf("cmd-unknown-1"),
+            malformed = 0,
+            syntaxError = false,
+        )
+        val deps = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(shapes))
+        val result = runPoll(deps)
+
+        assertEquals(listOf("p1"), deps.prompted)
+        assertEquals(listOf(listOf("cmd-p1", "cmd-unknown-1")), deps.ackedBatches)
+        assertTrue(result.acked)
     }
 
     @Test

@@ -5,25 +5,25 @@ import com.phonecompanion.app.data.AppMoshi
 import com.squareup.moshi.Types
 
 /**
- * Posted-ids set for poll-triggered install prompts: push ids the app
- * already posted a notification for, so a re-offered command (the app
+ * Posted-ids set for poll-triggered install prompts: per-device command
+ * ids the app already resolved, so a re-offered command (the app
  * died before acking, or the ack was lost) suppresses a duplicate
  * notification instead of stacking a second prompt.
  *
  * Plain [SharedPreferences][android.content.SharedPreferences], NOT
- * encrypted storage: push ids are opaque server-issued ids, not secret,
- * and the set must survive credential wipes/re-pairs (a re-pair must not
- * resurrect already-prompted commands as fresh notifications). Pruned to
- * [AppInstallPostedIds.MAX_POSTED_IDS] most-recent ids — memory hygiene
- * only, never a suppression window for live commands (the server stops
- * offering acked ids).
+ * encrypted storage: command ids are opaque server-issued ids, not
+ * secret, and the set must survive credential wipes/re-pairs (a re-pair
+ * must not resurrect already-prompted commands as fresh notifications).
+ * Pruned to [AppInstallPostedIds.MAX_POSTED_IDS] most-recent ids —
+ * memory hygiene only, never a suppression window for live commands
+ * (the server stops offering acked ids).
  */
 interface AppInstallPostedStore {
-    /** True when [pushId] already prompted (duplicate re-offer). */
-    fun isPosted(pushId: String): Boolean
+    /** True when [commandId] already resolved (duplicate re-offer). */
+    fun isPosted(commandId: String): Boolean
 
-    /** Records [pushIds] as prompted (idempotent, pruned). */
-    fun markPosted(pushIds: Collection<String>)
+    /** Records [commandIds] as resolved (idempotent, pruned). */
+    fun markPosted(commandIds: Collection<String>)
 }
 
 /**
@@ -87,20 +87,20 @@ class PrefsAppInstallPostedStore(context: Context) : AppInstallPostedStore {
         Context.MODE_PRIVATE,
     )
 
-    override fun isPosted(pushId: String): Boolean {
-        if (pushId.isBlank()) return false
+    override fun isPosted(commandId: String): Boolean {
+        if (commandId.isBlank()) return false
         return try {
-            AppInstallPostedIds.decode(prefs.getString(KEY_POSTED_IDS, null)).contains(pushId)
+            AppInstallPostedIds.decode(prefs.getString(KEY_POSTED_IDS, null)).contains(commandId)
         } catch (_: Exception) {
             false
         }
     }
 
-    override fun markPosted(pushIds: Collection<String>) {
-        if (pushIds.isEmpty()) return
+    override fun markPosted(commandIds: Collection<String>) {
+        if (commandIds.isEmpty()) return
         try {
             val merged = AppInstallPostedIds.prune(
-                AppInstallPostedIds.decode(prefs.getString(KEY_POSTED_IDS, null)) + pushIds,
+                AppInstallPostedIds.decode(prefs.getString(KEY_POSTED_IDS, null)) + commandIds,
             )
             prefs.edit().putString(KEY_POSTED_IDS, AppInstallPostedIds.encode(merged)).apply()
         } catch (_: Exception) {

@@ -16,6 +16,7 @@ class AppInstallConsistencyTest {
     fun `notify id has a single owner`() {
         val p = AppInstallPayload.fromMap(
             mapOf(
+                "command_id" to "cmd-9",
                 "push_id" to "push-9",
                 "apk_url" to "https://example.com/app.apk",
                 "sha256" to "c".repeat(64),

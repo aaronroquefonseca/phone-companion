@@ -19,9 +19,11 @@ class AppInstallCommandsTest {
 
     private fun entry(
         pushId: String = "push-1",
+        commandId: String = "cmd-$pushId",
         extra: Map<String, Any?> = emptyMap(),
     ): Map<String, Any?> = mapOf(
         "type" to "app_install",
+        "command_id" to commandId,
         "push_id" to pushId,
         "apk_url" to "https://example.com/app.apk",
         "sha256" to "a".repeat(64),
@@ -68,7 +70,9 @@ class AppInstallCommandsTest {
         assertFalse(parsed.syntaxError)
         assertEquals(2, parsed.valid.size)
         assertEquals("push-1", parsed.valid[0].pushId)
+        assertEquals("cmd-push-1", parsed.valid[0].commandId)
         assertEquals("push-2", parsed.valid[1].pushId)
+        assertEquals("cmd-push-2", parsed.valid[1].commandId)
         assertEquals(0, parsed.unknownKinds)
         assertEquals(0, parsed.malformed)
     }
@@ -79,16 +83,20 @@ class AppInstallCommandsTest {
             body(
                 entry("push-1"),
                 mapOf("type" to "note", "title" to "hi"),
+                mapOf("type" to "note", "command_id" to "cmd-unknown-1", "title" to "hi"),
                 mapOf("kind" to "alert", "body" to "x"),
                 mapOf("title" to "no discriminator at all"),
-                entry("push-9", mapOf("type" to 42)),
+                entry("push-9", "cmd-push-9", mapOf("type" to 42)),
             ),
         )
         assertFalse(parsed.syntaxError)
         assertEquals(1, parsed.valid.size)
         assertEquals("push-1", parsed.valid[0].pushId)
+        assertEquals("cmd-push-1", parsed.valid[0].commandId)
         // Non-string discriminator cannot be an install: unknown, not crash.
-        assertEquals(4, parsed.unknownKinds)
+        assertEquals(5, parsed.unknownKinds)
+        // Only unknown entries carrying a command id can be acked away.
+        assertEquals(listOf("cmd-unknown-1", "cmd-push-9"), parsed.unknownIds)
         assertEquals(0, parsed.malformed)
     }
 
@@ -97,10 +105,10 @@ class AppInstallCommandsTest {
         val parsed = AppInstallCommands.parseResponse(
             body(
                 entry("ok-1"),
-                entry("bad-sha", mapOf("sha256" to "zz")),
-                entry("bad-url", mapOf("apk_url" to "http://example.com/a.apk")),
-                entry("no-label", mapOf("label" to "   ")),
-                entry("bad-pkg", mapOf("package" to "singleword")),
+                entry("bad-sha", extra = mapOf("sha256" to "zz")),
+                entry("bad-url", extra = mapOf("apk_url" to "http://example.com/a.apk")),
+                entry("no-label", extra = mapOf("label" to "   ")),
+                entry("bad-pkg", extra = mapOf("package" to "singleword")),
                 "not-an-object",
             ),
         )
@@ -116,8 +124,8 @@ class AppInstallCommandsTest {
         // Numeric version drops to absent -> still valid (optional).
         val parsed = AppInstallCommands.parseResponse(
             body(
-                entry("num-id", mapOf("push_id" to 7)),
-                entry("num-version", mapOf("version" to 2)),
+                entry("num-id", extra = mapOf("push_id" to 7)),
+                entry("num-version", extra = mapOf("version" to 2)),
             ),
         )
         assertFalse(parsed.syntaxError)
@@ -128,7 +136,7 @@ class AppInstallCommandsTest {
     @Test
     fun `extra unknown fields are tolerated`() {
         val parsed = AppInstallCommands.parseResponse(
-            body(entry("push-1", mapOf("future_field" to "anything", "n" to 3))),
+            body(entry("push-1", extra = mapOf("future_field" to "anything", "n" to 3))),
         )
         assertFalse(parsed.syntaxError)
         assertEquals(1, parsed.valid.size)
@@ -165,11 +173,39 @@ class AppInstallCommandsTest {
     }
 
     @Test
-    fun `ack request serializes the push_ids wire shape`() {
+    fun `ack request serializes the ids wire shape the outbox server reads`() {
         val adapter = AppMoshi.moshi.adapter(CommandsAckRequest::class.java)
-        val json = adapter.toJson(CommandsAckRequest(listOf("push-1", "push-2")))
-        assertTrue("ack must carry push_ids, was: $json", json.contains("\"push_ids\""))
-        assertTrue(json.contains("push-1"))
-        assertTrue(json.contains("push-2"))
+        val json = adapter.toJson(CommandsAckRequest(listOf("cmd-1", "cmd-2")))
+        assertTrue("ack must carry ids, was: $json", json.contains("\"ids\""))
+        assertTrue(json.contains("cmd-1"))
+        assertTrue(json.contains("cmd-2"))
+    }
+
+    @Test
+    fun `real outbox body parses end to end`() {
+        // Byte-shape of GET /api/v1/outbox as the poll-based backend
+        // serves it: flat string entries with the per-device command_id
+        // alongside the install fields. A body shaped like this must
+        // yield promptable payloads whose command ids round-trip into
+        // the ack body — this is the contract that previously broke
+        // (push ids were acked and the server 400/ignored them).
+        val raw = "{\"commands\":[{" +
+            "\"command_id\":\"cmd-7\"," +
+            "\"push_id\":\"push-7\"," +
+            "\"type\":\"app_install\"," +
+            "\"apk_url\":\"https://example.com/app.apk\"," +
+            "\"sha256\":\"" + "a".repeat(64) + "\"," +
+            "\"package\":\"com.example.app\"," +
+            "\"version\":\"2.1\"," +
+            "\"label\":\"Beta\"}]}"
+        val parsed = AppInstallCommands.parseResponse(raw)
+        assertFalse(parsed.syntaxError)
+        assertEquals(1, parsed.valid.size)
+        assertEquals("cmd-7", parsed.valid[0].commandId)
+        assertEquals("push-7", parsed.valid[0].pushId)
+        val adapter = AppMoshi.moshi.adapter(CommandsAckRequest::class.java)
+        val ackJson = adapter.toJson(CommandsAckRequest(parsed.valid.map { it.commandId }))
+        assertTrue("ack must carry ids, was: $ackJson", ackJson.contains("\"ids\""))
+        assertTrue(ackJson.contains("cmd-7"))
     }
 }

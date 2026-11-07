@@ -23,6 +23,7 @@ class AppInstallFlowTest {
 
     private fun payload() = AppInstallPayload.fromMap(
         mapOf(
+            "command_id" to "cmd-flow",
             "push_id" to "flow-push",
             "apk_url" to "https://example.com/app.apk",
             "sha256" to "b".repeat(64),

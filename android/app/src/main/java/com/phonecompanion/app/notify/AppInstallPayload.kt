@@ -4,8 +4,9 @@ package com.phonecompanion.app.notify
  * Remote APK install push ("app_install") wire payload.
  *
  * Frozen wire contract (see the task brief / docs): the app polls
- * `GET /api/v1/commands` and each `app_install` command entry carries
- * string fields `type=app_install`, `push_id`, `apk_url` (https only),
+ * `GET /api/v1/outbox` and each `app_install` command entry carries
+ * string fields `type=app_install`, `command_id` (per-device id used for
+ * dedupe and ack), `push_id`, `apk_url` (https only),
  * `sha256` (64 lowercase hex), `package` (e.g. com.example.app),
  * `version` (optional), `label` (required, human-readable).
  *
@@ -16,6 +17,7 @@ package com.phonecompanion.app.notify
  * malformed command entries never break the poll.
  */
 data class AppInstallPayload(
+    val commandId: String,
     val pushId: String,
     val apkUrl: String,
     val sha256: String,
@@ -36,7 +38,8 @@ data class AppInstallPayload(
      * attempt is created per Install tap, after the prompt tap.
      */
     fun toExtras(): Map<String, String> {
-        val out = HashMap<String, String>(6)
+        val out = HashMap<String, String>(7)
+        out[EXTRA_COMMAND_ID] = commandId
         out[EXTRA_PUSH_ID] = pushId
         out[EXTRA_APK_URL] = apkUrl
         out[EXTRA_SHA256] = sha256
@@ -70,6 +73,7 @@ data class AppInstallPayload(
         const val MAX_APK_BYTES: Long = 100L * 1024L * 1024L
 
         /** Intent/Bundle keys carrying a validated push across components. */
+        const val EXTRA_COMMAND_ID = "pc_app_command_id"
         const val EXTRA_PUSH_ID = "pc_app_push_id"
         const val EXTRA_APK_URL = "pc_app_apk_url"
         const val EXTRA_SHA256 = "pc_app_sha256"
@@ -100,6 +104,7 @@ data class AppInstallPayload(
         }
 
         const val MAX_PUSH_ID_CHARS = 128
+        const val MAX_COMMAND_ID_CHARS = 128
         const val MAX_URL_CHARS = 2048
         const val MAX_PACKAGE_CHARS = 255
         const val MAX_LABEL_CHARS = 200
@@ -137,7 +142,8 @@ data class AppInstallPayload(
         /**
          * Parses and validates [data]. Returns null when any required field
          * is missing, oversized, or invalid (bad URL scheme, bad sha256
-         * shape, bad package shape, blank label/push_id). Never throws.
+         * shape, bad package shape, blank label/push_id/command_id). Never
+         * throws.
          */
         fun fromMap(data: Map<String, String>): AppInstallPayload? = try {
             parse(data)
@@ -146,6 +152,13 @@ data class AppInstallPayload(
         }
 
         private fun parse(data: Map<String, String>): AppInstallPayload? {
+            // Per-device command id: the only value the server accepts in
+            // the ack body. An entry without one can never be acked, so it
+            // must not be prompted either (else the server re-offers it
+            // forever and the pending cap fills).
+            val commandId = data["command_id"]?.trim().orEmpty()
+            if (commandId.isEmpty() || commandId.length > MAX_COMMAND_ID_CHARS) return null
+
             val pushId = data["push_id"]?.trim().orEmpty()
             if (pushId.isEmpty() || pushId.length > MAX_PUSH_ID_CHARS) return null
 
@@ -172,6 +185,7 @@ data class AppInstallPayload(
             if (version != null && version.length > MAX_VERSION_CHARS) return null
 
             return AppInstallPayload(
+                commandId = commandId,
                 pushId = pushId,
                 apkUrl = apkUrl,
                 sha256 = sha256,
@@ -195,6 +209,7 @@ data class AppInstallPayload(
                 val v = extras[intentKey] ?: extras[wireSpelling]
                 if (!v.isNullOrEmpty()) wire[wireKey] = v
             }
+            take("command_id", EXTRA_COMMAND_ID, "command_id")
             take("push_id", EXTRA_PUSH_ID, "push_id")
             take("apk_url", EXTRA_APK_URL, "apk_url")
             take("sha256", EXTRA_SHA256, "sha256")
