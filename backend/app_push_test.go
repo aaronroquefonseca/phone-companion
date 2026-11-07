@@ -125,9 +125,10 @@ func TestAppPushAuthMatrix(t *testing.T) {
 		t.Errorf("no auth: got %d, want 401 (%s)", w.Code, w.Body.String())
 	}
 
-	// Unknown Bearer → 401 (not a device credential, not the operator).
-	if w := postAppPush(t, mux, badTargetBody, nil, "Bearer garbage-token", false); w.Code != http.StatusUnauthorized {
-		t.Errorf("bad bearer: got %d, want 401 (%s)", w.Code, w.Body.String())
+	// Unknown Bearer → 403 (blanket: any non-operator Bearer is
+	// forbidden, no DB lookup, no fallthrough to the session).
+	if w := postAppPush(t, mux, badTargetBody, nil, "Bearer garbage-token", false); w.Code != http.StatusForbidden {
+		t.Errorf("bad bearer: got %d, want 403 (%s)", w.Code, w.Body.String())
 	}
 
 	// Valid device Bearer → 403, even with a session alongside.
@@ -146,7 +147,8 @@ func TestAppPushAuthMatrix(t *testing.T) {
 		t.Errorf("device bearer+session: got %d, want 403 (%s)", w.Code, w.Body.String())
 	}
 
-	// Revoked device Bearer is no longer a valid device credential → 401.
+	// Revoked device Bearer is still just a non-operator Bearer → 403
+	// (the chain does no device lookup; any wrong Bearer is forbidden).
 	devID := ""
 	if err := db.QueryRow(`SELECT id FROM devices WHERE fcm_token = 'fcm-auth-matrix'`).Scan(&devID); err != nil {
 		t.Fatal(err)
@@ -154,8 +156,8 @@ func TestAppPushAuthMatrix(t *testing.T) {
 	if _, err := RevokeDevice(db, devID); err != nil {
 		t.Fatal(err)
 	}
-	if w := postAppPush(t, mux, badTargetBody, nil, "Bearer "+devTok, false); w.Code != http.StatusUnauthorized {
-		t.Errorf("revoked device bearer: got %d, want 401 (%s)", w.Code, w.Body.String())
+	if w := postAppPush(t, mux, badTargetBody, nil, "Bearer "+devTok, false); w.Code != http.StatusForbidden {
+		t.Errorf("revoked device bearer: got %d, want 403 (%s)", w.Code, w.Body.String())
 	}
 
 	// Session without the write-guard marker → 403 per existing convention.
@@ -173,9 +175,9 @@ func TestAppPushAuthMatrix(t *testing.T) {
 		t.Errorf("operator token: got %d, want 202 (%s)", w.Code, w.Body.String())
 	}
 
-	// Wrong operator token → 401.
-	if w := postAppPush(t, mux, badTargetBody, nil, "Bearer "+appPushTestToken+"-wrong", false); w.Code != http.StatusUnauthorized {
-		t.Errorf("wrong token: got %d, want 401 (%s)", w.Code, w.Body.String())
+	// Wrong operator token → 403 (not 401: any wrong Bearer is forbidden).
+	if w := postAppPush(t, mux, badTargetBody, nil, "Bearer "+appPushTestToken+"-wrong", false); w.Code != http.StatusForbidden {
+		t.Errorf("wrong token: got %d, want 403 (%s)", w.Code, w.Body.String())
 	}
 
 	// Operator token wins over a guard-less session (token path needs no CSRF).
@@ -183,10 +185,10 @@ func TestAppPushAuthMatrix(t *testing.T) {
 		t.Errorf("token+session: got %d, want 202 (%s)", w.Code, w.Body.String())
 	}
 
-	// Session + unknown Bearer → 401: a presented credential never falls
+	// Session + unknown Bearer → 403: a presented credential never falls
 	// through to the session.
-	if w := postAppPush(t, mux, badTargetBody, cookie, "Bearer garbage-token", true); w.Code != http.StatusUnauthorized {
-		t.Errorf("session+bad bearer: got %d, want 401 (%s)", w.Code, w.Body.String())
+	if w := postAppPush(t, mux, badTargetBody, cookie, "Bearer garbage-token", true); w.Code != http.StatusForbidden {
+		t.Errorf("session+bad bearer: got %d, want 403 (%s)", w.Code, w.Body.String())
 	}
 }
 
@@ -237,7 +239,6 @@ func TestAppPushValidationMatrix(t *testing.T) {
 	}{
 		{"empty body target", `{"apk_url":"https://example.com/a.apk","sha256":"` + appPushTestSHA + `","package":"com.example.app","label":"x"}`, 422, "empty_target"},
 		{"empty device_ids", good(func(m map[string]any) { m["target"] = map[string]any{"device_ids": []string{}} }), 422, "empty_target"},
-		{"ambiguous target", good(func(m map[string]any) { m["target"] = map[string]any{"all": true, "device_ids": []string{"a"}} }), 422, "ambiguous_target"},
 		{"too many targets", good(func(m map[string]any) { m["target"] = map[string]any{"device_ids": manyIDs(501)} }), 422, "too_many_targets"},
 		{"missing apk_url", good(func(m map[string]any) { delete(m, "apk_url") }), 422, "missing_apk_url"},
 		{"http apk_url", good(func(m map[string]any) { m["apk_url"] = "http://example.com/a.apk" }), 422, "invalid_apk_url"},
@@ -252,11 +253,12 @@ func TestAppPushValidationMatrix(t *testing.T) {
 		{"missing package", good(func(m map[string]any) { delete(m, "package") }), 422, "missing_package"},
 		{"package no dot", good(func(m map[string]any) { m["package"] = "nodots" }), 422, "invalid_package"},
 		{"package bad chars", good(func(m map[string]any) { m["package"] = "com.example-app" }), 422, "invalid_package"},
+		{"package too long", good(func(m map[string]any) { m["package"] = strings.Repeat("a", 255) + ".b" }), 422, "invalid_package"},
 		{"version too long", good(func(m map[string]any) { m["version"] = strings.Repeat("v", 65) }), 422, "invalid_version"},
 		{"missing label", good(func(m map[string]any) { delete(m, "label") }), 422, "missing_label"},
 		{"label too long", good(func(m map[string]any) { m["label"] = strings.Repeat("l", 101) }), 422, "invalid_label"},
-		{"unknown field", good(func(m map[string]any) { m["bogus"] = 1 }), 422, "invalid_json"},
-		{"malformed json", `{`, 422, "invalid_json"},
+		{"malformed json", `{`, 400, "invalid_json"},
+		{"empty body", ``, 400, "invalid_json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -382,8 +384,9 @@ func TestAppPushSendFailureIsolated(t *testing.T) {
 	}
 }
 
-// A driver that fails every send is 500 driver_unavailable with no audit
-// row — fail closed, same direction as notify.
+// A driver that fails every send is 500 driver_unavailable. The audit row
+// stays with accepted:0 as the record of the attempt (audit-first: the
+// row lands before fan-out, so a total send failure cannot un-record it).
 func TestAppPushAllSendsFail(t *testing.T) {
 	db := openAppPushTestDB(t)
 	sender := &failDeviceSender{fail: "dev-1"}
@@ -397,28 +400,155 @@ func TestAppPushAllSendsFail(t *testing.T) {
 	if code := errorCode(t, w); code != "driver_unavailable" {
 		t.Fatalf("error %q, want driver_unavailable", code)
 	}
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM app_pushes`).Scan(&n); err != nil {
-		t.Fatal(err)
+	var accepted int
+	if err := db.QueryRow(`SELECT accepted FROM app_pushes`).Scan(&accepted); err != nil {
+		t.Fatalf("audit row missing after total failure: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("failed push wrote %d audit rows, want 0", n)
+	if accepted != 0 {
+		t.Fatalf("accepted = %d, want 0", accepted)
 	}
 }
 
-// Stub drivers succeed on app-push (they ARE the test seam): unlike
-// notify — where a stub accept would lie about delivery — the app-push
-// tests assert the exact payload shape through fakes.
-func TestAppPushStubDriverSucceeds(t *testing.T) {
+// Unknown JSON fields are tolerated (match notify): only undecodable
+// bodies are 400 invalid_json.
+func TestAppPushUnknownFieldsTolerated(t *testing.T) {
+	db := openAppPushTestDB(t)
+	mux, _ := openAppPushMux(t, db, &captureSender{})
+	auth := "Bearer " + appPushTestToken
+
+	body := `{"target":{"all":true},"apk_url":` + jsonQuote(appPushTestURL) +
+		`,"sha256":` + jsonQuote(appPushTestSHA) +
+		`,"package":"com.example.app","label":"Extra keys","bogus":1,"nested":{"x":[1,2]}}`
+	if w := postAppPush(t, mux, body, nil, auth, false); w.Code != http.StatusAccepted {
+		t.Fatalf("unknown fields: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// {"all":true} absorbs device_ids entirely — even a non-empty list —
+// normalizing to All (unlike notify's ambiguous_target). The audit row
+// records the canonical {"all":true}.
+func TestAppPushAllIgnoresDeviceIDs(t *testing.T) {
+	for _, target := range []string{
+		`{"all":true,"device_ids":["dev-1"]}`,
+		`{"all":true,"device_ids":[]}`,
+	} {
+		db := openAppPushTestDB(t)
+		addNotifyDevice(t, db, "dev-2")
+		mux, _ := openAppPushMux(t, db, &captureSender{})
+		w := postAppPush(t, mux, validAppPushBody(target), nil, "Bearer "+appPushTestToken, false)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("%s: status %d, want 202 (%s)", target, w.Code, w.Body.String())
+		}
+		pushID, accepted := decodePush202(t, w)
+		if accepted != 2 {
+			t.Fatalf("%s: accepted=%v, want 2 (All wins)", target, accepted)
+		}
+		var stored string
+		if err := db.QueryRow(`SELECT target FROM app_pushes WHERE push_id = ?`, pushID).Scan(&stored); err != nil {
+			t.Fatalf("%s: audit row missing: %v", target, err)
+		}
+		if stored != `{"all":true}` {
+			t.Fatalf("%s: audit target = %q, want canonical all:true", target, stored)
+		}
+	}
+}
+
+// A 256-character package passes; 257 fails (matrix covers the reject).
+func TestAppPushPackageLengthBoundary(t *testing.T) {
+	db := openAppPushTestDB(t)
+	mux, _ := openAppPushMux(t, db, &captureSender{})
+	pkg := strings.Repeat("a", 254) + ".b"
+	if len(pkg) != 256 {
+		t.Fatalf("fixture package is %d chars, want 256", len(pkg))
+	}
+	body := `{"target":{"all":true},"apk_url":` + jsonQuote(appPushTestURL) +
+		`,"sha256":` + jsonQuote(appPushTestSHA) +
+		`,"package":` + jsonQuote(pkg) + `,"label":"Boundary"}`
+	if w := postAppPush(t, mux, body, nil, "Bearer "+appPushTestToken, false); w.Code != http.StatusAccepted {
+		t.Fatalf("256-char package: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// Audit-first: when the audit INSERT fails, the handler answers 500 and
+// the driver is never touched — nothing is sent.
+func TestAppPushAuditFirstDBFailure(t *testing.T) {
+	db := openAppPushTestDB(t)
+	sender := &captureSender{}
+	mux, _ := openAppPushMux(t, db, sender)
+	if _, err := db.Exec(`DROP TABLE app_pushes`); err != nil {
+		t.Fatal(err)
+	}
+
+	w := postAppPush(t, mux, validAppPushBody(`{"all":true}`), nil, "Bearer "+appPushTestToken, false)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500 (%s)", w.Code, w.Body.String())
+	}
+	if len(sender.payloads) != 0 {
+		t.Fatalf("audit failure sent %d payloads, want 0", len(sender.payloads))
+	}
+}
+
+// The marshaled-payload budget mirrors notify's MaxDataPayloadBytes: a
+// maxed-out-but-valid request passes (no false trip), while a synthetic
+// over-budget request fails the size gate with payload_too_long.
+func TestAppPushPayloadSizeCap(t *testing.T) {
+	db := openAppPushTestDB(t)
+	mux, _ := openAppPushMux(t, db, &captureSender{})
+	auth := "Bearer " + appPushTestToken
+
+	big := `{"target":{"all":true},"apk_url":"https://example.com/` + strings.Repeat("a", 2000) +
+		`","sha256":` + jsonQuote(appPushTestSHA) +
+		`,"package":"` + strings.Repeat("p", 254) + `.b","version":"` + strings.Repeat("v", 64) +
+		`","label":"` + strings.Repeat("l", 100) + `"}`
+	if w := postAppPush(t, mux, big, nil, auth, false); w.Code != http.StatusAccepted {
+		t.Fatalf("maxed-out valid request: status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+
+	over := appPushRequest{
+		Target:  notify.Target{All: true},
+		APKURL:  "https://example.com/" + strings.Repeat("a", 4000),
+		SHA256:  appPushTestSHA,
+		Package: "com.example.app",
+		Label:   "Too big",
+	}
+	err := checkAppPushPayloadSize(over)
+	verr, ok := err.(*notify.ValidationError)
+	if !ok || verr.Code != "payload_too_long" {
+		t.Fatalf("over-budget payload: got %v, want payload_too_long", err)
+	}
+}
+
+// with NO audit row (rejected before audit, mirroring notify which writes
+// no history there). Genuinely zero targets stay 202 accepted:0 behind
+// the same stub.
+func TestAppPushStubDriverUnavailable(t *testing.T) {
 	for _, sender := range []notify.Sender{notify.NoopSender{}, notify.LogSender{}} {
 		db := openAppPushTestDB(t)
 		mux, _ := openAppPushMux(t, db, sender)
-		w := postAppPush(t, mux, validAppPushBody(`{"all":true}`), nil, "Bearer "+appPushTestToken, false)
-		if w.Code != http.StatusAccepted {
-			t.Fatalf("%T: status %d, want 202 (%s)", sender, w.Code, w.Body.String())
+		auth := "Bearer " + appPushTestToken
+
+		w := postAppPush(t, mux, validAppPushBody(`{"all":true}`), nil, auth, false)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("%T with targets: status %d, want 500 (%s)", sender, w.Code, w.Body.String())
 		}
-		if _, accepted := decodePush202(t, w); accepted != 1 {
-			t.Fatalf("%T: accepted=%v, want 1", sender, accepted)
+		if code := errorCode(t, w); code != "driver_unavailable" {
+			t.Fatalf("%T with targets: error %q, want driver_unavailable", sender, code)
+		}
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM app_pushes`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%T stub rejection wrote %d audit rows, want 0", sender, n)
+		}
+
+		// Zero targets are still 202 accepted:0 behind the same stub.
+		w = postAppPush(t, mux, validAppPushBody(`{"device_ids":["nope"]}`), nil, auth, false)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("%T zero targets: status %d, want 202 (%s)", sender, w.Code, w.Body.String())
+		}
+		if _, accepted := decodePush202(t, w); accepted != 0 {
+			t.Fatalf("%T zero targets: accepted=%v, want 0", sender, accepted)
 		}
 	}
 }
