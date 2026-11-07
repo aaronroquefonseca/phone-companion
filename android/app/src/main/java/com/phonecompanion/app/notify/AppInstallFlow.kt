@@ -84,7 +84,14 @@ object AppInstallFlow {
         /** SHA-256 mismatch: file deleted, hard refuse, no commit. */
         data object HashMismatch : Outcome
 
-        /** PackageInstaller commit failed: file deleted. */
+        /**
+         * PackageInstaller commit failed: the verified APK is KEPT cached
+         * so the failure notification's Retry can resume from it via
+         * [runResume] (which re-verifies before reuse) instead of
+         * re-downloading. A commit-time failure (installer unavailable,
+         * session abort, IO) says nothing about the bytes — unlike a hash
+         * mismatch, the file was proven good.
+         */
         data object CommitFailed : Outcome
 
         /**
@@ -103,7 +110,9 @@ object AppInstallFlow {
      * Runs download → verify → unknown-sources re-check → commit exactly
      * once. Never throws for flow failures (they are [Outcome]s); an
      * unexpected host exception fails closed to [Outcome.DownloadFailed]
-     * (or [Outcome.CommitFailed] past verify) with the partial deleted.
+     * (or [Outcome.CommitFailed] past verify). Partials from a failed
+     * download and mismatched files are deleted; a verified APK survives
+     * a commit failure so Retry can resume without re-fetching.
      *
      * @param keepVerifiedOnRevoked when true, a post-verify grant refusal
      * keeps the verified APK cached ([Outcome.UnknownSourcesRevoked] all
@@ -180,9 +189,11 @@ object AppInstallFlow {
 
     /**
      * Shared commit tail: PackageInstaller commit, then exactly one
-     * outcome. A commit failure deletes the cached APK (it was just
-     * proven uninstallable); a cancellation landing mid-commit reports
-     * Cancelled instead of a commit failure.
+     * outcome. A commit failure keeps the cached APK (it was just
+     * verified — the failure is environmental, not the bytes): the
+     * failure notification's Retry resumes from it without re-fetching.
+     * A cancellation landing mid-commit reports Cancelled instead of a
+     * commit failure.
      */
     private suspend fun commitTail(
         payload: AppInstallPayload,
@@ -192,7 +203,6 @@ object AppInstallFlow {
         val committed = try {
             host.commit(payload, dest)
         } catch (_: Exception) {
-            runCatching { dest.delete() }
             return Outcome.CommitFailed
         }
         return if (committed) {

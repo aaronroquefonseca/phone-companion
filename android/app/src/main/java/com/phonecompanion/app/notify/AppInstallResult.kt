@@ -14,6 +14,14 @@ package com.phonecompanion.app.notify
  * outcome ([Outcome.PendingUserAction]) launches the system's
  * confirmation intent and stays silent — the cached APK is kept for the
  * follow-up result.
+ *
+ * Install-phase failures are cause-aware ([failureKindOf]): a
+ * signature/update-incompatible failure is deterministic (retrying the
+ * same bytes can never succeed), so its notification offers the target
+ * app's system App-info screen instead of a retry; any other
+ * commit/install failure is treated as transient and offers a retry that
+ * resumes from the cached verified APK. The raw installer message is
+ * kept as secondary detail only — never the primary explanation.
  */
 object AppInstallResult {
 
@@ -64,5 +72,67 @@ object AppInstallResult {
         STATUS_FAILURE_ABORTED -> Outcome.UserCancelled
         STATUS_PENDING_USER_ACTION -> Outcome.PendingUserAction
         else -> Outcome.Failed(statusMessage)
+    }
+
+    /**
+     * Cause-aware kind of an install/commit failure. Drives the failure
+     * notification's copy and its action button ([failureActions]).
+     */
+    enum class FailureKind {
+        /**
+         * The update was built with a different signing key than the
+         * installed build (`INSTALL_FAILED_UPDATE_INCOMPATIBLE` /
+         * "signatures do not match"). Deterministic: retrying the same
+         * bytes can never succeed — the user must uninstall the old app
+         * first, then install fresh. Never offers Retry.
+         */
+        SIGNATURE_MISMATCH,
+
+        /**
+         * Any other commit/install failure (session abort, storage/IO at
+         * commit, installer unavailable, unknown message). Treated as
+         * transient: offers Retry, which resumes from the cached verified
+         * APK without re-downloading when it is still intact.
+         */
+        TRANSIENT,
+    }
+
+    /** Notification action button offered on a failure notification. */
+    enum class FailureAction {
+        /** Re-opens the pre-install UI; its Install tap resumes the flow. */
+        RETRY,
+
+        /** Opens the update target's system App-info screen (Uninstall). */
+        APP_INFO,
+    }
+
+    /**
+     * Maps an installer status message to its [FailureKind]. Status-code
+     * agnostic on purpose: the incompatibility arrives as a generic
+     * `STATUS_FAILURE` with the `INSTALL_FAILED_*` reason in the message.
+     * Null/blank/unknown messages fail open to [FailureKind.TRANSIENT]
+     * (a retry is harmless; a missing App-info button would strand). Case
+     * insensitive. Never throws.
+     */
+    fun failureKindOf(statusMessage: String?): FailureKind {
+        val message = statusMessage.orEmpty()
+        return if (message.contains("update_incompatible", ignoreCase = true) ||
+            message.contains("signatures do not match", ignoreCase = true)
+        ) {
+            FailureKind.SIGNATURE_MISMATCH
+        } else {
+            FailureKind.TRANSIENT
+        }
+    }
+
+    /**
+     * Action buttons for a [FailureKind]: signature mismatch offers
+     * App-info only (retrying is futile); transient failures offer Retry
+     * only. User-cancelled, hash-mismatch, blocked, and too-large paths
+     * never reach here and stay action-less. Never throws.
+     */
+    fun failureActions(kind: FailureKind): Set<FailureAction> = when (kind) {
+        FailureKind.SIGNATURE_MISMATCH -> setOf(FailureAction.APP_INFO)
+        FailureKind.TRANSIENT -> setOf(FailureAction.RETRY)
     }
 }

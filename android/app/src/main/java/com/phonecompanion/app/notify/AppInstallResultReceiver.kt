@@ -8,15 +8,18 @@ import android.util.Log
 
 /**
  * PackageInstaller result receiver: the terminal state of the install
- * phase. Thin forwarder: deletes the cached APK on every terminal path,
- * classifies the status, and funnels the single user-visible notification
- * through [AppInstallNotifications.notifyTerminal] (claimed per attempt,
- * so a retried system broadcast can never double-post). The one
- * exception is `STATUS_PENDING_USER_ACTION`: the system's confirmation
- * intent is launched with the cached APK kept and no terminal claimed —
- * the follow-up result owns the terminal. No retry on any path —
- * user-cancelled is plain informational, failures carry the installer
- * status message.
+ * phase. Thin forwarder: classifies the status and funnels the single
+ * user-visible notification through [AppInstallNotifications.notifyTerminal]
+ * (claimed per attempt, so a retried system broadcast can never
+ * double-post). Success and user-cancelled delete the cached APK;
+ * failures KEEP it — transient failures Retry from the cache via the
+ * runResume path (which re-verifies before reuse), and a
+ * signature-mismatch keeps it so uninstall-then-fresh-install needs no
+ * re-download. The one exception is `STATUS_PENDING_USER_ACTION`: the
+ * system's confirmation intent is launched with the cached APK kept and
+ * no terminal claimed — the follow-up result owns the terminal. Failure
+ * notifications are cause-aware (App-info for signature mismatch, Retry
+ * otherwise); user-cancelled stays plain informational with no retry.
  *
  * Logging discipline: package names only, never hashes/URLs/tokens.
  */
@@ -45,17 +48,16 @@ class AppInstallResultReceiver : BroadcastReceiver() {
             return
         }
 
-        // The verified APK is single-use: drop it whatever the outcome.
-        runCatching { AppInstallFiles.apkFile(app, pushId).delete() }
-
         val target = AppInstallNotifications.TerminalTarget(pushId, packageName, label)
         when (val outcome = AppInstallResult.classify(status, message)) {
             is AppInstallResult.Outcome.Installed -> {
+                runCatching { AppInstallFiles.apkFile(app, pushId).delete() }
                 if (notify(app, AppInstallFlow.TerminalKind.SUCCESS, target, attempt)) {
                     Log.i(TAG, "app_install installed $packageName")
                 }
             }
             is AppInstallResult.Outcome.UserCancelled -> {
+                runCatching { AppInstallFiles.apkFile(app, pushId).delete() }
                 if (notify(app, AppInstallFlow.TerminalKind.USER_CANCELLED, target, attempt)) {
                     Log.i(TAG, "app_install user-cancelled for $packageName")
                 }
@@ -66,7 +68,21 @@ class AppInstallResultReceiver : BroadcastReceiver() {
                 Log.w(TAG, "app_install unexpected pending state for $packageName")
             }
             is AppInstallResult.Outcome.Failed -> {
-                if (notify(app, AppInstallFlow.TerminalKind.FAILED, target, attempt, outcome.statusMessage)) {
+                // Keep the verified APK (see class kdoc): transient
+                // failures Retry from it, signature failures reinstall
+                // fresh from it after the user uninstalls — runResume
+                // re-verifies before any reuse, and the stale-cache purge
+                // bounds leftovers.
+                val retryPayload = payloadFrom(intent)
+                if (notify(
+                        app,
+                        AppInstallFlow.TerminalKind.FAILED,
+                        target,
+                        attempt,
+                        outcome.statusMessage,
+                        retryPayload,
+                    )
+                ) {
                     Log.w(TAG, "app_install failed for $packageName")
                 }
             }
@@ -101,7 +117,26 @@ class AppInstallResultReceiver : BroadcastReceiver() {
         target: AppInstallNotifications.TerminalTarget,
         attempt: String?,
         detail: String? = null,
-    ): Boolean = AppInstallNotifications.notifyTerminal(context, kind, target, attempt, detail)
+        payload: AppInstallPayload? = null,
+    ): Boolean = AppInstallNotifications.notifyTerminal(context, kind, target, attempt, detail, payload)
+
+    /**
+     * Rebuilds the validated payload from the installer-result extras so
+     * the failure notification's Retry action has its pre-install tap
+     * target. The commit threads the full payload extras ([AppInstallPayload.toExtras]);
+     * [AppInstallPayload.fromExtras] re-validates, so a tampered bundle
+     * yields null and the post stays action-less rather than pointing
+     * nowhere. Legacy result intents (payload extras absent) likewise
+     * yield null.
+     */
+    private fun payloadFrom(intent: Intent): AppInstallPayload? {
+        val extras = intent.extras ?: return null
+        val map = HashMap<String, String?>(8)
+        for (key in extras.keySet()) {
+            map[key] = extras.getString(key)
+        }
+        return AppInstallPayload.fromExtras(map)
+    }
 
     companion object {
         private const val TAG = "AppInstallResult"
