@@ -176,7 +176,7 @@ func TestOutboxPollIsolationAndHeaders(t *testing.T) {
 	tokA := addOutboxDevice(t, db, "dev-A")
 	tokB := addOutboxDevice(t, db, "dev-B")
 
-	w := postAppPush(t, db, validAppPushBody("dev-A"))
+	w := postAppPush(t, db, notify.NoopSender{}, validAppPushBody("dev-A"))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("push: status %d (%s)", w.Code, w.Body.String())
 	}
@@ -223,7 +223,7 @@ func TestOutboxWaitImmediateAndTimeout(t *testing.T) {
 	}
 
 	// Pending row: immediate ["outbox"].
-	w := postAppPush(t, db, validAppPushBody("dev-A"))
+	w := postAppPush(t, db, notify.NoopSender{}, validAppPushBody("dev-A"))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("push: status %d (%s)", w.Code, w.Body.String())
 	}

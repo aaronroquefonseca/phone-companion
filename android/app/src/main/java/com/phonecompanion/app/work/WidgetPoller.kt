@@ -71,10 +71,11 @@ object WidgetPoller {
             // Transport/storage failure: the next poll retries.
         }
         updateAllWidgets(context)
-        // Poll-triggered install commands (FCM-free install path): same
-        // worker/cadence as the widget poll above — no new periodic work.
-        // Best-effort and silent: never fails the poll, never touches
-        // widgets (posts notifications only), never requires FCM.
+        // Poll-triggered install commands (auto-download install path):
+        // same worker/cadence as the widget poll above — no new periodic
+        // work. Best-effort and silent: never fails the poll, never
+        // touches widgets (starts install downloads + posts notifications
+        // only), never requires FCM.
         try {
             AppInstallCommandPoll.pollOnce(context)
         } catch (e: CancellationException) {

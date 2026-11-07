@@ -192,7 +192,7 @@ command per target device into the same outbox table; devices fetch their
 own commands by polling. No step here needs FCM, a service-account key,
 or any Google service — a server with the default `log` driver delivers
 exactly like one with the `fcm` driver (which only adds a best-effort
-wake hint on the notify path).
+wake hint per token device on either path).
 
 #### `POST /api/v1/app-push` (remote install push)
 

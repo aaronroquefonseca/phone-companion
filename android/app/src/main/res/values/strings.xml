@@ -78,13 +78,13 @@
     <string name="app_install_unknown_sources_title">Permission needed: install unknown apps</string>
     <string name="app_install_unknown_sources_body">Android only lets chosen apps install other apps. To install %1$s, allow “Install unknown apps” for Phone Companion on the next screen, then come back here.</string>
     <string name="app_install_allow_unknown">Allow installs</string>
-    <string name="app_install_install">Download and install</string>
+    <string name="app_install_install">Install</string>
     <string name="app_install_cancel">Cancel</string>
     <string name="app_install_downloading">Downloading… %1$d%%</string>
     <string name="app_install_verifying">Verifying download…</string>
     <string name="app_install_installing">Installing… check the system install dialog.</string>
     <string name="app_install_error_invalid">Invalid install request — nothing was downloaded.</string>
-    <string name="app_install_error_download">Download failed. Nothing was installed — tap Download and install to try once more.</string>
+    <string name="app_install_error_download">Download failed. Nothing was installed — tap Install to try once more.</string>
     <string name="app_install_error_too_large">That file is over the 100 MB limit. Nothing was installed.</string>
     <string name="app_install_error_mismatch">That file failed verification and was deleted. Nothing was installed — ask the operator to re-send the update.</string>
     <string name="app_install_error_install">Install could not start. Nothing was installed.</string>
@@ -108,4 +108,10 @@
     <string name="app_install_too_large_body">%1$s is over the 100 MB limit and was not downloaded.</string>
     <string name="app_install_cancelled_title">Download cancelled</string>
     <string name="app_install_cancelled_body">%1$s download was cancelled.</string>
+    <string name="app_install_grant_title">Permission needed to install %1$s</string>
+    <string name="app_install_grant_body">%1$s downloaded and verified. Allow “Install unknown apps” for Phone Companion to continue — tap to open the install screen.</string>
+    <string name="app_install_foreground_title">Downloading %1$s…</string>
+    <string name="app_install_foreground_body">%1$s is downloading now and will ask for one Install tap when ready. Details shows the install screen; dismissing changes nothing.</string>
+    <string name="app_install_details">Details</string>
+    <string name="app_install_dismiss">Dismiss</string>
 </resources>

@@ -158,7 +158,7 @@ class AppInstallPayloadTest {
 
     @Test
     fun `prompt extras round-trip through fromExtras with intent keys`() {
-        // promptIntent writes exactly toExtras(); the activity reads via
+        // detailIntent writes exactly toExtras(); the activity reads via
         // fromExtras. Before the fix these key domains disagreed and every
         // activity launch parsed to null (Install unreachable).
         val original = AppInstallPayload.fromMap(valid())!!

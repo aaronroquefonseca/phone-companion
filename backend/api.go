@@ -34,9 +34,10 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf 
 	// devices matched (unknown device_ids, or an empty registry) — not an
 	// error. See handleNotify.
 	mux.Handle("POST /api/v1/notify", operatorAdminChain(sessions, csrf, handleNotify(db, sender)))
-	// Push outbox (no FCM required): operator app-push plus the device
-	// poll/wait/ack surface. See outbox.go / app_push.go.
-	registerPushOutboxRoutes(mux, db, sessions, csrf)
+	// Push outbox (poll delivery; FCM wake hint when configured): operator
+	// app-push plus the device poll/wait/ack surface. See outbox.go /
+	// app_push.go.
+	registerPushOutboxRoutes(mux, db, sessions, csrf, sender)
 	// Operator test-notification form (same fan-out pipeline as the API).
 	RegisterNotifyWebUIRoutes(mux, db, sender, sessions, csrf)
 	return withAuthNoStore(mux)

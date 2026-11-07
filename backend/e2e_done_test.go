@@ -204,7 +204,7 @@ func TestE2EDoneCriteria(t *testing.T) {
 	// is asserted on the queued outbox rows below.
 	base.Handle("POST /api/v1/notify",
 		operatorAdminChain(sessions, csrf, handleNotify(db, &captureSender{})))
-	registerPushOutboxRoutes(base, db, sessions, csrf)
+	registerPushOutboxRoutes(base, db, sessions, csrf, e2eNullSender{})
 	webui.RegisterRoutes(base, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",

@@ -1,9 +1,12 @@
 // Package main — POST /api/v1/app-push (poll-based remote install push).
 //
 // Operator-only endpoint that queues one pending outbox command per target
-// device. Delivery is poll-based (GET /api/v1/outbox): no FCM, no Google
-// services, no driver involved at all. The queued payload is the flat
-// string map the Android side installs from:
+// device. Delivery is poll-based (GET /api/v1/outbox): the outbox row is
+// the delivery leg and FCM is only a best-effort wake hint (a silent
+// {"type":"app_push_wake","push_id":...} data message sent when the
+// configured driver is the real FCM sender and the device has a stored
+// token — hint failures are logged, never fail the request). The queued
+// payload is the flat string map the Android side installs from:
 //
 //	{"type":"app_install","push_id":...,"apk_url":...,"sha256":...,
 //	 "package":...,"version":...,"label":...}
@@ -62,8 +65,8 @@ type appPushRequest struct {
 // Limits for the app-push fields (contract: max sizes, https-only URL,
 // lowercase-hex digest, reverse-DNS-ish package, short label). The
 // marshaled flat map must also fit the notify FCM-budget constant
-// (checkAppPushPayloadSize) even though no FCM leg exists — the cap keeps
-// one shared size vocabulary and bounds row/poll weight.
+// (checkAppPushPayloadSize): the wake hint shares the same size
+// vocabulary and the cap bounds row/poll weight.
 const (
 	maxAppPushURLLen     = 2048
 	maxAppPackageLen     = 256
@@ -206,6 +209,12 @@ func appPushPayload(pushID string, req appPushRequest) map[string]string {
 	}
 }
 
+// appPushWakeType is the silent FCM data-message type the app-push wake
+// hint carries. The client must match the identical string (see the
+// Android wake intercept): the value is a frozen cross-boundary
+// contract, never renamed casually.
+const appPushWakeType = "app_push_wake"
+
 // handleAppPush serves POST /api/v1/app-push: validate, resolve, then
 // atomically record the push + per-device pending rows and signal
 // waiters. Delivery semantics:
@@ -219,9 +228,18 @@ func appPushPayload(pushID string, req appPushRequest) map[string]string {
 //	any DB failure → 500 with nothing queued (tx rollback, fail closed:
 //	  a 500 here must never invite a retry that double-queues).
 //
+// After commit the handler sends a best-effort FCM wake hint per target
+// device — ONLY when sender is the real *notify.FCMSender AND the device
+// has a non-empty FCM token. The hint is a silent data message
+// ({"type":"app_push_wake","push_id":...}) that tells the app to poll
+// NOW instead of waiting for the next cycle; failures are logged only
+// (same NeedsReRegistration split as notify) and never fail the request,
+// and no history rows are written. Devices without a token (or behind a
+// non-FCM driver) simply pick the command up on their next poll.
+//
 // Logs carry push_id only — never tokens, bodies, or URLs (which may
 // carry query strings).
-func handleAppPush(db *sql.DB) http.HandlerFunc {
+func handleAppPush(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var raw appPushRequestJSON
@@ -335,6 +353,26 @@ func handleAppPush(db *sql.DB) http.HandlerFunc {
 		committed = true
 		for _, d := range devices {
 			signalOutboxWaiters(d.ID)
+		}
+		// Best-effort wake hint ONLY for the real FCM driver with a
+		// stored token (mirror of the notify hint): the silent wake
+		// tells the app to poll now; failures are logged, never fail
+		// the request, and write no history rows. Devices without a
+		// token poll on their normal cadence.
+		if _, isFCM := sender.(*notify.FCMSender); isFCM {
+			for _, d := range devices {
+				if strings.TrimSpace(d.FCMToken) == "" {
+					continue
+				}
+				wake := map[string]string{"type": appPushWakeType, "push_id": pushID}
+				if sendErr := sender.Send(ctx, d, wake); sendErr != nil {
+					if notify.NeedsReRegistration(sendErr) {
+						log.Printf("app-push: device=%s push_id=%s needs fresh FCM token: %v", deviceLogID(d.ID), pushID, sendErr)
+					} else {
+						log.Printf("app-push: hint failed device=%s push_id=%s: %v", deviceLogID(d.ID), pushID, sendErr)
+					}
+				}
+			}
 		}
 		log.Printf("app-push: push_id=%s accepted=%d/%d", pushID, len(devices), len(devices))
 		w.Header().Set("Content-Type", "application/json")

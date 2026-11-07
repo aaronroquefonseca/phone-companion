@@ -11,10 +11,12 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * Covers the single installFlow suspend function: download → verify →
- * unknown-sources re-check → commit ordering, fail-closed outcomes, and
- * the terminal-funnel mapping. The Android host is faked; the real host
- * lives in AppInstallViewModel and only adapts calls.
+ * Covers the install flow entries ([AppInstallFlow.runFlow] unconditional
+ * download, [AppInstallFlow.runResume] verified-cache reuse): download →
+ * verify → unknown-sources re-check → commit ordering, the grant-resume
+ * paths, fail-closed outcomes, and the terminal-funnel mapping. The
+ * Android host is faked; the real hosts live in AppInstallViewModel and
+ * AppInstallAutoDownload and only adapt calls.
  */
 class AppInstallFlowTest {
 
@@ -189,5 +191,75 @@ class AppInstallFlowTest {
                 AppInstallFlow.Outcome.CommitFailed.terminalKind(),
             )
         }
+    }
+
+    @Test
+    fun `keepVerifiedOnRevoked keeps the file for grant-resume`() = runBlocking {
+        val host = FakeHost(canInstallResult = false)
+        val file = dest()
+        file.writeBytes(ByteArray(10))
+        val outcome = AppInstallFlow.runFlow(payload(), file, host, keepVerifiedOnRevoked = true)
+        assertEquals(AppInstallFlow.Outcome.UnknownSourcesRevoked, outcome)
+        assertEquals(0, host.commitCalls)
+        // Grant-gated auto-download: the verified APK stays cached so the
+        // flow resumes after the one-time grant instead of re-fetching.
+        assertTrue(file.exists())
+    }
+
+    @Test
+    fun `resume reuses a verified cache without downloading`() = runBlocking {
+        val host = FakeHost()
+        val file = dest()
+        file.writeBytes(ByteArray(10))
+        val outcome = AppInstallFlow.runResume(payload(), file, host)
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
+        assertEquals(0, host.downloadCalls)
+        assertEquals(1, host.commitCalls)
+        // No download: straight to the pre-commit gate → commit tail.
+        assertEquals(listOf("verify", "canInstall", "commit"), host.events)
+    }
+
+    @Test
+    fun `resume falls back to full flow on cache miss`() = runBlocking {
+        val host = FakeHost()
+        val outcome = AppInstallFlow.runResume(payload(), dest(), host)
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
+        assertEquals(1, host.downloadCalls)
+        assertEquals(listOf("download", "verify", "canInstall", "commit"), host.events)
+    }
+
+    @Test
+    fun `resume falls back to full flow on verify miss`() = runBlocking {
+        // Stale cache (re-verify fails): re-download, then the fresh file
+        // fails verify too → HashMismatch, file deleted, no commit.
+        val host = FakeHost(verifyResult = false)
+        val file = dest()
+        file.writeBytes(ByteArray(10))
+        val outcome = AppInstallFlow.runResume(payload(), file, host)
+        assertEquals(AppInstallFlow.Outcome.HashMismatch, outcome)
+        assertEquals(1, host.downloadCalls)
+        assertEquals(0, host.commitCalls)
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `resume cancelled up front never touches the host`() = runBlocking {
+        val host = FakeHost(cancelled = true)
+        val outcome = AppInstallFlow.runResume(payload(), dest(), host)
+        assertEquals(AppInstallFlow.Outcome.Cancelled, outcome)
+        assertTrue(host.events.isEmpty())
+        assertEquals(0, host.downloadCalls)
+        assertEquals(0, host.commitCalls)
+    }
+
+    @Test
+    fun `resume honors the grant gate before commit`() = runBlocking {
+        val host = FakeHost(canInstallResult = false)
+        val file = dest()
+        file.writeBytes(ByteArray(10))
+        val outcome = AppInstallFlow.runResume(payload(), file, host)
+        assertEquals(AppInstallFlow.Outcome.UnknownSourcesRevoked, outcome)
+        assertEquals(0, host.downloadCalls)
+        assertEquals(0, host.commitCalls)
     }
 }

@@ -37,6 +37,11 @@ import kotlinx.coroutines.launch
  * with no oracle: a rotated key is indistinguishable from a tampered
  * envelope on screen and in logcat. Envelopes are never logged and never
  * forwarded into activity extras.
+ *
+ * Silent app-push wake (`type=app_push_wake`, see
+ * [AppInstallCommandPoll.isWake]): never rendered — the service enqueues
+ * the expedited [AppInstallWakeWorker] poll so the auto-download starts
+ * instantly instead of waiting for the next cycle.
  */
 class CompanionMessagingService : FirebaseMessagingService() {
 
@@ -109,6 +114,16 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     private fun onMessageReceivedInternal(message: RemoteMessage) {
+        // Silent app-push wake FIRST: never render anything — enqueue the
+        // expedited wake poll (a Service has no goAsync; WorkManager owns
+        // the wakelock and the backstop). Enqueue never throws out; a
+        // failed wake stays silent because the next scheduled poll
+        // retries. All other types fall through to the existing render
+        // path untouched.
+        if (AppInstallCommandPoll.isWake(message.data)) {
+            runCatching { AppInstallWakeWorker.enqueue(this) }
+            return
+        }
         val payload = NotificationPayload.from(message)
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         ensureChannel(manager, payload)

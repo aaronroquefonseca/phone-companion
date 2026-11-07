@@ -10,10 +10,10 @@ import java.io.File
 /**
  * APK install via [PackageInstaller.Session] (MODE_FULL_INSTALL).
  *
- * Never called without the unknown-sources grant (the activity checks
- * `packageManager.canRequestPackageInstalls()` first) and never
- * automatically — only from the explicit Install tap after download +
- * SHA-256 verification. Streams the verified file into the session,
+ * Never called without the unknown-sources grant (the flow re-checks
+ * `packageManager.canRequestPackageInstalls()` after verify, before
+ * commit) — from the receipt-triggered auto-download or the activity's
+ * Install tap, always after download + SHA-256 verification. Streams the verified file into the session,
  * commits with a result [PendingIntent] to [AppInstallResultReceiver],
  * and returns: the terminal outcome is posted by the receiver (exactly
  * one notification), never here. Call off the main thread. Never throws —

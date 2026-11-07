@@ -8,34 +8,49 @@ import com.phonecompanion.app.data.SecureStorage
 import kotlinx.coroutines.CancellationException
 
 /**
- * Poll-triggered install commands (FCM-free install path).
+ * Poll-triggered install commands (poll-delivered install path; FCM is
+ * only a silent wake hint that triggers this same poll immediately).
  *
  * Runs inside the existing poll cycle ([com.phonecompanion.app.work.WidgetPoller.refresh]
  * — same worker/cadence as the widget poll, no new periodic work): each
- * poll GETs `/api/v1/outbox` with the device Bearer token, posts the
- * SAME local notification flow as the install prompt
- * ([AppInstallNotifications.notifyPrompt] on the shared general channel;
- * tap opens the pre-install UI), then acks resolved command ids via
- * `POST /api/v1/commands/ack` (per-device `command_id`s) so they are
- * not re-offered.
+ * poll GETs `/api/v1/outbox` with the device Bearer token, then every
+ * fresh command id immediately starts its auto-download
+ * ([AppInstallAutoDownload]: progress notification first, download →
+ * verify → grant-gate → commit detached from the worker), then acks
+ * resolved command ids via `POST /api/v1/commands/ack` (per-device
+ * `command_id`s) so they are not re-offered.
  *
  * Idempotence story: resolved command ids persist in a plain-prefs set
  * ([AppInstallPostedStore], pruned). If the app dies before acking, the
  * next poll re-offers and the persisted set suppresses a duplicate
- * notification (the re-offered id is still acked — a harmless no-op
+ * download (the re-offered id is still acked — a harmless no-op
  * server-side). Ack failures likewise retry on the next poll. Unknown
- * kinds are acked-and-ignored (never prompted) so the server stops
+ * kinds are acked-and-ignored (never downloaded) so the server stops
  * re-offering them.
  *
  * Auth failures here (401/403) only skip the commands step with a
  * shape-only log line — revocation policy belongs to the widget poll,
  * which owns the credential wipe. Nothing here touches widgets (no
- * Glance, no cache writes): this step posts notifications only.
+ * Glance, no cache writes): this step starts downloads and posts
+ * notifications only.
  * Cancellation is always rethrown.
  */
 object AppInstallCommandPoll {
 
     internal const val TAG = "AppInstallCommands"
+
+    /**
+     * Silent server wake type (frozen cross-boundary contract with the
+     * backend's app-push wake hint): a data message of this type carries
+     * no user content — it only tells the app to poll the outbox NOW.
+     * Older builds without the intercept render it generically (accepted
+     * degradation: one odd notification instead of instant delivery).
+     */
+    const val WAKE_TYPE = "app_push_wake"
+
+    /** True when an FCM data map is the app-push wake (never rendered). */
+    fun isWake(data: Map<String, String>): Boolean =
+        data["type"]?.trim() == WAKE_TYPE
 
     /** One commands-fetch outcome, mapped from Retrofit/transport. */
     internal sealed interface FetchOutcome {
@@ -49,12 +64,13 @@ object AppInstallCommandPoll {
         suspend fun fetch(): FetchOutcome
 
         /**
-         * Posts the install prompt for one fresh payload (purge stale
-         * APKs, then the prompt notification).
+         * Starts the auto-download for one fresh payload (purge stale
+         * APKs, post progress, offer the foreground dialog, launch the
+         * detached transfer).
          */
-        suspend fun postPrompt(payload: AppInstallPayload)
+        suspend fun startDownload(payload: AppInstallPayload)
 
-        /** Acks prompted push ids; true when the server accepted. */
+        /** Acks started command ids; true when the server accepted. */
         suspend fun ack(ids: List<String>): Boolean
     }
 
@@ -69,7 +85,7 @@ object AppInstallCommandPoll {
     )
 
     /**
-     * Android entry: fetch commands, prompt fresh ids, ack prompted ids.
+     * Android entry: fetch commands, auto-download fresh ids, ack started ids.
      * Best-effort — never throws except [CancellationException] (rethrown).
      * Skips silently when unpaired (no credentials, no status change).
      */
@@ -115,11 +131,12 @@ object AppInstallCommandPoll {
                 }
             }
 
-            override suspend fun postPrompt(payload: AppInstallPayload) {
-                // Drop superseded/abandoned APKs before prompting so a
+            override suspend fun startDownload(payload: AppInstallPayload) {
+                // Drop superseded/abandoned APKs before starting so a
                 // stale file never sits next to this command's download.
                 AppInstallFiles.purgeStaleCache(app, payload.pushId)
-                AppInstallNotifications.notifyPrompt(app, payload)
+                val attempt = AppInstallSessions.startAttempt(payload.pushId)
+                AppInstallAutoDownload.begin(app, payload, attempt)
             }
 
             override suspend fun ack(ids: List<String>): Boolean {
@@ -143,11 +160,12 @@ object AppInstallCommandPoll {
     }
 
     /**
-     * Testable commands-poll core: prompts every valid payload not already
-     * resolved, then acks every valid offered command id already resolved
+     * Testable commands-poll core: starts the download for every valid
+     * payload not already resolved, then acks every valid offered command
+     * id already resolved
      * (this round or an earlier one — the ack is idempotent, so failed
      * acks converge on the next poll) plus every unknown-kind command id
-     * (acked-and-ignored, never prompted). A prompt failure skips that id
+     * (acked-and-ignored, never downloaded). A start failure skips that id
      * for both the posted set and the ack (the server re-offers it next
      * poll). Cancellation is always rethrown.
      */
@@ -180,12 +198,12 @@ object AppInstallCommandPoll {
         for (payload in parsed.valid) {
             if (posted.isPosted(payload.commandId)) continue
             try {
-                deps.postPrompt(payload)
+                deps.startDownload(payload)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 // Shape only (counts + class): never ids, URLs, or hashes.
-                logInfo("commands poll prompt-failed error=${e.javaClass.simpleName}")
+                logInfo("commands poll download-start-failed error=${e.javaClass.simpleName}")
                 continue
             }
             posted.markPosted(listOf(payload.commandId))
@@ -193,9 +211,10 @@ object AppInstallCommandPoll {
         }
         // Ack every valid offered id already resolved (this round or an
         // earlier one): the ack is idempotent, so failed acks converge
-        // on the next poll. Never-resolved ids (prompt failed) are left
-        // for the server to re-offer. Unknown kinds are acked-and-ignored
-        // (never prompted) so the server stops re-offering them.
+        // on the next poll. Never-resolved ids (download failed to start)
+        // are left for the server to re-offer. Unknown kinds are
+        // acked-and-ignored (never downloaded) so the server stops
+        // re-offering them.
         val ackIds = (parsed.valid.map { it.commandId }.filter { posted.isPosted(it) } +
             parsed.unknownIds).distinct()
         val acked = if (ackIds.isEmpty()) {

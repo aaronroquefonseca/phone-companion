@@ -22,14 +22,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
 // registerPushOutboxRoutes wires the operator app-push endpoint plus the
 // three device outbox endpoints. Called from NewMux and from main's base
-// mux (one definition so production and test routers agree).
-func registerPushOutboxRoutes(mux *http.ServeMux, db *sql.DB, sessions webui.SessionStore, csrf *webui.CSRFProtection) {
-	mux.Handle("POST /api/v1/app-push", operatorAdminChain(sessions, csrf, handleAppPush(db)))
+// mux (one definition so production and test routers agree). The sender
+// is the configured notify driver: handleAppPush uses it for the
+// best-effort FCM wake hint only (real FCM sender + stored token,
+// log-only failures).
+func registerPushOutboxRoutes(mux *http.ServeMux, db *sql.DB, sessions webui.SessionStore, csrf *webui.CSRFProtection, sender notify.Sender) {
+	mux.Handle("POST /api/v1/app-push", operatorAdminChain(sessions, csrf, handleAppPush(db, sender)))
 	mux.HandleFunc("GET /api/v1/events/wait", handleOutboxWait(db))
 	mux.HandleFunc("GET /api/v1/outbox", handleOutboxPoll(db))
 	mux.HandleFunc("POST /api/v1/commands/ack", handleCommandsAck(db))

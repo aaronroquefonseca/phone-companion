@@ -8,7 +8,9 @@ import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -79,22 +81,34 @@ class RefreshWorker(
         /**
          * Manual refresh entrypoint (WidgetsActivity open + refresh button).
          * Unique REPLACE so rapid calls (open + button) collapse to a single
-         * refresh instead of stacking duplicate work.
+         * refresh instead of stacking duplicate work. Expedited (falling
+         * back to a normal request past quota) so a user tap runs NOW
+         * instead of sitting in OEM deferral queues — the old deferrable
+         * job could stall for minutes on Samsung-class devices while the
+         * UI claimed "Refresh requested". Constraints + backoff unchanged.
          */
         fun requestManualRefresh(context: Context) {
-            val request = OneTimeWorkRequestBuilder<RefreshWorker>()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_MANUAL,
+                ExistingWorkPolicy.REPLACE,
+                manualRefreshRequest(),
+            )
+        }
+
+        /**
+         * The manual-refresh request, split out for unit tests: expedited
+         * must survive refactors (a quiet drop back to deferrable re-hides
+         * the "Refresh now lies" bug this flag fixed).
+         */
+        internal fun manualRefreshRequest(): OneTimeWorkRequest =
+            OneTimeWorkRequestBuilder<RefreshWorker>()
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build(),
                 )
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(
-                UNIQUE_MANUAL,
-                ExistingWorkPolicy.REPLACE,
-                request,
-            )
-        }
     }
 }
