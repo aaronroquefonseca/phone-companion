@@ -40,13 +40,21 @@ func rejectNotifyDeviceToken(next http.Handler) http.Handler {
 	})
 }
 
-// notifyAdminChain gates the notify handler: device tokens are rejected
-// with 403 first, then the WebUI session is required (401 without one),
-// then the operator write guard requires explicit non-browser intent
+// notifyAdminChain gates the notify handler: the operator token is
+// accepted first (machine credential, no write guard — CSRF proofs are
+// for ambient cookies, not Bearers), then device tokens are rejected
+// with 403, then the WebUI session is required (401 without one), then
+// the operator write guard requires explicit non-browser intent
 // (X-Requested-With or a session-bound CSRF token, same as enroll-tokens)
 // so a bare session cookie alone cannot send cross-site. Runs inside
 // RequireAdmin so unauthenticated callers still get 401 (auth first,
 // CSRF second). Phone enroll stays exempt (token-only auth, no session).
 func notifyAdminChain(sessions webui.SessionStore, csrf *webui.CSRFProtection, next http.Handler) http.Handler {
-	return rejectNotifyDeviceToken(webui.RequireAdmin(sessions, requireAPIWriteGuard(csrf, next)))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tok, ok := bearerToken(r); ok && validOperatorToken(tok) {
+			next.ServeHTTP(w, withAppPushIdentity(r, "operator-token"))
+			return
+		}
+		rejectNotifyDeviceToken(webui.RequireAdmin(sessions, requireAPIWriteGuard(csrf, next))).ServeHTTP(w, r)
+	})
 }
