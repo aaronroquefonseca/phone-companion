@@ -17,11 +17,11 @@ import (
 )
 
 // NewMux builds the HTTP router. sessions backs the operator gates for
-// pairing (see pair_wire.go), POST /api/v1/notify (WebUI session or
-// OPERATOR_API_TOKEN Bearer; device Bearer tokens are rejected with 403
-// before auth runs — see notify_auth.go), and POST /api/v1/app-push
-// (same operator auth — see app_push.go). POST /api/v1/enroll stays on
-// enroll-token auth and never touches sessions.
+// pairing (see pair_wire.go) and the operator endpoints
+// (POST /api/v1/notify, POST /api/v1/app-push — one shared operator chain,
+// WebUI session or OPERATOR_API_TOKEN Bearer; any other Bearer value is
+// rejected with 403 before auth runs — see notify_auth.go).
+// POST /api/v1/enroll stays on enroll-token auth and never touches sessions.
 //
 // The returned handler already includes the auth no-store pin
 // (withAuthNoStore): credential-bearing paths are uncacheable on every
@@ -30,18 +30,18 @@ import (
 func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) http.Handler {
 	mux := newBaseMux(DefaultWidgetRegistry(), sessions, csrf)
 	// Implemented (notifications P9): POST /api/v1/notify is operator-only
-	// (WebUI session or OPERATOR_API_TOKEN Bearer; device Bearer tokens
-	// are rejected with 403). 202 {"notification_id","accepted"}: accepted
+	// (WebUI session or OPERATOR_API_TOKEN Bearer; any other Bearer is
+	// rejected with 403). 202 {"notification_id","accepted"}: accepted
 	// counts successful per-device sends; accepted:0 still returns 202 and
 	// means no devices matched (unknown device_ids, or an empty registry) —
 	// not an error. See handleNotify.
-	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, csrf, handleNotify(db, sender)))
+	mux.Handle("POST /api/v1/notify", operatorAdminChain(sessions, csrf, handleNotify(db, sender)))
 	// Implemented (remote APK install push): POST /api/v1/app-push is
-	// operator-only under the same auth (session + write guard, or the
-	// operator token; device Bearer tokens are rejected with 403).
+	// operator-only under the same chain (session + write guard, or the
+	// operator token; any other Bearer is rejected with 403).
 	// 202 {"push_id","accepted"}; audit rows land in app_pushes, never in
 	// notification_history. See handleAppPush.
-	mux.Handle("POST /api/v1/app-push", appPushAdminChain(sessions, csrf, db, handleAppPush(db, sender)))
+	mux.Handle("POST /api/v1/app-push", operatorAdminChain(sessions, csrf, handleAppPush(db, sender)))
 	// Operator test-notification form (same fan-out pipeline as the API).
 	RegisterNotifyWebUIRoutes(mux, db, sender, sessions, csrf)
 	return withAuthNoStore(mux)

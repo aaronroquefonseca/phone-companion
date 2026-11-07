@@ -83,8 +83,8 @@ func main() {
 	// Same notify wiring as NewMux (kept inline: webui.RegisterRoutes below
 	// needs the bare *http.ServeMux, while ListenAndServe takes the
 	// no-store-wrapped handler).
-	base.Handle("POST /api/v1/notify", notifyAdminChain(sessionStore, csrf, handleNotify(db, sender)))
-	base.Handle("POST /api/v1/app-push", appPushAdminChain(sessionStore, csrf, db, handleAppPush(db, sender)))
+	base.Handle("POST /api/v1/notify", operatorAdminChain(sessionStore, csrf, handleNotify(db, sender)))
+	base.Handle("POST /api/v1/app-push", operatorAdminChain(sessionStore, csrf, handleAppPush(db, sender)))
 	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,

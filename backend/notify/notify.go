@@ -134,7 +134,52 @@ func validationError(code, msg string) *ValidationError {
 	return &ValidationError{Code: code, Err: errors.New(msg)}
 }
 
-// ApplyDefaults fills contract defaults for unset optional fields.
+// ValidateTarget enforces the shared target union used by both
+// POST /api/v1/notify (via Message.Validate) and POST /api/v1/app-push:
+// exactly one of All or a non-empty DeviceIDs, at most MaxDeviceIDs ids.
+// One definition so the two endpoints cannot diverge; callers normalize
+// first (app-push drops device_ids when All is set, notify rejects the
+// mix as ambiguous — both end up here).
+func ValidateTarget(t Target) error {
+	if t.All && len(t.DeviceIDs) > 0 {
+		return validationError("ambiguous_target", `target must be exactly one of {"all":true} or {"device_ids":[...]}`)
+	}
+	if !t.All && len(t.DeviceIDs) == 0 {
+		return validationError("empty_target", `target must be exactly one of {"all":true} or non-empty {"device_ids":[...]}`)
+	}
+	if len(t.DeviceIDs) > MaxDeviceIDs {
+		return validationError("too_many_targets", "device_ids supports at most 500 entries")
+	}
+	return nil
+}
+
+// IsStubSender reports whether s is a non-delivering stub driver
+// (LogSender/NoopSender). Both notify and app-push fail closed with 500
+// driver_unavailable when a stub faces real targets — a stub "accept"
+// would lie about delivery — while genuinely zero targets stay 202
+// accepted:0 behind any driver. One check so the two cannot diverge.
+func IsStubSender(s Sender) bool {
+	switch s.(type) {
+	case LogSender, NoopSender:
+		return true
+	}
+	return false
+}
+
+// logMeta returns the id/kind pair for metadata-only driver logging,
+// accepting both the notify shape (notification_id/kind) and the app-push
+// shape (push_id/type) so drivers never log empty ids.
+func logMeta(payload map[string]string) (string, string) {
+	id := payload["notification_id"]
+	if id == "" {
+		id = payload["push_id"]
+	}
+	kind := payload["kind"]
+	if kind == "" {
+		kind = payload["type"]
+	}
+	return id, kind
+}
 func (m *Message) ApplyDefaults() {
 	if m.Kind == "" {
 		m.Kind = DefaultKind
@@ -152,14 +197,8 @@ func (m *Message) ApplyDefaults() {
 // Note: Channel has a contract default (ApplyDefaults), so by the time
 // Validate runs it is always non-empty — no missing_channel check needed.
 func (m Message) Validate() error {
-	if m.Target.All && len(m.Target.DeviceIDs) > 0 {
-		return validationError("ambiguous_target", `target must be exactly one of {"all":true} or {"device_ids":[...]}`)
-	}
-	if !m.Target.All && len(m.Target.DeviceIDs) == 0 {
-		return validationError("empty_target", `target must be exactly one of {"all":true} or non-empty {"device_ids":[...]}`)
-	}
-	if len(m.Target.DeviceIDs) > MaxDeviceIDs {
-		return validationError("too_many_targets", "device_ids supports at most 500 entries")
+	if err := ValidateTarget(m.Target); err != nil {
+		return err
 	}
 	if utf8.RuneCountInString(m.Kind) > MaxKindLen {
 		return validationError("kind_too_long", "kind must be at most 64 characters")
@@ -374,8 +413,8 @@ type LogSender struct{}
 
 // Send implements Sender.
 func (LogSender) Send(_ context.Context, device Device, payload map[string]string) error {
-	log.Printf("notify: notification_id=%q device=%q kind=%q",
-		payload["notification_id"], device.ID, payload["kind"])
+	id, kind := logMeta(payload)
+	log.Printf("notify: notification_id=%q device=%q kind=%q", id, device.ID, kind)
 	return nil
 }
 

@@ -3,7 +3,7 @@
 // Request/response shapes follow docs/api-contract.md ("notify" section).
 // Target resolution queries the devices table directly here: only the
 // P0-stable columns (id, name) are selected. Admin gating wraps at
-// registration time via notifyAdminChain (see notify_auth.go): the WebUI
+// registration time via operatorAdminChain (see notify_auth.go): the WebUI
 // session is required (401 without one) and device Bearer tokens are
 // rejected with 403.
 package main
@@ -147,9 +147,7 @@ func newNotificationID() (string, error) {
 }
 
 func writeNotifyError(w http.ResponseWriter, status int, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
+	writeAPIError(w, status, code)
 }
 
 // fanoutNotify is the shared fan-out core behind both POST /api/v1/notify
@@ -180,8 +178,8 @@ func fanoutNotify(ctx context.Context, db *sql.DB, sender notify.Sender, msg not
 		}
 		return notificationID, 0, http.StatusAccepted, ""
 	}
-	switch sender.(type) {
-	case notify.LogSender, notify.NoopSender:
+	switch {
+	case notify.IsStubSender(sender):
 		// Stub drivers deliver nothing: reporting accepted>0 would
 		// lie to the operator, so fail closed. (Zero targets return
 		// 202 above regardless of driver.)

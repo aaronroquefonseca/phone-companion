@@ -324,6 +324,15 @@ func TestNotifyRejectsDeviceBearer(t *testing.T) {
 		t.Fatalf("bearer alone: error %q, want forbidden", code)
 	}
 
+	// Unknown/garbage Bearers are blanket-403 too — the chain does no
+	// device lookup and never falls through to the session.
+	for _, bogus := range []string{"Bearer garbage-token", "Bearer " + strings.Repeat("x", 64)} {
+		w = postNotifyMux(mux, body, nil, bogus)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%q: status %d, want 403 (%s)", bogus, w.Code, w.Body.String())
+		}
+	}
+
 	// A device credential never upgrades into operator auth, even next to
 	// a live session.
 	w = postNotifyMux(mux, body, loginCookie(t, store), "Bearer device-token-x")

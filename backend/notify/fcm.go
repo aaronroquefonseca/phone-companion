@@ -314,8 +314,9 @@ func (s *FCMSender) postMessage(ctx context.Context, access, regToken string, pa
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		id, kind := logMeta(payload)
 		log.Printf("notify: fcm sent notification_id=%q device=%q kind=%q",
-			payload["notification_id"], shortDeviceID(regToken), payload["kind"])
+			id, shortDeviceID(regToken), kind)
 		return nil
 	}
 	return classifyFCMFailure(resp.StatusCode, raw)
