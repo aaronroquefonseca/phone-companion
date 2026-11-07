@@ -14,8 +14,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * in the flow (activity arms, download-cancel receiver, installer-result
  * receiver) goes through [claimTerminal].
  *
- * Exactly-once is scoped per Install-tap attempt, never per push id per
- * minute: each explicit Install tap mints a fresh nonce via
+ * Exactly-once is scoped per download attempt, never per push id per
+ * minute: each download start (auto on receipt, or an explicit Install
+ * tap) mints a fresh nonce via
  * [startAttempt], carried through the progress Cancel intent and the
  * installer result intent into every claim. A re-push (or a retry tap)
  * mints a new attempt and may post again; a duplicate delivery of the
@@ -47,7 +48,7 @@ object AppInstallSessions {
     private val sessions = ConcurrentHashMap<String, Session>()
 
     /**
-     * Starts a new Install-tap attempt for [pushId]: drops any stale
+     * Starts a new download attempt for [pushId]: drops any stale
      * cancel flag from an earlier dead flow and returns a fresh nonce
      * the caller threads into every terminal claim for this attempt.
      */

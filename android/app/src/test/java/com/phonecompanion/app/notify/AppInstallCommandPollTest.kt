@@ -4,21 +4,23 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.IOException
 
 /**
- * Poll-triggered command orchestration (post-once + ack).
+ * Poll-triggered command orchestration (auto-download once + ack).
  *
- * Pins: fresh ids post then mark then ack; already-posted re-offers
- * skip the prompt but still ack (lost-ack convergence); prompt
- * failures are left unmarked AND unacked (server re-offers next poll);
- * ack failures keep the posted marks (no re-prompt) and retry next
- * poll; fetch failures never post/ack. The collaborators surface is
- * exactly fetch/post/ack — no widget, cache, or Glance edge exists for
- * this path to touch.
+ * Pins: fresh ids start their download then mark then ack;
+ * already-posted re-offers skip the download but still ack (lost-ack
+ * convergence); start failures are left unmarked AND unacked (server
+ * re-offers next poll); ack failures keep the posted marks (no
+ * re-download) and retry next poll; fetch failures never start/ack. The
+ * collaborators surface is exactly fetch/startDownload/ack — no widget,
+ * cache, or Glance edge exists for this path to touch. The wake type is
+ * silent (never rendered): isWake separates it from install commands.
  */
 class AppInstallCommandPollTest {
 
@@ -45,17 +47,17 @@ class AppInstallCommandPollTest {
     private class FakeDeps(
         var fetchOutcome: AppInstallCommandPoll.FetchOutcome,
         var ackResult: Boolean = true,
-        var failPromptFor: Set<String> = emptySet(),
+        var failStartFor: Set<String> = emptySet(),
     ) : AppInstallCommandPoll.Collaborators {
-        val prompted = mutableListOf<String>()
+        val started = mutableListOf<String>()
         val ackedBatches = mutableListOf<List<String>>()
         val logs = mutableListOf<String>()
 
         override suspend fun fetch(): AppInstallCommandPoll.FetchOutcome = fetchOutcome
 
-        override suspend fun postPrompt(payload: AppInstallPayload) {
-            if (payload.pushId in failPromptFor) throw IOException("prompt down")
-            prompted.add(payload.pushId)
+        override suspend fun startDownload(payload: AppInstallPayload) {
+            if (payload.pushId in failStartFor) throw IOException("download down")
+            started.add(payload.pushId)
         }
 
         override suspend fun ack(ids: List<String>): Boolean {
@@ -80,12 +82,12 @@ class AppInstallCommandPollTest {
     }
 
     @Test
-    fun `fresh ids post mark and ack together`() = runBlocking {
+    fun `fresh ids start mark and ack together`() = runBlocking {
         val deps = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(parsed("p1", "p2")))
         val posted = MemPosted()
         val result = AppInstallCommandPoll.pollOnceWith(deps, posted) { deps.logs.add(it) }
 
-        assertEquals(listOf("p1", "p2"), deps.prompted)
+        assertEquals(listOf("p1", "p2"), deps.started)
         assertTrue(posted.isPosted("cmd-p1"))
         assertTrue(posted.isPosted("cmd-p2"))
         // The ack carries per-device command ids (what the server reads),
@@ -98,13 +100,13 @@ class AppInstallCommandPollTest {
     }
 
     @Test
-    fun `already-posted re-offer skips the prompt but still acks`() {
+    fun `already-posted re-offer skips the download but still acks`() {
         val posted = MemPosted()
         posted.markPosted(listOf("cmd-p1"))
         val deps = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(parsed("p1", "p2")))
         val result = runPoll(deps, posted)
 
-        assertEquals(listOf("p2"), deps.prompted)
+        assertEquals(listOf("p2"), deps.started)
         assertEquals(1, result.skipped)
         assertEquals(1, result.posted)
         // The re-offered id is acked too: a lost ack converges instead
@@ -114,18 +116,18 @@ class AppInstallCommandPollTest {
     }
 
     @Test
-    fun `prompt failure leaves the id unmarked and unacked`() {
+    fun `start failure leaves the id unmarked and unacked`() {
         val posted = MemPosted()
         val deps = FakeDeps(
             AppInstallCommandPoll.FetchOutcome.Success(parsed("bad", "good")),
-            failPromptFor = setOf("bad"),
+            failStartFor = setOf("bad"),
         )
         val result = runPoll(deps, posted)
 
-        assertEquals(listOf("good"), deps.prompted)
+        assertEquals(listOf("good"), deps.started)
         assertFalse(posted.isPosted("cmd-bad"))
         assertTrue(posted.isPosted("cmd-good"))
-        // Only the prompted id is acked; the failed one stays offered
+        // Only the started id is acked; the failed one stays offered
         // server-side for the next poll.
         assertEquals(listOf(listOf("cmd-good")), deps.ackedBatches)
         assertEquals(1, result.posted)
@@ -140,23 +142,23 @@ class AppInstallCommandPollTest {
             ackResult = false,
         )
         val first = runPoll(failing, posted)
-        assertEquals(listOf("p1"), failing.prompted)
+        assertEquals(listOf("p1"), failing.started)
         assertTrue(posted.isPosted("cmd-p1"))
         assertFalse(first.acked)
 
-        // Next poll: the server re-offers; no duplicate prompt, ack retried.
+        // Next poll: the server re-offers; no duplicate download, ack retried.
         val retry = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(parsed("p1")))
         val second = runBlocking {
             AppInstallCommandPoll.pollOnceWith(retry, posted) { retry.logs.add(it) }
         }
-        assertTrue(retry.prompted.isEmpty())
+        assertTrue(retry.started.isEmpty())
         assertEquals(1, second.skipped)
         assertEquals(listOf(listOf("cmd-p1")), retry.ackedBatches)
         assertTrue(second.acked)
     }
 
     @Test
-    fun `unknown kinds are acked and ignored never prompted`() {
+    fun `unknown kinds are acked and ignored never started`() {
         // The server stops re-offering an unknown entry once its command
         // id is acked; the app must never post a notification for it.
         // Unknown entries without any command id cannot be addressed and
@@ -171,13 +173,13 @@ class AppInstallCommandPollTest {
         val deps = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(shapes))
         val result = runPoll(deps)
 
-        assertEquals(listOf("p1"), deps.prompted)
+        assertEquals(listOf("p1"), deps.started)
         assertEquals(listOf(listOf("cmd-p1", "cmd-unknown-1")), deps.ackedBatches)
         assertTrue(result.acked)
     }
 
     @Test
-    fun `http and transport failures never post or ack`() {
+    fun `http and transport failures never start or ack`() {
         for (outcome in listOf(
             AppInstallCommandPoll.FetchOutcome.HttpError(401),
             AppInstallCommandPoll.FetchOutcome.HttpError(500),
@@ -186,7 +188,7 @@ class AppInstallCommandPollTest {
             val deps = FakeDeps(outcome)
             val posted = MemPosted()
             val result = runPoll(deps, posted)
-            assertTrue(deps.prompted.isEmpty())
+            assertTrue(deps.started.isEmpty())
             assertTrue(deps.ackedBatches.isEmpty())
             assertEquals(0, result.offered)
             assertTrue(result.acked)
@@ -199,8 +201,8 @@ class AppInstallCommandPollTest {
             override suspend fun fetch(): AppInstallCommandPoll.FetchOutcome =
                 throw IOException("down")
 
-            override suspend fun postPrompt(payload: AppInstallPayload) {
-                fail("no post")
+            override suspend fun startDownload(payload: AppInstallPayload) {
+                fail("no start")
             }
 
             override suspend fun ack(ids: List<String>): Boolean {
@@ -215,12 +217,12 @@ class AppInstallCommandPollTest {
     }
 
     @Test
-    fun `cancellation is rethrown from fetch prompt and ack`() {
+    fun `cancellation is rethrown from fetch start and ack`() {
         val ceFetch = object : AppInstallCommandPoll.Collaborators {
             override suspend fun fetch(): AppInstallCommandPoll.FetchOutcome =
                 throw CancellationException()
 
-            override suspend fun postPrompt(payload: AppInstallPayload) = Unit
+            override suspend fun startDownload(payload: AppInstallPayload) = Unit
             override suspend fun ack(ids: List<String>): Boolean = true
         }
         try {
@@ -229,14 +231,14 @@ class AppInstallCommandPollTest {
         } catch (_: CancellationException) {
         }
 
-        val cePrompt = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(parsed("p1")))
-        val cePromptDeps = object : AppInstallCommandPoll.Collaborators by cePrompt {
-            override suspend fun postPrompt(payload: AppInstallPayload): Unit =
+        val ceStart = FakeDeps(AppInstallCommandPoll.FetchOutcome.Success(parsed("p1")))
+        val ceStartDeps = object : AppInstallCommandPoll.Collaborators by ceStart {
+            override suspend fun startDownload(payload: AppInstallPayload): Unit =
                 throw CancellationException()
         }
         try {
-            runBlocking { AppInstallCommandPoll.pollOnceWith(cePromptDeps, MemPosted()) { } }
-            fail("prompt CE must propagate")
+            runBlocking { AppInstallCommandPoll.pollOnceWith(ceStartDeps, MemPosted()) { } }
+            fail("start CE must propagate")
         } catch (_: CancellationException) {
         }
 
@@ -244,7 +246,7 @@ class AppInstallCommandPollTest {
             override suspend fun fetch() =
                 AppInstallCommandPoll.FetchOutcome.Success(parsed("p1"))
 
-            override suspend fun postPrompt(payload: AppInstallPayload) = Unit
+            override suspend fun startDownload(payload: AppInstallPayload) = Unit
             override suspend fun ack(ids: List<String>): Boolean = throw CancellationException()
         }
         try {
@@ -270,11 +272,25 @@ class AppInstallCommandPollTest {
     }
 
     @Test
-    fun `collaborators are exactly fetch post and ack`() {
+    fun `collaborators are exactly fetch start and ack`() {
         // No widget, cache, or Glance edge exists on this path: the
-        // interface the poll core can reach is fetch/postPrompt/ack only.
+        // interface the poll core can reach is fetch/startDownload/ack only.
         val names = AppInstallCommandPoll.Collaborators::class.java.declaredMethods
             .map { it.name }.toSet()
-        assertEquals(setOf("fetch", "postPrompt", "ack"), names)
+        assertEquals(setOf("fetch", "startDownload", "ack"), names)
+    }
+
+    @Test
+    fun `wake type is silent and distinct from install commands`() {
+        // The server wake ({"type":"app_push_wake"}) must intercept before
+        // any render path; install commands and unknown types fall through.
+        assertTrue(AppInstallCommandPoll.isWake(mapOf("type" to "app_push_wake", "push_id" to "p1")))
+        assertTrue(AppInstallCommandPoll.isWake(mapOf("type" to "  app_push_wake  ")))
+        assertFalse(AppInstallCommandPoll.isWake(mapOf("type" to "app_install", "push_id" to "p1")))
+        assertFalse(AppInstallCommandPoll.isWake(mapOf("kind" to "alert", "title" to "Hi")))
+        assertFalse(AppInstallCommandPoll.isWake(emptyMap()))
+        // A wake map is never a valid install payload (no command id), so
+        // even a fallen-through wake could never start a download.
+        assertNull(AppInstallPayload.fromMap(mapOf("type" to "app_push_wake", "push_id" to "p1")))
     }
 }

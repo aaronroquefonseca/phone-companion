@@ -1,5 +1,6 @@
 package com.phonecompanion.app.ui
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -9,36 +10,44 @@ import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.phonecompanion.app.R
+import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.AppInstallFiles
 import com.phonecompanion.app.notify.AppInstallPayload
 import kotlinx.coroutines.launch
 
 /**
- * Pre-install UI for a remote APK push.
+ * Pre-install UI for a remote APK push: optional detail, never a gate.
  *
- * Opened ONLY by an explicit tap on the `Install <label>?` notification —
- * never automatically, never on boot/receive. Shows the package, version
- * (or 'unknown version'), short SHA-256, and source host so a swapped URL
- * is visible before anything is fetched.
+ * Opened ONLY by an explicit tap (progress/grant notification, or the
+ * foreground dialog's Details action) — never automatically, never on
+ * boot/receive. Shows the package, version (or 'unknown version'), short
+ * SHA-256, and source host so a swapped URL stays visible while the
+ * (already running) transfer proceeds.
  *
- * Unknown-sources onboarding: when `canRequestPackageInstalls()` is false
+ * The transfer starts on receipt, not here: by the time this screen
+ * opens, the download is in flight or a verified APK is already waiting
+ * for the grant. Unknown-sources onboarding: when `canRequestPackageInstalls()` is false
  * the Install button stays disabled behind a short explanation plus a
  * deep-link to this app's "Install unknown apps" settings page; the grant
  * is re-checked in [onResume], and install is never attempted without it
- * (the flow re-checks again after verify, before commit).
+ * (the flow re-checks again after verify, before commit). The Install tap
+ * resumes from a verified cache when one waits (no re-fetch) and
+ * otherwise downloads first — then the system's own Install confirmation
+ * is the user's single press.
  *
- * Flow (explicit Install tap only): HTTPS download with progress (shared
- * OkHttp stack, 100 MB cap, Cancel action) → SHA-256 verify BEFORE any
- * install attempt (mismatch = hard refuse, error notification naming the
- * package, file deleted) → PackageInstaller commit. The installer-result
- * receiver posts the single terminal notification for the install phase;
- * every download/verify terminal state posts exactly one notification (or
- * this in-app state) and never retries.
+ * Flow: HTTPS download with progress (shared OkHttp stack, 100 MB cap,
+ * Cancel action) → SHA-256 verify BEFORE any install attempt (mismatch
+ * = hard refuse, error notification naming the package, file deleted) →
+ * PackageInstaller commit. The installer-result receiver posts the
+ * single terminal notification for the install phase; every
+ * download/verify terminal state posts exactly one notification (or this
+ * in-app state) and never retries.
  *
  * Rotation-safe: the transfer lives in [AppInstallViewModel] (retained
  * across config changes), so rotation neither cancels the download nor
@@ -219,6 +228,35 @@ class AppInstallActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "AppInstallActivity"
+
+        /** Explicit detail intent for a validated payload (dialog/notification taps). */
+        fun detailIntent(context: Context, payload: AppInstallPayload): Intent =
+            Intent(context, AppInstallActivity::class.java).apply {
+                for ((k, v) in payload.toExtras()) putExtra(k, v)
+            }
+
+        /**
+         * Foreground dialog for a fresh command while the app is open (the
+         * status-bar notification alone is easy to miss with the app
+         * foregrounded). Names the app label with at most two actions:
+         * Details opens this screen, Dismiss only dismisses — the
+         * auto-download proceeds regardless and cancellation stays with
+         * the progress Cancel action. Call only when resumed (the caller
+         * gates on its lifecycle); never throws.
+         */
+        fun showAvailable(activity: AppCompatActivity, payload: AppInstallPayload) {
+            if (activity.isFinishing || activity.isDestroyed) return
+            runCatching {
+                AlertDialog.Builder(activity)
+                    .setTitle(activity.getString(R.string.app_install_foreground_title, payload.label))
+                    .setMessage(activity.getString(R.string.app_install_foreground_body, payload.label))
+                    .setPositiveButton(R.string.app_install_details) { _, _ ->
+                        runCatching { activity.startActivity(detailIntent(activity, payload)) }
+                    }
+                    .setNegativeButton(R.string.app_install_dismiss, null)
+                    .show()
+            }
+        }
     }
 }
 

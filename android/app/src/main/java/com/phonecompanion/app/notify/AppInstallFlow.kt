@@ -3,14 +3,17 @@ package com.phonecompanion.app.notify
 import java.io.File
 
 /**
- * The remote APK install flow as ONE linear suspend function:
+ * The remote APK install flow as linear suspend functions:
  * download → verify → unknown-sources re-check → commit.
  *
- * The ViewModel calls [runFlow] once per explicit Install tap; the two
- * receivers are thin forwarders (cancel flag + terminal funnel) that never
- * reimplement these steps. Outcomes are exhaustive ([Outcome]) so the
- * caller collapses the old near-identical claim-notify-set-text arms into
- * a single terminal exit driven by [Outcome.terminalKind].
+ * Two entries: [runFlow] downloads unconditionally (poll-triggered
+ * auto-download and fresh Install taps); [runResume] reuses an already
+ * verified cached APK when one waits (grant-gated auto-download left it
+ * behind) and only re-downloads on a miss. The two receivers are thin
+ * forwarders (cancel flag + terminal funnel) that never reimplement
+ * these steps. Outcomes are exhaustive ([Outcome]) so callers collapse
+ * the old near-identical claim-notify-set-text arms into a single
+ * terminal exit driven by [Outcome.terminalKind].
  *
  * Pure JVM (zero Android imports): the host side (network, PackageManager,
  * PackageInstaller, files) is injected via [Host], so the full order —
@@ -87,7 +90,11 @@ object AppInstallFlow {
         /**
          * Unknown-sources grant gone after verify: render the onboarding
          * gate and stop — fail closed, no notification, no commit. The
-         * verified APK is deleted so no installable artifact lingers.
+         * verified APK is deleted so no installable artifact lingers,
+         * unless the caller keeps it for grant-resume
+         * ([runFlow] with keepVerifiedOnRevoked, [runResume]): then the
+         * file stays cached and the caller routes the user through the
+         * one-time grant flow instead.
          */
         data object UnknownSourcesRevoked : Outcome
     }
@@ -97,12 +104,19 @@ object AppInstallFlow {
      * once. Never throws for flow failures (they are [Outcome]s); an
      * unexpected host exception fails closed to [Outcome.DownloadFailed]
      * (or [Outcome.CommitFailed] past verify) with the partial deleted.
+     *
+     * @param keepVerifiedOnRevoked when true, a post-verify grant refusal
+     * keeps the verified APK cached ([Outcome.UnknownSourcesRevoked] all
+     * the same) so a grant-gated auto-download can resume after the
+     * one-time grant instead of re-fetching. Default false preserves the
+     * delete-on-revoke behavior for explicit-tap flows.
      */
     suspend fun runFlow(
         payload: AppInstallPayload,
         dest: File,
         host: Host,
         onProgress: (bytesRead: Long, totalBytes: Long?) -> Unit = { _, _ -> },
+        keepVerifiedOnRevoked: Boolean = false,
     ): Outcome {
         val downloaded = try {
             host.download(payload, dest, onProgress)
@@ -130,9 +144,51 @@ object AppInstallFlow {
         // Re-check AFTER verify, BEFORE commit: the grant could have been
         // revoked while the (long) download ran. Fail closed.
         if (!host.canInstall()) {
-            runCatching { dest.delete() }
+            if (!keepVerifiedOnRevoked) runCatching { dest.delete() }
             return Outcome.UnknownSourcesRevoked
         }
+        return commitTail(payload, dest, host)
+    }
+
+    /**
+     * Resume entry for the pre-install UI after a grant-gated
+     * auto-download: when [dest] already holds this push's verified APK,
+     * skip the download and go straight to the pre-commit gate → commit
+     * tail (the user's single tap is then the system's own Install
+     * confirmation). On any cache miss (absent file, failed re-verify,
+     * cancellation) it falls back to the full [runFlow] (re-download).
+     * A grant refusal here keeps the cache — the user re-grants and
+     * retries without re-fetching.
+     */
+    suspend fun runResume(
+        payload: AppInstallPayload,
+        dest: File,
+        host: Host,
+        onProgress: (bytesRead: Long, totalBytes: Long?) -> Unit = { _, _ -> },
+    ): Outcome {
+        if (host.isCancelled()) return Outcome.Cancelled
+        val reuse = try {
+            dest.isFile && host.verify(dest, payload.sha256)
+        } catch (_: Exception) {
+            false
+        }
+        if (!reuse) return runFlow(payload, dest, host, onProgress)
+        if (host.isCancelled()) return Outcome.Cancelled
+        if (!host.canInstall()) return Outcome.UnknownSourcesRevoked
+        return commitTail(payload, dest, host)
+    }
+
+    /**
+     * Shared commit tail: PackageInstaller commit, then exactly one
+     * outcome. A commit failure deletes the cached APK (it was just
+     * proven uninstallable); a cancellation landing mid-commit reports
+     * Cancelled instead of a commit failure.
+     */
+    private suspend fun commitTail(
+        payload: AppInstallPayload,
+        dest: File,
+        host: Host,
+    ): Outcome {
         val committed = try {
             host.commit(payload, dest)
         } catch (_: Exception) {

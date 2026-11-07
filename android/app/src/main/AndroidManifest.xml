@@ -67,10 +67,12 @@
             </intent-filter>
         </service>
 
-        <!-- Remote APK install (app_install push): pre-install UI opened
-            ONLY by an explicit tap on the install prompt — never
-            auto-started, no boot receiver. Exported=false: explicit
-            in-app PendingIntents only. -->
+        <!-- Remote APK install (app_install push): the transfer starts on
+            command receipt (poll or FCM wake), never here. This pre-install
+            UI is optional detail opened ONLY by an explicit tap (progress /
+            grant notification, foreground dialog) — never auto-started, no
+            boot receiver. Exported=false: explicit in-app PendingIntents
+            only. -->
         <activity
             android:name=".ui.AppInstallActivity"
             android:exported="false" />

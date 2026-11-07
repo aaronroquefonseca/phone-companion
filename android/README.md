@@ -131,12 +131,16 @@ material in either line. Token lifecycle in the app:
 Backend side: `FCM_PROJECT_ID` + service-account JSON at
 `FCM_CREDENTIALS_FILE` (see `backend/README.md`).
 
-### Remote APK install via poll (`app_install` commands, no FCM)
+### Remote APK install (`app_install` commands: poll delivery, FCM wake)
 
-No Firebase/FCM is involved in this flow: no `google-services.json`,
-no new dependencies, no Play-services-gated paths. The existing poll
-cycle (`RefreshWorker` → `WidgetPoller.refresh`, hourly + manual
-refresh) also GETs `/api/v1/outbox` with the device Bearer token.
+Delivery is the existing poll cycle (`RefreshWorker` →
+`WidgetPoller.refresh`, hourly + manual refresh), which also GETs
+`/api/v1/outbox` with the device Bearer token — plus instant delivery
+when the app has an FCM token: the server sends a best-effort silent
+`app_push_wake` data message on every app-push, and the client polls
+immediately on receipt instead of waiting for the next cycle (poll
+otherwise; no `google-services.json`, no new dependencies, no
+Play-services-gated paths in this flow).
 Each `app_install` command entry carries string fields
 `type=app_install`, `command_id` (per-device id used for dedupe and
 ack), `push_id`, `apk_url` (https only), `sha256` (64
@@ -145,31 +149,40 @@ Unknown command kinds are acked-and-ignored and malformed entries are
 skipped with shape-only logging (same lenient/strict discipline as the
 notification parser).
 
-For every fresh (never-prompted) command id the app posts the SAME
-`Install <label>?` prompt on the general channel (`pc_general` — no
-new channel), persists the id in a plain-prefs posted set (pruned to
+For every fresh command id the app immediately starts the download
+(progress notification first — never a "tap to download" prompt),
+persists the id in a plain-prefs posted set (pruned to
 the newest 200), then acks via `POST /api/v1/commands/ack`
-(`{"push_ids": [...]}` — idempotent, so re-acks are harmless no-ops).
+(`{"ids": [...]}` — idempotent, so re-acks are harmless no-ops).
 If the app dies before acking, the next poll re-offers and the
-persisted set suppresses a duplicate notification; if the server
-already marked the id, the ack is a no-op. The FCM token upload paths
-stay as-is for the notification feature but this flow never depends
-on them.
+persisted set suppresses a duplicate download; if the server
+already marked the id, the ack is a no-op. The download runs detached
+from the poll worker; on verified bytes the installer session commits
+at once, so the system's own Install confirmation is the user's single
+press. While the app is foregrounded, a fresh command also shows one
+in-app dialog naming the label (Details opens the pre-install screen,
+Dismiss only dismisses — the download proceeds regardless, one dialog
+per command id, never from background context).
+The FCM token upload paths stay as-is for the notification feature.
 
-- Permission: `REQUEST_INSTALL_PACKAGES` (manifest). Onboarding: tapping
-  the prompt opens a pre-install screen showing package, version (or
-  `unknown version`), short SHA-256 (first 12 chars + `…`), and source
-  host. If `packageManager.canRequestPackageInstalls()` is false, Install
-  stays disabled behind a short explanation plus a deep-link to this
-  app's `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` page; the grant is
-  re-checked on return, and install is never attempted without it.
-- Tapping Install (and only that explicit tap — never auto-install, never
-  on boot/reboot/poll) downloads over HTTPS via the shared OkHttp
-  stack (redirects followed https-only) to the app cache dir with a
-  progress notification + Cancel action, 100 MB hard cap (abort + error
+- Permission: `REQUEST_INSTALL_PACKAGES` (manifest). The pre-install
+  screen is optional detail (package, version or `unknown version`,
+  short SHA-256 first 12 chars + `…`, source host) — it never gates the
+  transfer. If `packageManager.canRequestPackageInstalls()` is false,
+  Install stays disabled behind a short explanation plus a deep-link to
+  this app's `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES` page; the
+  grant is re-checked on return, and install is never attempted
+  without it.
+- On receipt (FCM wake or poll) the app downloads over HTTPS via the
+  shared OkHttp stack (redirects followed https-only) to the app cache
+  dir with a progress notification + Cancel action (tap opens the
+  pre-install detail), 100 MB hard cap (abort + error
   above it), then verifies SHA-256 BEFORE install (mismatch = hard
   refuse, error notification naming the package, file deleted, no hashes
-  in logcat — package + match/mismatch only).
+  in logcat — package + match/mismatch only). The grant is a pre-commit
+  check: missing grant keeps the verified APK cached and posts a grant
+  notification routing to the one-time onboarding flow, from which the
+  Install tap resumes without re-fetching.
 - Install goes through `PackageInstaller.Session` (`MODE_FULL_INSTALL` +
   `setAppPackageName`) with a MUTABLE result PendingIntent on API 31+
   (so the system-filled status extras arrive); the installer-result
@@ -186,24 +199,30 @@ on them.
   neither cancels the download nor spawns a second flow. The
   unknown-sources grant is re-checked after verify, before commit
   (revoked → onboarding gate, fail closed); stale `app_push/` entries
-  are purged on prompt/activity entry (24 h retention).
+  are purged on download-start/activity entry (24 h retention).
 
-Manual test checklist (needs a paired device + operator backend; no
-FCM/`google-services.json` steps anywhere in this flow):
+Manual test checklist (needs a paired device + operator backend; FCM
+steps only for the instant-wake path):
 
 1. Pair the app, then open system Settings → Apps → Phone Companion →
    “Install unknown apps” and leave it OFF.
 2. Operator enqueues a test command for a small APK you built yourself
    (`type=app_install` + real `push_id`/`apk_url`/`sha256`/`package`/
    `version`/`label`) via the operator command-queue endpoint (curl).
-3. Wait at most one poll interval (or tap Refresh now for a manual
-   refresh); a notification arrives titled exactly `Install <label>?`
-   on the general channel; tap it (nothing installs on poll).
+3. Wait at most one poll interval (tap Refresh now for an expedited
+   manual refresh, or rely on the FCM wake for instant delivery); a
+   `Downloading <label>…` progress notification arrives on the general
+   channel and the download starts with no tap. With the app open, one
+   in-app dialog names the label (Details opens the pre-install
+   screen; Dismiss changes nothing).
 4. Pre-install screen shows package, version, short SHA-256, source host;
    Install is disabled behind the unknown-sources explainer → tap Allow,
-   grant in Settings, return → Install enables.
-5. Tap Install → progress notification grows; SHA shown matches the file
-   you uploaded (`sha256sum` the APK and compare the first 12 chars).
+   grant in Settings, return → Install enables. (If the grant was
+   already missing at commit time, a grant notification routes here
+   instead and the Install tap resumes from the verified cache.)
+5. Download completes on its own (progress notification grows; SHA shown
+   matches the file you uploaded — `sha256sum` the APK and compare the
+   first 12 chars).
 6. System install dialog appears → Accept → success notification, app
    installed; `cacheDir/app_push/` holds no leftover APK
    (`adb shell ls /data/data/com.phonecompanion.app/cache/app_push`).
@@ -212,9 +231,9 @@ FCM/`google-services.json` steps anywhere in this flow):
    mid-download → single cancelled notification, partial file gone.
    Deny at the system dialog → single plain cancelled note, no retry.
    Revoke “Install unknown apps” mid-download → onboarding gate, fail
-   closed, verified APK deleted.
+   closed, verified APK kept for grant-resume.
 8. Idempotence: re-pair (or wait for the next poll before the ack lands)
-   → no duplicate prompt for an already-posted id; the re-offer is
+   → no duplicate download or dialog for an already-posted id; the re-offer is
    acked as a no-op.
 
 ### Pushing this app's own release APK (self-update)

@@ -19,11 +19,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.phonecompanion.app.BuildConfig
 import com.phonecompanion.app.R
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
+import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
 import kotlinx.coroutines.launch
@@ -56,6 +58,24 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var denialTracker: NotificationDenialTracker
     private var consumedNotificationExtras = false
+
+    /**
+     * Foreground install surfacing: while this screen is visible, a fresh
+     * install command also shows an in-app dialog (the status-bar
+     * notification alone is easy to miss with the app open). Details
+     * opens the pre-install UI; Dismiss only dismisses — the
+     * auto-download proceeds regardless. One dialog per command id
+     * (hub-enforced); unresumed states decline so a transitioning screen
+     * never dialogs.
+     */
+    private val installCommandObserver = AppInstallEvents.Observer { payload ->
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            false
+        } else {
+            runOnUiThread { AppInstallActivity.showAvailable(this, payload) }
+            true
+        }
+    }
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -114,6 +134,18 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         // No notification state to save: the denial flag lives in
         // SharedPreferences (see denialTracker) and survives process death.
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Foreground install dialog: register only while visible — the
+        // hub treats observer presence as the foreground gate.
+        AppInstallEvents.register(installCommandObserver)
+    }
+
+    override fun onStop() {
+        AppInstallEvents.unregister(installCommandObserver)
+        super.onStop()
     }
 
     override fun onResume() {

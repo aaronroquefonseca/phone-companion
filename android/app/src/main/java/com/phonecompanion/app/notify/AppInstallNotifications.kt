@@ -11,13 +11,18 @@ import com.phonecompanion.app.ui.AppInstallActivity
 /**
  * User-visible notifications for the remote APK install flow.
  *
- * All posts go to the shared general channel ([NotificationChannels]:
- * no new channel — the registry pattern only mints per-kind channels for
- * generic kinds, and `app_install` is a dedicated flow, not a generic
- * kind). Every terminal state posts exactly one notification (or in-app
- * state), claimed per Install-tap attempt via [AppInstallSessions] so a
- * retried system broadcast or a racing receiver can never double-post.
- * Nothing here retries.
+ * Auto-download story: a fresh command immediately starts its download
+ * and the FIRST post is the progress notification (same id throughout,
+ * so progress replaces nothing and every later state replaces it); there
+ * is no "tap to download" prompt. Tapping progress opens the pre-install
+ * UI as optional detail — it never gates the transfer. All posts go to
+ * the shared general channel ([NotificationChannels]: no new channel —
+ * the registry pattern only mints per-kind channels for generic kinds,
+ * and `app_install` is a dedicated flow, not a generic kind). Every
+ * terminal state posts exactly one notification (or in-app state),
+ * claimed per Install-tap attempt via [AppInstallSessions] so a retried
+ * system broadcast or a racing receiver can never double-post. Nothing
+ * here retries.
  *
  * Logging discipline: package names and push ids only — never APK URLs,
  * hashes, tokens, or credentials.
@@ -48,43 +53,29 @@ object AppInstallNotifications {
         }
     }
 
-    /** Tap target: explicit tap opens the pre-install UI. Never auto-installs. */
-    fun promptIntent(context: Context, payload: AppInstallPayload): PendingIntent {
-        val intent = Intent(context, AppInstallActivity::class.java)
-        for ((k, v) in payload.toExtras()) intent.putExtra(k, v)
+    /**
+     * Tap target: opens the pre-install UI as optional detail (progress,
+     * grant onboarding, retry). Never auto-installs: the transfer runs on
+     * receipt and the Install tap inside the activity only resumes or
+     * commits it.
+     */
+    fun detailIntent(context: Context, payload: AppInstallPayload): PendingIntent {
         return PendingIntent.getActivity(
             context,
             CompanionMessagingService.tapRequestCode(payload.notifyId()),
-            intent,
+            AppInstallActivity.detailIntent(context, payload),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
 
-    /** The install prompt: title is exactly `Install <label>?`. */
-    fun notifyPrompt(context: Context, payload: AppInstallPayload) {
-        val manager = context.notificationManager()
-        NotificationChannels.ensureGeneral(manager)
-        val body = "${payload.packageName} • ${payload.displayVersion()}"
-        manager.notify(
-            payload.notifyId(),
-            NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle("Install ${payload.label}?")
-                .setContentText(body)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-                .setContentIntent(promptIntent(context, payload))
-                .setAutoCancel(true)
-                .setOnlyAlertOnce(false)
-                .build(),
-        )
-    }
-
     /**
-     * Progress post (same id, so it replaces the prompt): determinate when
-     * the server sent a usable Content-Length, indeterminate otherwise.
-     * Carries the Cancel action that aborts the download and cleans up.
-     * The Cancel intent carries the per-tap [attempt] nonce so the
-     * receiver's terminal claim is scoped to this attempt.
+     * Progress post (the flow's first post: no prompt precedes it):
+     * determinate when the server sent a usable Content-Length,
+     * indeterminate otherwise. Tap opens the pre-install UI as optional
+     * detail (it never gates the transfer). Carries the Cancel action
+     * that aborts the download and cleans up. The Cancel intent carries
+     * the per-tap [attempt] nonce so the receiver's terminal claim is
+     * scoped to this attempt.
      */
     fun notifyProgress(
         context: Context,
@@ -118,12 +109,48 @@ object AppInstallNotifications {
                     bytesRead.toInt().coerceAtLeast(0),
                     !determinate,
                 )
+                .setContentIntent(detailIntent(context, payload))
                 .setOngoing(true)
                 .setAutoCancel(false)
                 .setOnlyAlertOnce(true)
                 .addAction(0, context.getString(R.string.app_install_cancel), cancel)
                 .build(),
         )
+    }
+
+    /**
+     * Grant gate after a verified auto-download: the unknown-sources
+     * grant was missing at commit time, so nothing committed and the
+     * verified APK stays cached. Tap opens the pre-install UI (the
+     * existing grant/onboarding flow); after the one-time grant the
+     * activity's Install tap resumes from the cache without re-fetching.
+     * Claimed per attempt like every terminal post, so a racing path
+     * stays silent.
+     */
+    fun notifyGrant(
+        context: Context,
+        payload: AppInstallPayload,
+        attempt: String?,
+    ): Boolean {
+        if (!AppInstallSessions.claimTerminal(payload.pushId, attempt)) return false
+        val manager = context.notificationManager()
+        NotificationChannels.ensureGeneral(manager)
+        val display = payload.label
+        manager.notify(
+            payload.notifyId(),
+            NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(context.getString(R.string.app_install_grant_title, display))
+                .setContentText(context.getString(R.string.app_install_grant_body, display))
+                .setStyle(
+                    NotificationCompat.BigTextStyle()
+                        .bigText(context.getString(R.string.app_install_grant_body, display)),
+                )
+                .setContentIntent(detailIntent(context, payload))
+                .setAutoCancel(true)
+                .build(),
+        )
+        return true
     }
 
     /**
@@ -181,7 +208,7 @@ object AppInstallNotifications {
         val manager = context.notificationManager()
         NotificationChannels.ensureGeneral(manager)
         // The single notifyId owner is the payload ([AppInstallPayload.notifyIdFor]):
-        // the terminal replaces the prompt/progress rather than stacking.
+        // the terminal replaces the progress rather than stacking.
         manager.notify(
             AppInstallPayload.notifyIdFor(pushId),
             NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)

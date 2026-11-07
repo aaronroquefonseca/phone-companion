@@ -47,7 +47,7 @@ model: `docs/threat-model.md`.
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
 | `POST /api/v1/notify` | operator session + write-guard proof, or `OPERATOR_API_TOKEN` Bearer (`401` without either; any other Bearer → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202. Delivery leg is the poll outbox (no FCM required); FCM driver (if configured) is only a best-effort wake hint |
-| `POST /api/v1/app-push` | operator session + write-guard proof, or `OPERATOR_API_TOKEN` Bearer (same `401`/`403` split) | `202 {push_id, accepted}`; per-device cap overflow is `429 too_many_pending` with nothing queued |
+| `POST /api/v1/app-push` | operator session + write-guard proof, or `OPERATOR_API_TOKEN` Bearer (same `401`/`403` split) | `202 {push_id, accepted}`; per-device cap overflow is `429 too_many_pending` with nothing queued; best-effort FCM wake hint per token device when `NOTIFY_DRIVER=fcm` (poll otherwise) |
 | `GET /api/v1/outbox` | device Bearer (`401` missing/invalid/revoked; operator token → `403`) | `200 {"commands":[...]}` — caller's own pending unexpired commands only; `Cache-Control: no-store, private` |
 | `GET /api/v1/events/wait` | device Bearer (same `401`/`403`) | `200 {"events":["outbox"]}` immediately when pending, else held up to 300s, `{"events":[]}` on timeout |
 | `POST /api/v1/commands/ack` | device Bearer (same `401`/`403`) | `200 {"acked":N}`; unknown/other-device ids silently ignored |
@@ -195,7 +195,10 @@ FCM HTTPv1 wake hint; needs `FCM_PROJECT_ID` +
 `FCM_CREDENTIALS_FILE`). Fan-out is sequential; notification history is
 pruned to 90 days / 20,000 newest rows best-effort after fan-out; the
 outbox is pruned to its 7-day TTL on every enqueue and every poll, with
-max 20 pending commands per device.
+max 20 pending commands per device. `POST /api/v1/app-push` sends the
+same wake-hint shape (`{"type":"app_push_wake","push_id":...}`, silent,
+log-only failures, no history rows) so the app polls instantly when it
+has an FCM token and on its normal cadence otherwise.
 
 Operator curls (placeholder token — never commit a real one):
 

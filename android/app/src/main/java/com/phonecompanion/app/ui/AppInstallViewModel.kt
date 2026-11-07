@@ -32,7 +32,7 @@ import java.io.File
  * finish cancels via [cancel] (which only sets the session flag — the
  * flow observes it and funnels its single terminal state).
  *
- * Single terminal exit: [AppInstallFlow.runFlow] returns one [Outcome]
+ * Single terminal exit: [AppInstallFlow.runResume] returns one [Outcome]
  * and [finishOutcome] maps it once to (optional notification via the
  * per-attempt funnel + in-app state). No payload/downloading/committed
  * flag agreement, no TTL-map reasoning in the UI layer.
@@ -75,7 +75,10 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
      * Starts the install flow for one explicit Install tap. Re-checks the
      * unknown-sources grant at tap time (it could have been revoked while
      * the screen was open) and mints a fresh attempt nonce — never
-     * reuses a previous attempt, so a retry always claims fresh.
+     * reuses a previous attempt, so a retry always claims fresh. Runs the
+     * resume entry: a verified APK left behind by a grant-gated
+     * auto-download commits without re-fetching; otherwise the full
+     * download runs.
      */
     fun start(payload: AppInstallPayload) {
         if (isFlowActive) return
@@ -93,7 +96,7 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         }
         activeJob = flowScope.launch {
             val outcome = try {
-                AppInstallFlow.runFlow(payload, dest, host) { read, total ->
+                AppInstallFlow.runResume(payload, dest, host) { read, total ->
                     val pct = total?.takeIf { it > 0 }?.let {
                         ((read * 100) / it).toInt().coerceIn(0, 100)
                     }

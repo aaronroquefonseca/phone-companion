@@ -35,7 +35,7 @@ data class AppInstallPayload(
      * Single key owner for outbound intents: every component writes
      * extras through this map (never hand-rolled putExtra chains that
      * can drift from [fromExtras]). No attempt nonce here — the
-     * attempt is created per Install tap, after the prompt tap.
+     * attempt is created per download start (auto or explicit tap).
      */
     fun toExtras(): Map<String, String> {
         val out = HashMap<String, String>(7)
@@ -83,11 +83,12 @@ data class AppInstallPayload(
 
         /**
          * Per-Install-tap attempt nonce. Created by [AppInstallSessions]
-         * when the user taps Install and carried through the progress
-         * Cancel intent and the installer result intent into every
-         * terminal claim, so exactly-once is scoped per attempt — never
-         * per push id per minute. Absent on the prompt tap (no attempt
-         * exists yet); receivers tolerate it missing (legacy single key).
+         * when a download starts (auto on receipt, or the activity's
+         * Install tap) and carried through the progress Cancel intent and
+         * the installer result intent into every terminal claim, so
+         * exactly-once is scoped per attempt — never per push id per
+         * minute. Absent on the detail tap (no attempt exists yet);
+         * receivers tolerate it missing (legacy single key).
          */
         const val EXTRA_ATTEMPT = "pc_app_attempt"
 

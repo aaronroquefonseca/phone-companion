@@ -8,9 +8,11 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.glance.GlanceId
 import androidx.glance.appwidget.GlanceAppWidgetManager
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.WidgetCacheEntity
+import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.widgets.WidgetBindingResolver
 import com.phonecompanion.app.widgets.WidgetDirectory
 import com.phonecompanion.app.widgets.WidgetProviderEntry
@@ -42,6 +44,21 @@ class WidgetsActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var rowsContainer: LinearLayout
     private lateinit var instancesContainer: LinearLayout
+
+    /**
+     * Foreground install surfacing (same contract as MainActivity's): a
+     * fresh install command also shows an in-app dialog while this screen
+     * is visible. Details opens the pre-install UI; Dismiss only
+     * dismisses — the auto-download proceeds regardless.
+     */
+    private val installCommandObserver = AppInstallEvents.Observer { payload ->
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            false
+        } else {
+            runOnUiThread { AppInstallActivity.showAvailable(this, payload) }
+            true
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,6 +92,18 @@ class WidgetsActivity : AppCompatActivity() {
         layout.addView(instancesContainer)
         setContentView(layout)
         renderCached()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Foreground install dialog: register only while visible — the
+        // hub treats observer presence as the foreground gate.
+        AppInstallEvents.register(installCommandObserver)
+    }
+
+    override fun onStop() {
+        AppInstallEvents.unregister(installCommandObserver)
+        super.onStop()
     }
 
     override fun onResume() {

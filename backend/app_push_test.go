@@ -33,11 +33,13 @@ func validAppPushBody(ids ...string) string {
 
 // postAppPush calls handleAppPush directly (no auth gate): unit-level
 // status + code assertions. Mux-level auth lives in TestAppPushAuthMatrix.
-func postAppPush(t *testing.T, db *sql.DB, body string) *httptest.ResponseRecorder {
+// The sender is explicit so wake-hint tests can pass a real FCM sender
+// while validation tests pass a hermetic non-FCM driver.
+func postAppPush(t *testing.T, db *sql.DB, sender notify.Sender, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/app-push", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	handleAppPush(db)(w, req)
+	handleAppPush(db, sender)(w, req)
 	return w
 }
 
@@ -181,7 +183,7 @@ func TestValidateAppPushTargetCodes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := postAppPush(t, db, tc.body)
+			w := postAppPush(t, db, notify.NoopSender{}, tc.body)
 			if w.Code != tc.status {
 				t.Fatalf("status %d, want %d (%s)", w.Code, tc.status, w.Body.String())
 			}
@@ -198,13 +200,13 @@ func TestValidateAppPushBoundariesAccept(t *testing.T) {
 	db := openNotifyTestDB(t)
 	// openNotifyTestDB already seeds dev-1; reuse it as the target.
 	// all:true with explicitly empty device_ids means all.
-	w := postAppPush(t, db, strings.Replace(validAppPushBody("dev-1"),
+	w := postAppPush(t, db, notify.NoopSender{}, strings.Replace(validAppPushBody("dev-1"),
 		`"target":{"device_ids":["dev-1"]}`, `"target":{"all":true,"device_ids":[]}`, 1))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("all+empty ids: status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
 	// Hyphen is in the reverse-DNS-ish charset.
-	w = postAppPush(t, db, strings.Replace(validAppPushBody("dev-1"),
+	w = postAppPush(t, db, notify.NoopSender{}, strings.Replace(validAppPushBody("dev-1"),
 		`"package":"com.example.app"`, `"package":"com.ex-ample.app"`, 1))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("hyphen package: status %d, want 202 (%s)", w.Code, w.Body.String())
@@ -217,7 +219,7 @@ func TestValidateAppPushBoundariesAccept(t *testing.T) {
 	if got := len("com.example." + strings.Repeat("a", 244)); got != 256 {
 		t.Fatalf("package boundary misbuilt: %d", got)
 	}
-	w = postAppPush(t, db, body)
+	w = postAppPush(t, db, notify.NoopSender{}, body)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("max lengths: status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
@@ -231,7 +233,7 @@ func TestValidateAppPushPayloadCap(t *testing.T) {
 	bigURL := "https://example.com/" + strings.Repeat("é", 2000)
 	body := `{"target":{"all":true},"apk_url":` + fmt.Sprintf("%q", bigURL) +
 		`,"sha256":"` + strings.Repeat("ab", 32) + `","package":"com.example.app","label":"L"}`
-	w := postAppPush(t, db, body)
+	w := postAppPush(t, db, notify.NoopSender{}, body)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status %d, want 422 (%s)", w.Code, w.Body.String())
 	}
@@ -244,7 +246,7 @@ func TestValidateAppPushPayloadCap(t *testing.T) {
 func TestAppPushBodyTooLarge(t *testing.T) {
 	db := openNotifyTestDB(t)
 	big := `{"target":{"all":true},"title":"t","body":"` + strings.Repeat("b", 1<<20) + `"}`
-	w := postAppPush(t, db, big)
+	w := postAppPush(t, db, notify.NoopSender{}, big)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status %d, want 413 (%s)", w.Code, w.Body.String())
 	}
@@ -452,7 +454,7 @@ func TestAppPushLifecycle(t *testing.T) {
 // error — unknown ids and empty registries alike.
 func TestAppPushZeroTargets(t *testing.T) {
 	db := openNotifyTestDB(t)
-	w := postAppPush(t, db, validAppPushBody("nope"))
+	w := postAppPush(t, db, notify.NoopSender{}, validAppPushBody("nope"))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
@@ -489,7 +491,7 @@ func TestAppPushTooManyPending(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM pushes`).Scan(&pushesBefore); err != nil {
 		t.Fatal(err)
 	}
-	w := postAppPush(t, db, validAppPushBody("dev-A"))
+	w := postAppPush(t, db, notify.NoopSender{}, validAppPushBody("dev-A"))
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status %d, want 429 (%s)", w.Code, w.Body.String())
 	}
@@ -524,7 +526,7 @@ func TestAppPushPruneAndTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Enqueue prunes it: a fresh push still fits the cap and succeeds.
-	w := postAppPush(t, db, validAppPushBody("dev-A"))
+	w := postAppPush(t, db, notify.NoopSender{}, validAppPushBody("dev-A"))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("push after prune: status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
@@ -576,7 +578,7 @@ func TestAppPushSkipsRevokedTargets(t *testing.T) {
 	if _, err := RevokeDevice(db, "dev-A"); err != nil {
 		t.Fatal(err)
 	}
-	w := postAppPush(t, db, validAppPushBody("dev-A", "dev-B"))
+	w := postAppPush(t, db, notify.NoopSender{}, validAppPushBody("dev-A", "dev-B"))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
