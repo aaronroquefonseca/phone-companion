@@ -71,9 +71,11 @@ func deviceRevoked(t *testing.T, db *sql.DB, deviceID string) bool {
 	return revoked.Valid
 }
 
-// UNREGISTERED from FCM: the handler answers 500 driver_unavailable, the
-// failed row carries the sanitized re-register signal, and the device row
-// is NOT revoked (healing is via token backfill, never auto-revoke).
+// UNREGISTERED from FCM: the hint fails log-only — the request still
+// answers 202 with the device queued (the outbox is the delivery leg),
+// the failed hint carries the sanitized re-register signal in history, and
+// the device row is NOT revoked (healing is via token backfill, never
+// auto-revoke).
 func TestFanoutFCMUnregisteredRecordsFailed(t *testing.T) {
 	db := openNotifyTestDB(t)
 	notifyDeviceWithToken(t, db, "dev-fcm", "fake-dead-token")
@@ -82,11 +84,15 @@ func TestFanoutFCMUnregisteredRecordsFailed(t *testing.T) {
 			"details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}`)
 	})
 	w := postNotify(t, db, sender, `{"target":{"device_ids":["dev-fcm"]},"title":"Hi","body":"Yo"}`)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status %d, want 500 (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (hint failures never fail the request) (%s)", w.Code, w.Body.String())
 	}
-	if code := errorCode(t, w); code != "driver_unavailable" {
-		t.Fatalf("error %q, want driver_unavailable", code)
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 1 || nid == "" {
+		t.Fatalf("accepted=%v id=%q, want 1 + id", accepted, nid)
+	}
+	if got := outboxStatuses(t, db, nid, "dev-fcm"); len(got) != 1 || got[0] != outboxStatusPending {
+		t.Fatalf("outbox rows %v, want 1 pending (delivery leg unaffected by hint failure)", got)
 	}
 	status, errText := historyStatus(t, db, "dev-fcm")
 	if status != notify.StatusFailed {
@@ -101,8 +107,8 @@ func TestFanoutFCMUnregisteredRecordsFailed(t *testing.T) {
 }
 
 // A device row with no stored token (paired before push was configured)
-// fails closed with the missing-token re-register signal — the backfill
-// endpoint heals it, not revocation.
+// skips the FCM hint entirely — no post, no history row — and still queues
+// its outbox row: the backfill endpoint heals the token, never revocation.
 func TestFanoutFCMMissingTokenFailsClosed(t *testing.T) {
 	db := openNotifyTestDB(t)
 	posts := 0
@@ -111,18 +117,18 @@ func TestFanoutFCMMissingTokenFailsClosed(t *testing.T) {
 		return fcmJSONResponse(http.StatusOK, `{"name":"projects/test-project/messages/1"}`)
 	})
 	w := postNotify(t, db, sender, `{"target":{"device_ids":["dev-1"]},"title":"Hi","body":"Yo"}`)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status %d, want 500 (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
 	if posts != 0 {
-		t.Fatalf("missing token must fail before any FCM post, got %d", posts)
+		t.Fatalf("missing token must skip the FCM hint, got %d posts", posts)
 	}
-	status, errText := historyStatus(t, db, "dev-1")
-	if status != notify.StatusFailed {
-		t.Fatalf("history status = %q, want failed", status)
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 1 || nid == "" {
+		t.Fatalf("accepted=%v id=%q, want 1 + id", accepted, nid)
 	}
-	if !strings.Contains(errText, "fcm-missing-token") {
-		t.Fatalf("history error %q must carry the re-register signal", errText)
+	if got := outboxStatuses(t, db, nid, "dev-1"); len(got) != 1 || got[0] != outboxStatusPending {
+		t.Fatalf("outbox rows %v, want 1 pending", got)
 	}
 	if deviceRevoked(t, db, "dev-1") {
 		t.Fatal("missing token must not auto-revoke the device")

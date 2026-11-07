@@ -9,9 +9,10 @@ import (
 
 func validTestConfig() Config {
 	return Config{
-		AdminUser:     "admin",
-		AdminPassword: "bootstrap-only-pw",
-		SessionSecret: strings.Repeat("s", 32),
+		AdminUser:        "admin",
+		AdminPassword:    "bootstrap-only-pw",
+		SessionSecret:    strings.Repeat("s", 32),
+		OperatorAPIToken: strings.Repeat("o", 32),
 	}
 }
 
@@ -35,6 +36,9 @@ func TestConfigValidateRejects(t *testing.T) {
 		"missing secret":   func(c *Config) { c.SessionSecret = "" },
 		"short secret":     func(c *Config) { c.SessionSecret = "too-short" },
 		"placeholder sec":  func(c *Config) { c.SessionSecret = "CHANGEME" + strings.Repeat("x", 40) },
+		"missing token":    func(c *Config) { c.OperatorAPIToken = "" },
+		"short token":      func(c *Config) { c.OperatorAPIToken = "too-short" },
+		"placeholder tok":  func(c *Config) { c.OperatorAPIToken = "CHANGEME" + strings.Repeat("x", 40) },
 		"missing user":     func(c *Config) { c.AdminUser = "" },
 		"placeholder user": func(c *Config) { c.AdminUser = "CHANGEME-admin" },
 		"no credential":    func(c *Config) { c.AdminPassword, c.AdminPasswordHash = "", "" },
@@ -59,6 +63,15 @@ func TestConfigValidateErrorsLeakNoSecrets(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "short") {
 		t.Errorf("error message echoes secret material: %q", err)
+	}
+	// The operator-token rejection must not echo the token either.
+	c = validTestConfig()
+	leak := "leak-test-token-value-0123456789abcdef"
+	c.OperatorAPIToken = leak[:20]
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for short operator token")
+	} else if strings.Contains(err.Error(), leak[:20]) {
+		t.Errorf("error message echoes token material: %q", err)
 	}
 }
 

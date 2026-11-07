@@ -3,17 +3,21 @@
 // Proves the merged P0-P10 surface end to end through HTTP only:
 //  1. Two devices pair via the operator-issued enroll-token API flow.
 //  2. Targeted notify reaches exactly the targeted device (asserted via
-//     notification_history rows per device), broadcast reaches both, and a
-//     revoked device gets nothing further (its Bearer token dies on the next
-//     request and later targeted sends record no rows for it).
+//     pending outbox rows per device — the poll-based delivery leg, no
+//     FCM required), broadcast reaches both, and a revoked device gets
+//     nothing further (its Bearer token dies on the next request and
+//     later targeted sends queue no rows for it).
 //  3. A secret widget round-trips encrypted: the served body is the P5
 //     envelope (kid == device, fresh nonce + ciphertext, NO plaintext
 //     substring), decrypts under the owner's device_key via backend/crypto,
 //     fails under the other device's key, is 404 byte-identical to an
 //     unknown id for the wrong device, and 401s without auth.
 //
-// Runs inside `go test ./...`: httptest + temp dirs + NoopSender + a real
-// operator login (POST /login) gated by webui.RequireAdmin.
+// Runs inside `go test ./...`: httptest + temp dirs + a non-FCM driver +
+// a real operator login (POST /login) gated by webui.RequireAdmin. The
+// harness driver records nothing and succeeds: with the outbox as the
+// delivery leg, sends are only attempted for the real FCM driver, so this
+// harness asserts queued rows (and the WebUI confirmation), never sends.
 package main
 
 import (
@@ -33,9 +37,10 @@ import (
 )
 
 // e2eNullSender is the harness delivery driver: records nothing, succeeds
-// always. It is deliberately a distinct type from notify.NoopSender — stub
-// drivers fail closed in handleNotify, while the harness needs delivery
-// success to assert history rows.
+// always. It is deliberately a distinct type from notify.NoopSender so the
+// harness never depends on driver-behavior details — delivery is asserted
+// on the queued outbox rows, not on sends (non-FCM drivers are never
+// called in the outbox design).
 type e2eNullSender struct{}
 
 func (e2eNullSender) Send(_ context.Context, _ notify.Device, _ map[string]string) error {
@@ -120,13 +125,15 @@ func e2eNotify(t *testing.T, mux http.Handler, cookie *http.Cookie, body string)
 	return got.NotificationID, got.Accepted
 }
 
-// e2eHistoryRows returns (row count, statuses) for one (notification, device)
-// fan-out so tests assert per-device delivery exactly.
-func e2eHistoryRows(t *testing.T, db *sql.DB, notificationID, deviceID string) (int, []string) {
+// e2eOutboxRows returns (row count, statuses) for one (push, device)
+// fan-out so tests assert per-device delivery exactly. The outbox is the
+// delivery leg (no FCM required); for notify requests pushID is the
+// notification_id, for app-push the push_id.
+func e2eOutboxRows(t *testing.T, db *sql.DB, pushID, deviceID string) (int, []string) {
 	t.Helper()
 	rows, err := db.Query(
-		`SELECT status FROM notification_history WHERE notification_id = ? AND device_id = ?`,
-		notificationID, deviceID)
+		`SELECT status FROM outbox WHERE push_id = ? AND device_id = ?`,
+		pushID, deviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +174,9 @@ func TestE2EDoneCriteria(t *testing.T) {
 	if err := notify.Migrate(db); err != nil {
 		t.Fatal(err)
 	}
+	if err := MigrateOutbox(db); err != nil {
+		t.Fatal(err)
+	}
 	oldDB := deviceDB
 	SetDeviceDB(db)
 	t.Cleanup(func() {
@@ -188,12 +198,13 @@ func TestE2EDoneCriteria(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := newBaseMux(reg, sessions, csrf)
-	// Same operator notify wiring as production NewMux. The harness uses a
-	// hermetic recording driver (captureSender records deliveries; stub
-	// Log/NoopSender fail closed in the handler now): rows still land in
-	// notification_history.
+	// Same operator notify + outbox wiring as production NewMux. The
+	// harness uses a hermetic non-FCM driver (captureSender records
+	// nothing here — sends only happen for the real FCM driver): delivery
+	// is asserted on the queued outbox rows below.
 	base.Handle("POST /api/v1/notify",
-		notifyAdminChain(sessions, csrf, handleNotify(db, &captureSender{})))
+		operatorAdminChain(sessions, csrf, handleNotify(db, &captureSender{})))
+	registerPushOutboxRoutes(base, db, sessions, csrf)
 	webui.RegisterRoutes(base, sessions, webui.Credentials{
 		Username: "op",
 		Password: "op-pass-e2e-0123456789abcdef",
@@ -236,10 +247,10 @@ func TestE2EDoneCriteria(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("targeted notify: accepted = %d, want 1", accepted)
 	}
-	if n, st := e2eHistoryRows(t, db, nidTargeted, idA); n != 1 || len(st) != 1 || st[0] != notify.StatusQueued {
+	if n, st := e2eOutboxRows(t, db, nidTargeted, idA); n != 1 || len(st) != 1 || st[0] != outboxStatusPending {
 		t.Fatalf("targeted notify: dev-A rows = %d %v, want 1 queued", n, st)
 	}
-	if n, _ := e2eHistoryRows(t, db, nidTargeted, idB); n != 0 {
+	if n, _ := e2eOutboxRows(t, db, nidTargeted, idB); n != 0 {
 		t.Fatalf("targeted notify: dev-B rows = %d, want 0", n)
 	}
 
@@ -250,7 +261,7 @@ func TestE2EDoneCriteria(t *testing.T) {
 		t.Fatalf("broadcast notify: accepted = %d, want 2", accepted)
 	}
 	for _, id := range []string{idA, idB} {
-		if n, st := e2eHistoryRows(t, db, nidAll, id); n != 1 || st[0] != notify.StatusQueued {
+		if n, st := e2eOutboxRows(t, db, nidAll, id); n != 1 || st[0] != outboxStatusPending {
 			t.Fatalf("broadcast: device %s rows = %d %v, want 1 queued", id, n, st)
 		}
 	}
@@ -325,24 +336,24 @@ func TestE2EDoneCriteria(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("post-revoke targeted notify: accepted = %d, want 1", accepted)
 	}
-	if n, _ := e2eHistoryRows(t, db, nidAfter, idA); n != 1 {
+	if n, _ := e2eOutboxRows(t, db, nidAfter, idA); n != 1 {
 		t.Fatalf("post-revoke: dev-A rows = %d, want 1", n)
 	}
-	if n, _ := e2eHistoryRows(t, db, nidAfter, idB); n != 0 {
+	if n, _ := e2eOutboxRows(t, db, nidAfter, idB); n != 0 {
 		t.Fatalf("post-revoke: revoked dev-B rows = %d, want 0", n)
 	}
 
 	// --- Post-revoke targeted notify to the revoked device only: accepted 0
-	// --- with zero new history rows for either device.
+	// --- with zero new outbox rows for either device.
 	nidRevokedOnly, accepted := e2eNotify(t, mux, cookie,
 		`{"target":{"device_ids":[`+jsonQuote(idB)+`]},"title":"Revoked only","body":"nobody"}`)
 	if accepted != 0 {
 		t.Fatalf("post-revoke revoked-only notify: accepted = %d, want 0", accepted)
 	}
-	if n, _ := e2eHistoryRows(t, db, nidRevokedOnly, idB); n != 0 {
+	if n, _ := e2eOutboxRows(t, db, nidRevokedOnly, idB); n != 0 {
 		t.Fatalf("post-revoke revoked-only: revoked dev-B rows = %d, want 0", n)
 	}
-	if n, _ := e2eHistoryRows(t, db, nidRevokedOnly, idA); n != 0 {
+	if n, _ := e2eOutboxRows(t, db, nidRevokedOnly, idA); n != 0 {
 		t.Fatalf("post-revoke revoked-only: live dev-A rows = %d, want 0", n)
 	}
 
@@ -352,10 +363,10 @@ func TestE2EDoneCriteria(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("post-revoke broadcast notify: accepted = %d, want 1", accepted)
 	}
-	if n, st := e2eHistoryRows(t, db, nidAllAfter, idA); n != 1 || len(st) != 1 || st[0] != notify.StatusQueued {
+	if n, st := e2eOutboxRows(t, db, nidAllAfter, idA); n != 1 || len(st) != 1 || st[0] != outboxStatusPending {
 		t.Fatalf("post-revoke broadcast: dev-A rows = %d %v, want 1 queued", n, st)
 	}
-	if n, _ := e2eHistoryRows(t, db, nidAllAfter, idB); n != 0 {
+	if n, _ := e2eOutboxRows(t, db, nidAllAfter, idB); n != 0 {
 		t.Fatalf("post-revoke broadcast: revoked dev-B rows = %d, want 0", n)
 	}
 }

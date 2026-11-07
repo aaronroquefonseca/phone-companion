@@ -95,7 +95,8 @@ func manyIDs(n int) []string {
 	return out
 }
 
-// openNotifyTestDB returns an in-memory DB with base + notify schemas applied.
+// openNotifyTestDB returns an in-memory DB with base + notify + outbox
+// schemas applied.
 func openNotifyTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -106,6 +107,9 @@ func openNotifyTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	if err := notify.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateOutbox(db); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO devices (id, name, token_hash) VALUES ('dev-1','Test','h')`); err != nil {
@@ -123,6 +127,10 @@ func postNotify(t *testing.T, db *sql.DB, sender notify.Sender, body string) *ht
 	return w
 }
 
+// Happy paths queue one pending outbox row per target device and 202.
+// The non-secret path stores plaintext title/body in the queued flat map
+// exactly as before (the delivery leg moved to the outbox; the payload
+// shape did not).
 func TestHandleNotifyHappyPaths(t *testing.T) {
 	db := openNotifyTestDB(t)
 	sender := &captureSender{}
@@ -143,68 +151,119 @@ func TestHandleNotifyHappyPaths(t *testing.T) {
 			t.Fatalf("unexpected 202 payload: %s", w.Body.String())
 		}
 	}
-	// The non-secret path ships plaintext exactly as before.
-	if len(sender.payloads) != 3 {
-		t.Fatalf("want 3 captured payloads, got %d", len(sender.payloads))
+	// Non-FCM drivers are never called: the outbox is the delivery leg.
+	// (The old contract attempted FCM sends here; the intentional
+	// outbox-first change pins sends to the FCM driver only — see
+	// TestNotifyNonFCMDriverNeverCalled.)
+	if len(sender.payloads) != 0 {
+		t.Fatalf("non-FCM driver must see no sends, got %d", len(sender.payloads))
 	}
-	if sender.payloads[0]["title"] != "Hi" || sender.payloads[0]["body"] != "Yo" {
-		t.Fatalf("non-secret payload changed: %v", sender.payloads[0])
+	// Three fan-outs each queued exactly one pending row for dev-1.
+	if n := outboxPendingCountFor(t, db, "dev-1"); n != 3 {
+		t.Fatalf("dev-1 pending = %d, want 3 queued rows", n)
+	}
+	// The non-secret stored flat map ships plaintext exactly as before.
+	stored := outboxPayload(t, db, firstPushID(t, db, "dev-1"), "dev-1")
+	if stored["title"] != "Hi" || stored["body"] != "Yo" {
+		t.Fatalf("non-secret stored payload changed: %v", stored)
 	}
 }
 
-// Stub drivers fail closed when there are real targets: a stub "accept"
-// would lie about delivery, so the handler answers 500 driver_unavailable.
-// Genuinely zero targets stay 202 accepted:0 behind any driver.
+// firstPushID returns the push_id of the oldest outbox row for a device
+// (test ordering helper).
+func firstPushID(t *testing.T, db *sql.DB, deviceID string) string {
+	t.Helper()
+	var id string
+	if err := db.QueryRow(
+		`SELECT push_id FROM outbox WHERE device_id = ? ORDER BY id LIMIT 1`,
+		deviceID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// Non-FCM drivers (log/noop/test doubles) are NEVER called: with the
+// outbox as the delivery leg, Send is reserved for the real FCM sender's
+// best-effort wake hint.
+func TestNotifyNonFCMDriverNeverCalled(t *testing.T) {
+	for _, sender := range []notify.Sender{notify.NoopSender{}, notify.LogSender{}, &captureSender{}} {
+		db := openNotifyTestDB(t)
+		w := postNotify(t, db, sender, `{"target":{"all":true},"title":"Hi","body":"Yo"}`)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("%T: status %d, want 202 (%s)", sender, w.Code, w.Body.String())
+		}
+		accepted, nid := acceptedOf(t, w)
+		if accepted != 1 || nid == "" {
+			t.Fatalf("%T: accepted=%v id=%q, want 1 + id", sender, accepted, nid)
+		}
+		if c, ok := sender.(*captureSender); ok && len(c.payloads) != 0 {
+			t.Fatalf("captureSender must see no sends, got %d", len(c.payloads))
+		}
+		if got := outboxStatuses(t, db, nid, "dev-1"); len(got) != 1 || got[0] != outboxStatusPending {
+			t.Fatalf("%T: outbox rows %v, want 1 pending", sender, got)
+		}
+	}
+}
+
+// INTENTIONAL CONTRACT CHANGE (outbox-first, no FCM required): stub
+// drivers no longer fail the request — a 202 means "queued in the
+// outbox", which is literally true, so there is nothing to lie about.
+// Both the stub and the genuinely-zero-target cases 202; the old 500
+// driver_unavailable expectation is gone BY DESIGN. See fanoutNotify.
 func TestHandleNotifyStubDriverUnavailable(t *testing.T) {
 	for _, sender := range []notify.Sender{notify.NoopSender{}, notify.LogSender{}} {
 		db := openNotifyTestDB(t)
 		w := postNotify(t, db, sender, `{"target":{"all":true},"title":"Hi","body":"Yo"}`)
-		if w.Code != http.StatusInternalServerError {
-			t.Fatalf("%T with targets: status %d, want 500 (%s)", sender, w.Code, w.Body.String())
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("%T with targets: status %d, want 202 (%s)", sender, w.Code, w.Body.String())
 		}
-		if code := errorCode(t, w); code != "driver_unavailable" {
-			t.Fatalf("%T with targets: error %q, want driver_unavailable", sender, code)
+		accepted, nid := acceptedOf(t, w)
+		if accepted != 1 || nid == "" {
+			t.Fatalf("%T with targets: accepted=%v id=%q, want 1 + id", sender, accepted, nid)
+		}
+		if got := outboxStatuses(t, db, nid, "dev-1"); len(got) != 1 || got[0] != outboxStatusPending {
+			t.Fatalf("%T: outbox rows %v, want 1 pending", sender, got)
 		}
 		// Zero targets are still 202 accepted:0 behind the same stub.
 		w = postNotify(t, db, sender, `{"target":{"device_ids":["nope"]},"title":"Hi","body":"Yo"}`)
 		if w.Code != http.StatusAccepted {
 			t.Fatalf("%T zero targets: status %d, want 202 (%s)", sender, w.Code, w.Body.String())
 		}
-		accepted, nid := acceptedOf(t, w)
+		accepted, nid = acceptedOf(t, w)
 		if accepted != 0 || nid == "" {
 			t.Fatalf("%T zero targets: want accepted:0 with id, got %s", sender, w.Body.String())
 		}
 	}
 }
 
-// A real driver that fails every send (e.g. misconfigured FCM) also yields
-// 500 driver_unavailable, with failed history rows carrying sanitized error
-// text — never raw driver output.
+// A non-FCM driver that fails every send can no longer fail the request:
+// Send is only invoked for the real FCM driver, so the err here is never
+// even attempted — the request 202s with the row queued, and no history
+// row is written for a hint that never happened.
 func TestHandleNotifyAllSendsFail(t *testing.T) {
 	db := openNotifyTestDB(t)
 	sender := &captureSender{err: fmt.Errorf("FCM driver unconfigured (need \"FCM_PROJECT_ID\" + token\x00\nsecret)")}
 
 	w := postNotify(t, db, sender, `{"target":{"all":true},"title":"Hi","body":"Yo"}`)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status %d, want 500 (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
-	if code := errorCode(t, w); code != "driver_unavailable" {
-		t.Fatalf("error %q, want driver_unavailable", code)
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 1 || nid == "" {
+		t.Fatalf("accepted=%v id=%q, want 1 + id", accepted, nid)
 	}
-	var stored string
-	if err := db.QueryRow(`SELECT error FROM notification_history WHERE device_id = 'dev-1'`).Scan(&stored); err != nil {
-		t.Fatalf("history row missing: %v", err)
+	if len(sender.payloads) != 0 {
+		t.Fatalf("non-FCM driver must see no sends, got %d", len(sender.payloads))
 	}
-	if stored == "" {
-		t.Fatal("failed delivery must record sanitized error text")
+	if got := outboxStatuses(t, db, nid, "dev-1"); len(got) != 1 || got[0] != outboxStatusPending {
+		t.Fatalf("outbox rows %v, want 1 pending", got)
 	}
-	for _, r := range stored {
-		if r < 0x20 || r == 0x7f {
-			t.Fatalf("control byte stored in history error: %q", stored)
-		}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM notification_history`).Scan(&n); err != nil {
+		t.Fatal(err)
 	}
-	if strings.ContainsAny(stored, "\"\x00") {
-		t.Fatalf("unsanitized error stored: %q", stored)
+	if n != 0 {
+		t.Fatalf("history rows = %d, want 0 (no FCM attempt, no build failure)", n)
 	}
 }
 
@@ -456,9 +515,10 @@ func setNotifyDeviceKey(t *testing.T, db *sql.DB, id string) [32]byte {
 	return key
 }
 
-// Secret fan-out round-trip: the handler per-device encrypts title+body,
-// the captured wire payload carries envelopes (no plaintext), and each
-// envelope decrypts under the device key with the notify binding.
+// Secret fan-out round-trip through the outbox: the queued flat map
+// carries envelopes (no plaintext), and each envelope decrypts under the
+// device key with the notify binding. Asserts on the stored outbox row —
+// non-FCM drivers are never called, so there is no captured send to read.
 func TestHandleNotifySecretRoundTrip(t *testing.T) {
 	db := openNotifyTestDB(t)
 	key := setNotifyDeviceKey(t, db, "dev-1")
@@ -473,18 +533,18 @@ func TestHandleNotifySecretRoundTrip(t *testing.T) {
 	if accepted != 1 || nid == "" {
 		t.Fatalf("unexpected 202 payload: %s", w.Body.String())
 	}
-	if len(sender.payloads) != 1 {
-		t.Fatalf("want 1 captured payload, got %d", len(sender.payloads))
+	if len(sender.payloads) != 0 {
+		t.Fatalf("non-FCM driver must see no sends, got %d", len(sender.payloads))
 	}
-	payload := sender.payloads[0]
+	payload := outboxPayload(t, db, nid, "dev-1")
 	if payload[notify.SecretFlagKey] != "true" {
 		t.Fatalf("missing secret flag: %v", payload)
 	}
 	if _, ok := payload["title"]; ok {
-		t.Fatal("secret payload carries plaintext title")
+		t.Fatal("stored secret payload carries plaintext title")
 	}
 	if _, ok := payload["body"]; ok {
-		t.Fatal("secret payload carries plaintext body")
+		t.Fatal("stored secret payload carries plaintext body")
 	}
 	for _, tc := range []struct {
 		envKey, field, want string
@@ -513,23 +573,29 @@ func TestHandleNotifySecretRoundTrip(t *testing.T) {
 	}
 }
 
-// A secret request for a device with no usable key fails that device
-// closed: with no other targets the handler answers 500
-// driver_unavailable and records a failed (sanitized) history row.
+// A secret request for a device with no usable key skips that device
+// (nothing queueable): accepted:0 still 202s, with a failed (sanitized)
+// history row explaining the skip. Previously this was a 500
+// driver_unavailable; the outbox-first change makes unsealable targets a
+// per-device skip, never a request failure.
 func TestHandleNotifySecretWithoutKey(t *testing.T) {
 	db := openNotifyTestDB(t)
 	sender := &captureSender{}
 
 	w := postNotify(t, db, sender,
 		`{"target":{"device_ids":["dev-1"]},"title":"Hi","body":"Yo","secret":true}`)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status %d, want 500 (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
 	}
-	if code := errorCode(t, w); code != "driver_unavailable" {
-		t.Fatalf("error %q, want driver_unavailable", code)
+	accepted, nid := acceptedOf(t, w)
+	if accepted != 0 || nid == "" {
+		t.Fatalf("accepted=%v id=%q, want 0 + id", accepted, nid)
 	}
 	if len(sender.payloads) != 0 {
 		t.Fatalf("failed secret build must send nothing, sent %d", len(sender.payloads))
+	}
+	if got := outboxStatuses(t, db, nid, "dev-1"); len(got) != 0 {
+		t.Fatalf("outbox rows %v, want none (unsealable device skipped)", got)
 	}
 	var status string
 	if err := db.QueryRow(`SELECT status FROM notification_history WHERE device_id = 'dev-1'`).Scan(&status); err != nil {
@@ -551,10 +617,10 @@ func acceptedOf(t *testing.T, w *httptest.ResponseRecorder) (float64, string) {
 	return got["accepted"].(float64), id
 }
 
-// historyDevices returns the device_ids recorded for one notification.
-func historyDevices(t *testing.T, db *sql.DB, notificationID string) []string {
+// outboxDevices returns the device_ids queued for one push, in row order.
+func outboxDevices(t *testing.T, db *sql.DB, pushID string) []string {
 	t.Helper()
-	rows, err := db.Query(`SELECT device_id FROM notification_history WHERE notification_id = ? ORDER BY device_id`, notificationID)
+	rows, err := db.Query(`SELECT device_id FROM outbox WHERE push_id = ? ORDER BY id`, pushID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +640,7 @@ func historyDevices(t *testing.T, db *sql.DB, notificationID string) []string {
 }
 
 // Revoked devices must be excluded from {"all":true} fan-out: accepted
-// counts only active devices and history rows cover only active devices.
+// counts only active devices and outbox rows cover only active devices.
 func TestHandleNotifySkipsRevokedInAllFanOut(t *testing.T) {
 	db := openNotifyTestDB(t)
 	addNotifyDevice(t, db, "dev-2")
@@ -591,13 +657,13 @@ func TestHandleNotifySkipsRevokedInAllFanOut(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("accepted %v, want 1 (revoked dev-1 excluded): %s", accepted, w.Body.String())
 	}
-	if got := historyDevices(t, db, nid); len(got) != 1 || got[0] != "dev-2" {
-		t.Fatalf("history devices %v, want [dev-2]", got)
+	if got := outboxDevices(t, db, nid); len(got) != 1 || got[0] != "dev-2" {
+		t.Fatalf("outbox devices %v, want [dev-2]", got)
 	}
 }
 
 // Revoked devices must be excluded from explicit device_ids fan-out: a
-// revoked-only target is a normal 202 with accepted:0 and no history rows,
+// revoked-only target is a normal 202 with accepted:0 and no outbox rows,
 // and a mixed target fans out to active devices only.
 func TestHandleNotifySkipsRevokedInDeviceIDsFanOut(t *testing.T) {
 	db := openNotifyTestDB(t)
@@ -615,8 +681,8 @@ func TestHandleNotifySkipsRevokedInDeviceIDsFanOut(t *testing.T) {
 	if accepted != 0 {
 		t.Fatalf("revoked-only: accepted %v, want 0: %s", accepted, w.Body.String())
 	}
-	if got := historyDevices(t, db, nid); len(got) != 0 {
-		t.Fatalf("revoked-only: history devices %v, want none", got)
+	if got := outboxDevices(t, db, nid); len(got) != 0 {
+		t.Fatalf("revoked-only: outbox devices %v, want none", got)
 	}
 
 	w = postNotify(t, db, sender, `{"target":{"device_ids":["dev-1","dev-2"]},"title":"Hi","body":"Yo"}`)
@@ -627,8 +693,8 @@ func TestHandleNotifySkipsRevokedInDeviceIDsFanOut(t *testing.T) {
 	if accepted != 1 {
 		t.Fatalf("mixed: accepted %v, want 1: %s", accepted, w.Body.String())
 	}
-	if got := historyDevices(t, db, nid); len(got) != 1 || got[0] != "dev-2" {
-		t.Fatalf("mixed: history devices %v, want [dev-2]", got)
+	if got := outboxDevices(t, db, nid); len(got) != 1 || got[0] != "dev-2" {
+		t.Fatalf("mixed: outbox devices %v, want [dev-2]", got)
 	}
 }
 
@@ -658,8 +724,8 @@ func TestHandleNotifyRevokedThenTargeted(t *testing.T) {
 	if accepted != 0 {
 		t.Fatalf("after revoke: accepted %v, want 0: %s", accepted, w.Body.String())
 	}
-	if got := historyDevices(t, db, nid); len(got) != 0 {
-		t.Fatalf("after revoke: history devices %v, want none", got)
+	if got := outboxDevices(t, db, nid); len(got) != 0 {
+		t.Fatalf("after revoke: outbox devices %v, want none", got)
 	}
 
 	// resolveNotifyTargets agrees at the unit level for both target forms.
