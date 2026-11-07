@@ -25,7 +25,7 @@ object AppInstallInstaller {
     const val TAG = "AppInstallInstaller"
     const val ACTION_INSTALL_RESULT = "pc_app_install_result"
 
-    fun commit(context: Context, payload: AppInstallPayload, apkFile: File): Boolean {
+    fun commit(context: Context, payload: AppInstallPayload, apkFile: File, attempt: String?): Boolean {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(
             PackageInstaller.SessionParams.MODE_FULL_INSTALL,
@@ -44,6 +44,7 @@ object AppInstallInstaller {
                     .putExtra(AppInstallPayload.EXTRA_PUSH_ID, payload.pushId)
                     .putExtra(AppInstallPayload.EXTRA_PACKAGE, payload.packageName)
                     .putExtra(AppInstallPayload.EXTRA_LABEL, payload.label)
+                    .putExtra(AppInstallPayload.EXTRA_ATTEMPT, attempt)
                 val result = PendingIntent.getBroadcast(
                     context,
                     CompanionMessagingService.actionRequestCode(
@@ -55,7 +56,7 @@ object AppInstallInstaller {
                 )
                 session.commit(result.intentSender)
             }
-            Log.w(TAG, "app_install committed session for ${payload.packageName}")
+            Log.i(TAG, "app_install committed session for ${payload.packageName}")
             return true
         } catch (e: Exception) {
             // Class name only — never paths, URLs, or hashes.

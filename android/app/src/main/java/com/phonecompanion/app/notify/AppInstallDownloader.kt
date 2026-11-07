@@ -1,9 +1,13 @@
 package com.phonecompanion.app.notify
 
+import android.os.SystemClock
 import android.util.Log
 import com.phonecompanion.app.data.ApiClient
 import java.io.File
 import java.io.FileOutputStream
+import java.io.FilterOutputStream
+import java.io.OutputStream
+import java.net.URI
 
 /**
  * HTTPS APK download into the app cache dir.
@@ -11,8 +15,9 @@ import java.io.FileOutputStream
  * Android side of the flow; the cap/cancel byte logic itself lives in the
  * pure, unit-tested [AppInstallTransfer]. Uses the shared OkHttp stack
  * ([ApiClient.downloadClient]: same timeouts as the API client, but no
- * auth interceptor — APK URLs may be signed third-party URLs and the
- * device Bearer token must never be sent there).
+ * auth interceptor and no logging interceptor — APK URLs may be signed
+ * third-party URLs and the device Bearer token must never be sent there,
+ * and signed query tokens must never reach logcat).
  *
  * Redirects are followed manually, HTTPS-only: any hop leaving HTTPS (or
  * a missing/relative Location, or more than [MAX_REDIRECTS] hops) aborts
@@ -25,7 +30,15 @@ import java.io.FileOutputStream
 object AppInstallDownloader {
 
     const val TAG = "AppInstallDownload"
-    private const val MAX_REDIRECTS = 5
+
+    /** Max redirect hops before aborting (named: was a bare `5`). */
+    const val MAX_REDIRECTS = 5
+
+    /**
+     * Progress notifications are throttled to at most one per window —
+     * rapid buffer fills must not re-notify hundreds of times.
+     */
+    const val PROGRESS_THROTTLE_MS = 200L
 
     /** Terminal outcome of the download phase (no install attempted yet). */
     sealed interface Result {
@@ -71,11 +84,12 @@ object AppInstallDownloader {
                             return Result.Failed
                         }
                         val location = res.header("Location")?.trim().orEmpty()
-                        if (!AppInstallPayload.isValidApkUrl(resolveUrl(url, location))) {
+                        val resolved = resolveUrl(url, location)
+                        if (!AppInstallPayload.isValidApkUrl(resolved)) {
                             Log.w(TAG, "app_install redirect left https for ${payload.packageName}")
                             return Result.Failed
                         }
-                        url = resolveUrl(url, location)
+                        url = resolved
                         hops++
                         return@use
                     }
@@ -91,13 +105,13 @@ object AppInstallDownloader {
                     val body = res.body ?: return Result.Failed
                     val outcome = body.byteStream().use { input ->
                         FileOutputStream(dest).use { raw ->
-                            val counting = CountingOutputStream(raw) { bytesRead ->
+                            val counting = CountingOutputStream(raw, onBytes = { bytesRead ->
                                 onProgress(bytesRead, declared?.takeIf { it >= 0 })
-                            }
+                            })
                             AppInstallTransfer.copyCapped(
                                 input = input,
                                 output = counting,
-                                isCancelled = { AppInstallCancels.isCancelled(payload.pushId) },
+                                isCancelled = { AppInstallSessions.isCancelled(payload.pushId) },
                             )
                         }
                     }
@@ -125,53 +139,77 @@ object AppInstallDownloader {
             // Class name only — URLs and hashes never reach logcat here.
             runCatching { dest.delete() }
             Log.w(TAG, "app_install download failed for ${payload.packageName} [${e.javaClass.simpleName}]")
-            if (AppInstallCancels.isCancelled(payload.pushId)) return Result.Cancelled
+            if (AppInstallSessions.isCancelled(payload.pushId)) return Result.Cancelled
             return Result.Failed
         }
     }
 
     /**
-     * Resolves a redirect Location against [base]. Absolute HTTPS URLs pass
-     * through; absolute-path locations inherit the base origin; anything
-     * else yields "" so the caller's HTTPS check rejects it.
+     * Resolves a redirect Location against [base] via [URI]. Absolute
+     * HTTPS URLs pass through; absolute-path locations inherit the base
+     * origin; anything else (protocol-relative, bare relative, non-https,
+     * unparseable) yields "" so the caller's HTTPS check rejects it.
      */
     internal fun resolveUrl(base: String, location: String): String {
-        if (location.isEmpty()) return ""
-        if (location.startsWith("https://", ignoreCase = true)) return location
-        if (location.startsWith("/")) {
-            // base is a validated https URL: scheme + host form the origin.
-            val afterScheme = base.substringAfter("://")
-            return "https://" + afterScheme.substringBefore("/") + location
+        val loc = location.trim()
+        // Protocol-relative ("//host/path") inherits the scheme — never
+        // trust it blindly; reject outright rather than resolving.
+        if (loc.isEmpty() || loc.startsWith("//")) return ""
+        return try {
+            if (loc.regionMatches(0, "https://", 0, "https://".length, ignoreCase = true)) {
+                if (AppInstallPayload.isValidApkUrl(loc)) loc else ""
+            } else if (loc.startsWith("/")) {
+                val b = URI(base)
+                if (!b.scheme.equals("https", ignoreCase = true) || b.authority.isNullOrEmpty()) {
+                    ""
+                } else {
+                    val resolved = URI("https", b.authority, loc, null, null).toString()
+                    if (AppInstallPayload.isValidApkUrl(resolved)) resolved else ""
+                }
+            } else {
+                ""
+            }
+        } catch (_: Exception) {
+            ""
         }
-        return ""
     }
 
     /**
-     * Throttled progress tap: forwards byte counts at most every 200 ms
-     * (plus every write's final total implicitly via the last call the
-     * downloader makes after completion). Throttling keeps rapid buffer
-     * fills from re-notifying the progress notification hundreds of times.
+     * Throttled progress tap: forwards byte counts at most once per
+     * [PROGRESS_THROTTLE_MS] (plus every write's final total implicitly
+     * via the last call the downloader makes after completion).
+     *
+     * Internal with an injectable [clockMs] so both write overloads and
+     * the throttle window are unit-testable on the JVM. Both overloads
+     * count — a single-byte write path that skipped the total would
+     * under-report progress.
      */
-    private class CountingOutputStream(
-        out: java.io.OutputStream,
+    internal class CountingOutputStream(
+        out: OutputStream,
         private val onBytes: (Long) -> Unit,
-    ) : java.io.FilterOutputStream(out) {
-        private var total = 0L
+        private val clockMs: () -> Long = { SystemClock.uptimeMillis() },
+    ) : FilterOutputStream(out) {
+        internal var total = 0L
         private var lastEmitMs = 0L
 
         override fun write(b: ByteArray, off: Int, len: Int) {
             out.write(b, off, len)
             total += len
-            val now = android.os.SystemClock.uptimeMillis()
-            if (now - lastEmitMs >= 200) {
-                lastEmitMs = now
-                runCatching { onBytes(total) }
-            }
+            maybeEmit()
         }
 
         override fun write(b: Int) {
             out.write(b)
             total += 1
+            maybeEmit()
+        }
+
+        private fun maybeEmit() {
+            val now = clockMs()
+            if (now - lastEmitMs >= PROGRESS_THROTTLE_MS) {
+                lastEmitMs = now
+                runCatching { onBytes(total) }
+            }
         }
     }
 }

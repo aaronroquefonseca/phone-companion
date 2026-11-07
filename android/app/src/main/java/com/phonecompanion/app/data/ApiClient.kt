@@ -88,11 +88,16 @@ object ApiClient {
 
     /**
      * Shared OkHttp stack for non-API downloads (APK fetch). Same timeouts
-     * and debug logging as the API client, but deliberately WITHOUT the
-     * auth interceptor: APK URLs may be signed third-party URLs, and the
-     * device Bearer token must never be sent to a non-server host.
+     * as the API client, but deliberately WITHOUT the auth interceptor
+     * (APK URLs may be signed third-party URLs, and the device Bearer
+     * token must never be sent to a non-server host) and WITHOUT any
+     * logging interceptor (Level.NONE even in debug builds: APK URLs may
+     * carry signed query tokens that must never reach logcat).
      */
-    fun downloadClient(): OkHttpClient = baseBuilder().build()
+    fun downloadClient(): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
 
     private fun baseBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
         .apply {

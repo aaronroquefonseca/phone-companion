@@ -15,15 +15,6 @@ import java.security.MessageDigest
  */
 object AppInstallCrypto {
 
-    /** Lowercase hex SHA-256 of [bytes]. Never throws (wraps in runCatching). */
-    fun sha256Hex(bytes: ByteArray): String? = try {
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(bytes)
-        digest.digest().toHex()
-    } catch (_: Exception) {
-        null
-    }
-
     /**
      * Streams [file] and compares its SHA-256 to [expectedHex] with a normal
      * equality check. Returns false (not an exception) for a missing file,
