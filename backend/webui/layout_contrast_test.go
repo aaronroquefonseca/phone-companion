@@ -123,3 +123,46 @@ func TestSharedCSSContrastUsesCurrentPalette(t *testing.T) {
 		}
 	}
 }
+
+// TestSharedCSSDarkBlockLast guards the cascade order the ratio tests above
+// cannot see: at equal specificity the LATER rule wins, so every light-mode
+// base rule the dark theme overrides must be defined BEFORE the dark
+// @media block. A base color rule appended after it silently wins in dark
+// mode (this once shipped white-on-white table headers). If this fails,
+// move the dark block back to the end of sharedCSS instead of weakening it.
+func TestSharedCSSDarkBlockLast(t *testing.T) {
+	const marker = "@media (prefers-color-scheme:dark){"
+	darkIdx := strings.Index(sharedCSS, marker)
+	if darkIdx < 0 {
+		t.Fatal("dark @media block missing from sharedCSS")
+	}
+	// Exact light-mode base declarations the dark block overrides. Missing
+	// entry = stylesheet changed: update this list, do not delete it.
+	base := []string{
+		`body{font-family:`,
+		`.brand a{font-weight:700`,
+		`nav a{color:#0b5fff`,
+		`main a{color:#0b5fff}`,
+		`button{font:inherit`,
+		`.field .hint{margin:.25rem 0 0;font-size:.875rem;color:#555}`,
+		`.field-error{margin:.25rem 0 0;font-size:.875rem;color:#b3261e}`,
+		`.notice{background:#f6f6f6`,
+		`.error{background:#fdecea`,
+		`.success{background:#e6f4ea`,
+		`.card p{margin:.3rem 0 1rem;color:#333}`,
+		`th{background:#f0f0f0}`,
+		`.revoked{color:#666}`,
+		`.muted{color:#555}`,
+		`footer{margin-top:2.5rem`,
+	}
+	for _, sel := range base {
+		idx := strings.Index(sharedCSS, sel)
+		if idx < 0 {
+			t.Errorf("base rule %q missing; stylesheet changed, update this test", sel)
+			continue
+		}
+		if idx > darkIdx {
+			t.Errorf("base rule %q sits AFTER the dark @media block and wins in dark mode; move the dark block last", sel)
+		}
+	}
+}
