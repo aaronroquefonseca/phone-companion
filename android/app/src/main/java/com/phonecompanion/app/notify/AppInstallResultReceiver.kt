@@ -8,8 +8,9 @@ import android.util.Log
 
 /**
  * PackageInstaller result receiver: the terminal state of the install
- * phase. Deletes the cached APK on every path and posts exactly one
- * user-visible notification (claimed via [AppInstallTerminals] so a
+ * phase. Thin forwarder: deletes the cached APK on every path, classifies
+ * the status, and funnels the single user-visible notification through
+ * [AppInstallNotifications.notifyTerminal] (claimed per attempt, so a
  * retried system broadcast can never double-post). No retry on any path —
  * user-cancelled is plain informational, failures carry the installer
  * status message.
@@ -23,6 +24,7 @@ class AppInstallResultReceiver : BroadcastReceiver() {
         val pushId = intent.getStringExtra(AppInstallPayload.EXTRA_PUSH_ID).orEmpty()
         val packageName = intent.getStringExtra(AppInstallPayload.EXTRA_PACKAGE).orEmpty()
         val label = intent.getStringExtra(AppInstallPayload.EXTRA_LABEL)
+        val attempt = intent.getStringExtra(AppInstallPayload.EXTRA_ATTEMPT)
         if (pushId.isEmpty() || packageName.isEmpty()) {
             Log.w(TAG, "app_install result missing push context; ignoring")
             return
@@ -32,24 +34,34 @@ class AppInstallResultReceiver : BroadcastReceiver() {
 
         // The verified APK is single-use: drop it whatever the outcome.
         runCatching { AppInstallFiles.apkFile(app, pushId).delete() }
-        AppInstallCancels.clear(pushId)
 
-        if (!AppInstallTerminals.claimTerminal(pushId)) return
+        val target = AppInstallNotifications.TerminalTarget(pushId, packageName, label)
         when (val outcome = AppInstallResult.classify(status, message)) {
             is AppInstallResult.Outcome.Installed -> {
-                Log.w(TAG, "app_install installed $packageName")
-                AppInstallNotifications.notifySuccess(app, label ?: packageName, pushId)
+                if (notify(app, AppInstallFlow.TerminalKind.SUCCESS, target, attempt)) {
+                    Log.i(TAG, "app_install installed $packageName")
+                }
             }
             is AppInstallResult.Outcome.UserCancelled -> {
-                Log.w(TAG, "app_install user-cancelled for $packageName")
-                AppInstallNotifications.notifyUserCancelled(app, packageName, label, pushId)
+                if (notify(app, AppInstallFlow.TerminalKind.USER_CANCELLED, target, attempt)) {
+                    Log.i(TAG, "app_install user-cancelled for $packageName")
+                }
             }
             is AppInstallResult.Outcome.Failed -> {
-                Log.w(TAG, "app_install failed for $packageName")
-                AppInstallNotifications.notifyFailed(app, packageName, label, pushId, outcome.statusMessage)
+                if (notify(app, AppInstallFlow.TerminalKind.FAILED, target, attempt, outcome.statusMessage)) {
+                    Log.w(TAG, "app_install failed for $packageName")
+                }
             }
         }
     }
+
+    private fun notify(
+        context: Context,
+        kind: AppInstallFlow.TerminalKind,
+        target: AppInstallNotifications.TerminalTarget,
+        attempt: String?,
+        detail: String? = null,
+    ): Boolean = AppInstallNotifications.notifyTerminal(context, kind, target, attempt, detail)
 
     companion object {
         private const val TAG = "AppInstallResult"

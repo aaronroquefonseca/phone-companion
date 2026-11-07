@@ -95,7 +95,7 @@ class CompanionMessagingService : FirebaseMessagingService() {
                 // Text-first fallback still needs its channel on API 26+:
                 // posting to a missing channel drops the notification, so
                 // ensure the GENERAL fallback channel before notify.
-                ensureGeneralChannel(manager)
+                NotificationChannels.ensureGeneral(manager)
                 manager.notify(
                     (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
                     NotificationCompat.Builder(this, NotificationPayload.GENERAL_CHANNEL_ID)
@@ -198,6 +198,9 @@ class CompanionMessagingService : FirebaseMessagingService() {
             return false
         }
         try {
+            // Drop superseded/abandoned APKs before prompting so a stale
+            // file never sits next to (or is mistaken for) this push.
+            AppInstallFiles.purgeStaleCache(this, payload.pushId)
             AppInstallNotifications.notifyPrompt(this, payload)
         } catch (_: Throwable) {
             return false
@@ -256,20 +259,11 @@ class CompanionMessagingService : FirebaseMessagingService() {
 
     /**
      * Ensures the GENERAL fallback channel for the last-resort blank post.
-     * Best-effort: never throws (the fallback notify below must not fail).
+     * Single owner lives in [NotificationChannels]; this stays best-effort
+     * (the fallback notify below must not fail). Never throws.
      */
     private fun ensureGeneralChannel(manager: NotificationManager) {
-        try {
-            if (manager.getNotificationChannel(NotificationPayload.GENERAL_CHANNEL_ID) != null) return
-            val channel = NotificationChannel(
-                NotificationPayload.GENERAL_CHANNEL_ID,
-                "General notifications",
-                NotificationManager.IMPORTANCE_DEFAULT,
-            )
-            channel.description = "All other notifications."
-            manager.createNotificationChannel(channel)
-        } catch (_: Throwable) {
-        }
+        NotificationChannels.ensureGeneral(manager)
     }
 
     /**
