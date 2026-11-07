@@ -67,6 +67,38 @@ def loadGitSha() {
 }
 def gitSha = loadGitSha()
 
+// Release versioning for APK-push compatibility. The poll-based
+// self-update flow (app_install commands) needs a monotonic versionCode:
+// the installer treats a pushed APK as an update only when versionCode
+// increases (and the signature matches the installed build). Both values
+// come from the environment so plain dev builds stay at 1 /
+// 0.1.0-skeleton; release.yml passes the tag + commit count. Strict
+// shapes, fail-closed to the dev defaults — a bad value must never break
+// the build or bake a surprising identity into BuildConfig/AppVersion.
+def loadVersionCode() {
+    try {
+        def raw = (System.getenv('VERSION_CODE') ?: '').trim()
+        if (raw ==~ /[0-9]{1,9}/) {
+            def v = raw.toInteger()
+            if (v >= 1 && v <= 2100000000) return v
+        }
+        return 1
+    } catch (Exception ignored) {
+        return 1
+    }
+}
+def loadVersionName() {
+    try {
+        def raw = (System.getenv('VERSION_NAME') ?: '').trim()
+        if (raw ==~ /[A-Za-z0-9._-]{1,64}/) return raw
+        return '0.1.0-skeleton'
+    } catch (Exception ignored) {
+        return '0.1.0-skeleton'
+    }
+}
+def appVersionCode = loadVersionCode()
+def appVersionName = loadVersionName()
+
 // Escape a raw JSON string value for embedding in a Java string literal:
 // without this a backslash or double-quote (or control character) in a
 // sender field would break the generated BuildConfig or inject code.
@@ -94,8 +126,8 @@ android {
         applicationId 'com.phonecompanion.app'
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName '0.1.0-skeleton'
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
 
         // Runtime Firebase init inputs (see notify/FirebaseInit). Real
