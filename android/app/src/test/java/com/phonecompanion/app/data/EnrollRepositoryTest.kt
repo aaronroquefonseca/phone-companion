@@ -54,6 +54,12 @@ class EnrollRepositoryTest {
 
         override suspend fun getWidgetsRaw(): Response<ResponseBody> =
             throw UnsupportedOperationException("not under test")
+
+        override suspend fun getCommandsRaw(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun ackCommands(request: CommandsAckRequest): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
     }
 
     private fun okResponse() = Response.success(
