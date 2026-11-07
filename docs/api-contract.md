@@ -20,9 +20,18 @@ Two independent schemes; they are never interchangeable:
    `GET /api/v1/widgets` (and future device calls). Tokens are individually
    revocable; the server stores only a hash (`token_hash`, see `db.go`).
 
+3. **Operator API token (Bearer)** — machine credential for operator
+   automation, sent as `Authorization: Bearer <token>`
+   (`OPERATOR_API_TOKEN`). Accepted on the operator POST endpoints
+   (`POST /api/v1/notify`, `POST /api/v1/app-push`) as an alternative to
+   the WebUI session. It is never a device token: a live device Bearer on
+   an operator endpoint is rejected with `403`.
+
 Unauthenticated responses use `401` (missing/invalid credential) and `403`
 (valid credential, not allowed). Error bodies: `{"error": "<code>"}` with a
-stable machine-readable code plus HTTP status.
+stable machine-readable code plus HTTP status. No scheme substitutes for
+another: a device token never authorizes operator endpoints, and a
+session/token mix-up across surfaces fails closed.
 
 ## Endpoints
 
@@ -127,11 +136,14 @@ the widgets PR's call.
 
 ### `POST /api/v1/notify` (notifications PR)
 
-Enqueues fan-out to devices. Auth (v1): WebUI session (operator) ONLY —
-never a device token (a request carrying a Bearer token is rejected
-with `403`, even alongside a session). The automation credential named
-in earlier drafts does not exist yet; when it lands it will be a
-separate v1-compatible auth scheme, not a device token.
+Enqueues fan-out to devices. Auth (v1): WebUI session (operator) or the
+operator API token (`OPERATOR_API_TOKEN`, sent as
+`Authorization: Bearer <token>`) — never a device token (a request
+carrying a device Bearer token is rejected with `403`, even alongside a
+session; an unknown Bearer value is `401`). The token path needs no
+write-guard header; the session path requires `X-Requested-With:
+XMLHttpRequest` (or a session-bound CSRF token), same as the other
+operator POST routes.
 
 Request:
 
@@ -163,6 +175,76 @@ Request:
   shows it where sensible.
 
 Response `202`: `{"notification_id": "<opaque-id>", "accepted": 2}`.
+
+### `POST /api/v1/app-push` (remote APK install push, additive v1)
+
+Enqueues a remote APK install directive to devices. Auth (v1): WebUI
+session (operator) with the write-guard header, OR the operator API
+token (`OPERATOR_API_TOKEN`, sent as `Authorization: Bearer <token>`,
+no write-guard header needed) — never a device token (a live device
+Bearer is rejected with `403`, even alongside a session; an unknown
+Bearer value is `401`; no credential at all is `401`).
+
+Request:
+
+```json
+{
+  "target": { "all": true },
+  "apk_url": "https://example.com/app-release.apk",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "package": "com.example.app",
+  "version": "1.2.3",
+  "label": "Test App"
+}
+```
+
+- `target`: either `{ "all": true }` or `{ "device_ids": ["<id>", ...] }`
+  (exactly one form; empty `device_ids` is `422`). Unknown ids are
+  tolerated and skipped, revoked devices are always excluded — same
+  semantics as `POST /api/v1/notify`.
+- `apk_url`: required, `https://` only (no other scheme, no credentials
+  in the URL), max 2048 characters.
+- `sha256`: required, exactly 64 lowercase hex characters (the expected
+  digest of the APK bytes; the backend stores the digest, never the APK).
+- `package`: required, reverse-DNS shape (at least one dot, only
+  `[A-Za-z0-9_.]`).
+- `version`: optional, max 64 characters; absent rides as an empty
+  string in the data message.
+- `label`: required, 1..100 characters (operator display name).
+
+Validation failures are `422` with a machine-readable `{"error":
+"<code>"}` (`empty_target`, `ambiguous_target`, `too_many_targets`,
+`missing_apk_url`, `invalid_apk_url`, `missing_sha256`,
+`invalid_sha256`, `missing_package`, `invalid_package`,
+`invalid_version`, `missing_label`, `invalid_label`, `invalid_json` for
+undecodable or unknown-field bodies; oversize bodies are `413`
+`body_too_large`).
+
+Response `202`: `{"push_id": "<opaque-id>", "accepted": 2}` where
+`accepted` counts devices the message was actually handed to the
+driver for. `accepted: 0` is a normal `202` when no devices match
+(unknown ids, or an empty registry) — not an error. Every accepted
+push is recorded in the server-side `app_pushes` audit table
+(`push_id`, timestamp, operator identity, target, and the request
+fields); `notification_history` is untouched by this endpoint.
+
+Fan-out is a data-only message through the same driver as notify, with
+exactly these flat string fields (no `notification` block):
+
+```json
+{
+  "type": "app_install",
+  "push_id": "<opaque-id>",
+  "apk_url": "https://example.com/app-release.apk",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "package": "com.example.app",
+  "version": "1.2.3",
+  "label": "Test App"
+}
+```
+
+Unknown `type` values must be ignored (not crash) by the app, so the
+backend can add install-adjacent kinds later without app updates.
 
 ## Widget types + envelope
 

@@ -41,7 +41,8 @@ model: `docs/threat-model.md`.
 | `DELETE /api/v1/devices/{id}` | admin session + write-guard proof (missing `X-Requested-With`/CSRF → `403`) | Revoke; idempotent; unknown id → `404 device_not_found` |
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
-| `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`), OR `OPERATOR_API_TOKEN` Bearer (no guard needed) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/app-push` | operator only: admin session + write-guard proof, OR `OPERATOR_API_TOKEN` Bearer (device Bearer → `403`, unknown Bearer → `401`) | `202 {push_id, accepted}`; audit row in `app_pushes`; `notification_history` untouched |
 | `GET /webui/notify` | admin session (else `303 /login`) | Test-notification form (target dropdown from the live registry; revoked devices excluded) + PRG confirmation banner. `accepted:0` renders neutral guidance (pair first), never green |
 | `POST /webui/notify` | admin session + CSRF token | PRG: `303` to `/webui/notify?sent=<id>&accepted=<n>` (whitelisted params); refreshing the confirmation never re-sends |
 
@@ -66,6 +67,7 @@ docker build -t phone-companion-backend:local ./backend
 docker run --rm -p 8080:8080 \
   -e ADMIN_USER=admin -e ADMIN_PASSWORD='at-least-12-chars' \
   -e SESSION_SECRET="$(openssl rand -hex 32)" \
+  -e OPERATOR_API_TOKEN="$(openssl rand -hex 32)" \
   phone-companion-backend:local
 curl localhost:8080/healthz   # {"status":"ok"}
 ```
@@ -143,6 +145,15 @@ htpasswd -bnBC 10 admin 'your-password' | cut -d: -f2
 `SESSION_SECRET`: `openssl rand -hex 32` (min 32 bytes, no `CHANGEME`
 prefix). It signs session cookies AND (domain-separated) CSRF tokens.
 
+`OPERATOR_API_TOKEN`: `openssl rand -hex 32` (min 32 bytes, no
+`CHANGEME` prefix, never committed, never logged). Machine credential
+for operator automation — accepted as `Authorization: Bearer` on
+`POST /api/v1/notify` and `POST /api/v1/app-push` as an alternative to
+the WebUI session. The backend refuses to boot without a strong value
+(fail closed, same as `SESSION_SECRET`). History note: before this
+token existed, automation used a session cookie; the session path keeps
+working unchanged.
+
 Session cookies are `Secure` by default (browsers only send them over
 HTTPS — correct behind the TLS proxy). Plain-HTTP development (loopback /
 LAN without TLS) needs the explicit escape hatch or the browser will not
@@ -213,6 +224,32 @@ package touches client-side FCM artifacts.
   app's post-poll backfill). No device accepting means the handler answers
   `500 driver_unavailable` (fail closed); genuinely zero targets stay
   `202 accepted:0` behind any driver.
+
+### Remote APK install push (`POST /api/v1/app-push`)
+
+Operator-only (session + write guard, or `OPERATOR_API_TOKEN` Bearer;
+device Bearers get `403`). Fans out a data-only `app_install` message
+through the same driver as notify (`NOTIFY_DRIVER`), then records one
+audit row in the `app_pushes` table (`push_id`, timestamp, operator
+identity — `operator-token` or `session:<username>`, never the secret —
+target, and the request fields). No APK bytes are stored or proxied;
+`notification_history` is untouched. Field rules and error codes: see
+`docs/api-contract.md` ("POST /api/v1/app-push").
+
+```sh
+# Placeholder token below — export the real OPERATOR_API_TOKEN value
+# from your secret store instead of pasting it into shell history.
+curl -s -X POST localhost:8080/api/v1/app-push \
+  -H "Authorization: Bearer $OPERATOR_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":{"all":true},
+       "apk_url":"https://example.com/app-release.apk",
+       "sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+       "package":"com.example.app",
+       "version":"1.2.3",
+       "label":"Test App"}'
+# {"push_id":"<opaque-id>","accepted":2}
+```
 
 ## Log viewing
 
