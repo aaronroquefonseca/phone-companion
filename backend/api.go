@@ -28,12 +28,15 @@ import (
 // second layer.
 func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf *webui.CSRFProtection) http.Handler {
 	mux := newBaseMux(DefaultWidgetRegistry(), sessions, csrf)
-	// Implemented (notifications P9): POST /api/v1/notify is operator-only
-	// (WebUI session). 202 {"notification_id","accepted"}: accepted counts
-	// successful per-device sends; accepted:0 still returns 202 and means
-	// no devices matched (unknown device_ids, or an empty registry) — not
-	// an error. See handleNotify.
-	mux.Handle("POST /api/v1/notify", notifyAdminChain(sessions, csrf, handleNotify(db, sender)))
+	// Implemented: POST /api/v1/notify is operator-only (WebUI session or
+	// operator token). 202 {"notification_id","accepted"}: accepted counts
+	// devices queued in the outbox (the delivery leg); accepted:0 means no
+	// devices matched (unknown device_ids, or an empty registry) — not an
+	// error. See handleNotify.
+	mux.Handle("POST /api/v1/notify", operatorAdminChain(sessions, csrf, handleNotify(db, sender)))
+	// Push outbox (no FCM required): operator app-push plus the device
+	// poll/wait/ack surface. See outbox.go / app_push.go.
+	registerPushOutboxRoutes(mux, db, sessions, csrf)
 	// Operator test-notification form (same fan-out pipeline as the API).
 	RegisterNotifyWebUIRoutes(mux, db, sender, sessions, csrf)
 	return withAuthNoStore(mux)

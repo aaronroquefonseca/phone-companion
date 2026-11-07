@@ -134,6 +134,26 @@ func validationError(code, msg string) *ValidationError {
 	return &ValidationError{Code: code, Err: errors.New(msg)}
 }
 
+// ValidateTarget enforces the shared target union used by both
+// POST /api/v1/notify (via Message.Validate) and POST /api/v1/app-push:
+// exactly one of All or a non-empty DeviceIDs, at most MaxDeviceIDs ids.
+// One definition so the two endpoints cannot diverge: callers dedupe
+// first (whitespace/empties dropped, so all:true with empty/absent
+// device_ids lands here as pure All and passes; a non-empty device_ids
+// alongside All fails ambiguous here).
+func ValidateTarget(t Target) error {
+	if t.All && len(t.DeviceIDs) > 0 {
+		return validationError("ambiguous_target", `target must be exactly one of {"all":true} or {"device_ids":[...]}`)
+	}
+	if !t.All && len(t.DeviceIDs) == 0 {
+		return validationError("empty_target", `target must be exactly one of {"all":true} or non-empty {"device_ids":[...]}`)
+	}
+	if len(t.DeviceIDs) > MaxDeviceIDs {
+		return validationError("too_many_targets", "device_ids supports at most 500 entries")
+	}
+	return nil
+}
+
 // ApplyDefaults fills contract defaults for unset optional fields.
 func (m *Message) ApplyDefaults() {
 	if m.Kind == "" {
@@ -152,14 +172,8 @@ func (m *Message) ApplyDefaults() {
 // Note: Channel has a contract default (ApplyDefaults), so by the time
 // Validate runs it is always non-empty — no missing_channel check needed.
 func (m Message) Validate() error {
-	if m.Target.All && len(m.Target.DeviceIDs) > 0 {
-		return validationError("ambiguous_target", `target must be exactly one of {"all":true} or {"device_ids":[...]}`)
-	}
-	if !m.Target.All && len(m.Target.DeviceIDs) == 0 {
-		return validationError("empty_target", `target must be exactly one of {"all":true} or non-empty {"device_ids":[...]}`)
-	}
-	if len(m.Target.DeviceIDs) > MaxDeviceIDs {
-		return validationError("too_many_targets", "device_ids supports at most 500 entries")
+	if err := ValidateTarget(m.Target); err != nil {
+		return err
 	}
 	if utf8.RuneCountInString(m.Kind) > MaxKindLen {
 		return validationError("kind_too_long", "kind must be at most 64 characters")

@@ -36,6 +36,12 @@ type Config struct {
 	// SessionSecret signs WebUI session cookies. $SESSION_SECRET.
 	// Must be at least 32 bytes; enforced by Validate (fail closed).
 	SessionSecret string
+	// OperatorAPIToken is the machine operator API credential.
+	// $OPERATOR_API_TOKEN. Accepted on POST /api/v1/notify and
+	// POST /api/v1/app-push via Authorization: Bearer. Must be at least
+	// 32 bytes; enforced by Validate (fail closed), mirroring the
+	// SESSION_SECRET check. Never logged, never returned.
+	OperatorAPIToken string
 	// DBPath is the sqlite file location. $DB_PATH, default /data/phone-companion.db.
 	DBPath string
 	// WidgetDir is the mounted folder-per-widget directory.
@@ -79,6 +85,10 @@ type Config struct {
 const (
 	// minSessionSecretBytes is the minimum accepted SESSION_SECRET length.
 	minSessionSecretBytes = 32
+	// minOperatorTokenBytes is the minimum accepted OPERATOR_API_TOKEN
+	// length (same bar as SESSION_SECRET: a machine credential must not
+	// be guessable).
+	minOperatorTokenBytes = 32
 	// minBootstrapPasswordLen is the minimum accepted ADMIN_PASSWORD length.
 	minBootstrapPasswordLen = 12
 	// minPasswordHashLen rejects empty/truncated ADMIN_PASSWORD_HASH values.
@@ -97,6 +107,7 @@ func LoadConfig() Config {
 		AdminPasswordHash:        os.Getenv("ADMIN_PASSWORD_HASH"),
 		AdminPassword:            os.Getenv("ADMIN_PASSWORD"),
 		SessionSecret:            os.Getenv("SESSION_SECRET"),
+		OperatorAPIToken:         os.Getenv("OPERATOR_API_TOKEN"),
 		DBPath:                   getenv("DB_PATH", "/data/phone-companion.db"),
 		WidgetDir:                getenv("WIDGET_DIR", "/widgets"),
 		FCMProjectID:             os.Getenv("FCM_PROJECT_ID"),
@@ -146,6 +157,12 @@ func (c Config) Validate() error {
 	}
 	if strings.HasPrefix(c.SessionSecret, "CHANGEME") {
 		return errors.New("SESSION_SECRET still holds a placeholder value")
+	}
+	if len(c.OperatorAPIToken) < minOperatorTokenBytes {
+		return errors.New("OPERATOR_API_TOKEN must be at least 32 bytes long")
+	}
+	if strings.HasPrefix(c.OperatorAPIToken, "CHANGEME") {
+		return errors.New("OPERATOR_API_TOKEN still holds a placeholder value")
 	}
 	if strings.TrimSpace(c.AdminUser) == "" {
 		return errors.New("ADMIN_USER must be set")
