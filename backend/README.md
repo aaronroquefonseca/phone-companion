@@ -41,8 +41,8 @@ model: `docs/threat-model.md`.
 | `DELETE /api/v1/devices/{id}` | admin session + write-guard proof (missing `X-Requested-With`/CSRF → `403`) | Revoke; idempotent; unknown id → `404 device_not_found` |
 | `GET /api/v1/widgets` | device Bearer | `{"widgets":[...]}`; ETag/`If-None-Match` → `304` (shapes: see Widgets below) |
 | `GET /api/v1/widgets/{id}` | device Bearer | Single envelope; foreign secrets → `404` (no oracle); own-secret failures → `500 needs_refresh` (shapes: see Widgets below) |
-| `POST /api/v1/notify` | admin session + write-guard proof (`401` without session; device Bearer → `403`; missing `X-Requested-With`/CSRF → `403`), OR `OPERATOR_API_TOKEN` Bearer (no guard needed) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
-| `POST /api/v1/app-push` | operator only: admin session + write-guard proof, OR `OPERATOR_API_TOKEN` Bearer (device Bearer → `403`, unknown Bearer → `401`) | `202 {push_id, accepted}`; audit row in `app_pushes`; `notification_history` untouched |
+| `POST /api/v1/notify` | operator only: admin session + write-guard proof (`401` without session; any non-operator Bearer → `403`; missing `X-Requested-With`/CSRF → `403`), OR `OPERATOR_API_TOKEN` Bearer (no guard needed) | `202 {notification_id, accepted}`; `accepted:0` is a normal 202 |
+| `POST /api/v1/app-push` | operator only: admin session + write-guard proof, OR `OPERATOR_API_TOKEN` Bearer (any non-operator Bearer → `403`) | `202 {push_id, accepted}`; audit row in `app_pushes` (inserted before fan-out, `accepted` UPDATEd after); `notification_history` untouched |
 | `GET /webui/notify` | admin session (else `303 /login`) | Test-notification form (target dropdown from the live registry; revoked devices excluded) + PRG confirmation banner. `accepted:0` renders neutral guidance (pair first), never green |
 | `POST /webui/notify` | admin session + CSRF token | PRG: `303` to `/webui/notify?sent=<id>&accepted=<n>` (whitelisted params); refreshing the confirmation never re-sends |
 
@@ -228,12 +228,16 @@ package touches client-side FCM artifacts.
 ### Remote APK install push (`POST /api/v1/app-push`)
 
 Operator-only (session + write guard, or `OPERATOR_API_TOKEN` Bearer;
-device Bearers get `403`). Fans out a data-only `app_install` message
+any other Bearer gets `403`). Fans out a data-only `app_install` message
 through the same driver as notify (`NOTIFY_DRIVER`), then records one
 audit row in the `app_pushes` table (`push_id`, timestamp, operator
 identity — `operator-token` or `session:<username>`, never the secret —
-target, and the request fields). No APK bytes are stored or proxied;
-`notification_history` is untouched. Field rules and error codes: see
+target, and the request fields). Audit is insert-before-send: the row
+lands first (a DB failure answers `500` with nothing sent) and the
+`accepted` count is UPDATEd after fan-out. No APK bytes are stored or
+proxied; `notification_history` is untouched. Target note:
+`{"all":true}` absorbs `device_ids` entirely (even an explicit `[]`),
+normalizing to All. Error codes and caps: see
 `docs/api-contract.md` ("POST /api/v1/app-push").
 
 ```sh

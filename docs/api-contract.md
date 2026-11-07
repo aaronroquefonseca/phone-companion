@@ -28,7 +28,9 @@ Two independent schemes; they are never interchangeable:
    an operator endpoint is rejected with `403`.
 
 Unauthenticated responses use `401` (missing/invalid credential) and `403`
-(valid credential, not allowed). Error bodies: `{"error": "<code>"}` with a
+(valid credential, not allowed). On the operator endpoints
+(`POST /api/v1/notify`, `POST /api/v1/app-push`) any Bearer value other
+than the operator token is `403` — only a missing credential is `401`. Error bodies: `{"error": "<code>"}` with a
 stable machine-readable code plus HTTP status. No scheme substitutes for
 another: a device token never authorizes operator endpoints, and a
 session/token mix-up across surfaces fails closed.
@@ -138,9 +140,10 @@ the widgets PR's call.
 
 Enqueues fan-out to devices. Auth (v1): WebUI session (operator) or the
 operator API token (`OPERATOR_API_TOKEN`, sent as
-`Authorization: Bearer <token>`) — never a device token (a request
-carrying a device Bearer token is rejected with `403`, even alongside a
-session; an unknown Bearer value is `401`). The token path needs no
+`Authorization: Bearer <token>`) — never a device token. Any Bearer
+value that is not the operator token is rejected with `403` (no lookup,
+no fallthrough to the session, even alongside one); no credential at all
+is `401`. The token path needs no
 write-guard header; the session path requires `X-Requested-With:
 XMLHttpRequest` (or a session-bound CSRF token), same as the other
 operator POST routes.
@@ -181,9 +184,10 @@ Response `202`: `{"notification_id": "<opaque-id>", "accepted": 2}`.
 Enqueues a remote APK install directive to devices. Auth (v1): WebUI
 session (operator) with the write-guard header, OR the operator API
 token (`OPERATOR_API_TOKEN`, sent as `Authorization: Bearer <token>`,
-no write-guard header needed) — never a device token (a live device
-Bearer is rejected with `403`, even alongside a session; an unknown
-Bearer value is `401`; no credential at all is `401`).
+no write-guard header needed) — never a device token. Any Bearer value
+that is not the operator token is rejected with `403` (no lookup, no
+fallthrough to the session, even alongside one); no credential at all
+is `401`; a session without the write-guard header is `403`.
 
 Request:
 
@@ -198,8 +202,11 @@ Request:
 }
 ```
 
-- `target`: either `{ "all": true }` or `{ "device_ids": ["<id>", ...] }`
-  (exactly one form; empty `device_ids` is `422`). Unknown ids are
+- `target`: `{ "all": true }` wins outright — `device_ids` alongside it
+  are ignored entirely (even a non-empty list), normalizing to All. (This
+  differs from `POST /api/v1/notify`, where the mix is `422`
+  `ambiguous_target`.) Otherwise exactly `{ "device_ids": ["<id>", ...] }`
+  with a non-empty list; empty `device_ids` is `422`. Unknown ids are
   tolerated and skipped, revoked devices are always excluded — same
   semantics as `POST /api/v1/notify`.
 - `apk_url`: required, `https://` only (no other scheme, no credentials
@@ -207,26 +214,35 @@ Request:
 - `sha256`: required, exactly 64 lowercase hex characters (the expected
   digest of the APK bytes; the backend stores the digest, never the APK).
 - `package`: required, reverse-DNS shape (at least one dot, only
-  `[A-Za-z0-9_.]`).
+  `[A-Za-z0-9_.]`), max 256 characters.
 - `version`: optional, max 64 characters; absent rides as an empty
   string in the data message.
 - `label`: required, 1..100 characters (operator display name).
+- The marshaled data message must fit the FCM size budget (same ~3.5KB
+  bound as notify): over-budget requests are `422` `payload_too_long`.
 
 Validation failures are `422` with a machine-readable `{"error":
-"<code>"}` (`empty_target`, `ambiguous_target`, `too_many_targets`,
+"<code>"}` (`empty_target`, `too_many_targets`,
 `missing_apk_url`, `invalid_apk_url`, `missing_sha256`,
 `invalid_sha256`, `missing_package`, `invalid_package`,
-`invalid_version`, `missing_label`, `invalid_label`, `invalid_json` for
-undecodable or unknown-field bodies; oversize bodies are `413`
-`body_too_large`).
+`invalid_version`, `missing_label`, `invalid_label`,
+`payload_too_long`). Undecodable bodies are `400` `invalid_json`
+(unknown fields are tolerated); oversize bodies are `413`
+`body_too_large`.
 
 Response `202`: `{"push_id": "<opaque-id>", "accepted": 2}` where
 `accepted` counts devices the message was actually handed to the
-driver for. `accepted: 0` is a normal `202` when no devices match
-(unknown ids, or an empty registry) — not an error. Every accepted
-push is recorded in the server-side `app_pushes` audit table
-(`push_id`, timestamp, operator identity, target, and the request
-fields); `notification_history` is untouched by this endpoint.
+driver for. `accepted: 0` is a normal `202` strictly when no devices
+resolve (unknown ids, or an empty registry) — not an error. Every
+attempted push is recorded in the server-side `app_pushes` audit table
+(`push_id`, timestamp, operator identity, target, the request fields,
+and the final `accepted` count); `notification_history` is untouched by
+this endpoint. Audit is written BEFORE fan-out: the row is inserted
+first (a DB failure answers `500` with nothing sent), then the driver
+sends, then `accepted` is UPDATEd. A stub driver (`log`/`noop`) facing
+real targets is rejected with `500` `driver_unavailable` and writes no
+audit row at all; a real driver failing every send answers `500`
+`driver_unavailable` with the audit row left at `accepted: 0`.
 
 Fan-out is a data-only message through the same driver as notify, with
 exactly these flat string fields (no `notification` block):

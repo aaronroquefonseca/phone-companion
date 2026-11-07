@@ -41,7 +41,9 @@ services:
       # Machine operator credential for POST /api/v1/notify and
       # POST /api/v1/app-push (Authorization: Bearer). REQUIRED at boot
       # (fail closed like SESSION_SECRET): generate with
-      # `openssl rand -hex 32`, never commit the real value.
+      # `openssl rand -hex 32`, never commit the real value. Any other
+      # Bearer value on those endpoints is 403 (no lookup, no session
+      # fallthrough).
       OPERATOR_API_TOKEN: "CHANGEME-operator-api-token-min-32-bytes"
       DB_PATH: "/data/phone-companion.db"
       WIDGET_DIR: "/widgets"
