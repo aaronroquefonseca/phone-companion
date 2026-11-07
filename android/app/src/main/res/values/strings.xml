@@ -89,6 +89,7 @@
     <string name="app_install_error_mismatch">That file failed verification and was deleted. Nothing was installed — ask the operator to re-send the update.</string>
     <string name="app_install_error_install">Install could not start. Nothing was installed.</string>
     <string name="app_install_error_cancelled">Download cancelled. Nothing was installed.</string>
+    <string name="app_install_error_unknown_sources">Permission to install unknown apps was revoked before install could start. Nothing was installed — re-allow it and try again.</string>
     <string name="app_install_close">Close</string>
 
     <string name="app_install_progress_title">Downloading %1$s…</string>

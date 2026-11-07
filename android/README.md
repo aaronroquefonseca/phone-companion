@@ -159,7 +159,14 @@ channel; unknown kinds keep the generic fallback untouched).
   APK on every path and posts exactly one notification (success /
   plain user-cancelled with NO retry / failure with installer message).
   The download-cancel receiver and the activity race to post at most one
-  terminal state via a TTL claim — never two, never silent, never a retry.
+  terminal state per Install-tap attempt (fresh nonce per tap, carried
+  through the Cancel and installer-result intents — never two, never
+  silent, never a retry, and a re-push is never suppressed). The transfer
+  lives in a retained ViewModel, so rotation neither cancels the
+  download nor spawns a second flow. The unknown-sources grant is
+  re-checked after verify, before commit (revoked → onboarding gate,
+  fail closed); stale `app_push/` entries are purged on prompt/activity
+  entry (24 h retention).
 
 Manual test checklist (needs a paired device + operator backend):
 

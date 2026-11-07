@@ -8,20 +8,15 @@ import android.util.Log
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.phonecompanion.app.R
-import com.phonecompanion.app.notify.AppInstallCancels
-import com.phonecompanion.app.notify.AppInstallCrypto
-import com.phonecompanion.app.notify.AppInstallDownloader
 import com.phonecompanion.app.notify.AppInstallFiles
-import com.phonecompanion.app.notify.AppInstallInstaller
-import com.phonecompanion.app.notify.AppInstallNotifications
 import com.phonecompanion.app.notify.AppInstallPayload
-import com.phonecompanion.app.notify.AppInstallTerminals
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Pre-install UI for a remote APK push.
@@ -34,7 +29,8 @@ import kotlinx.coroutines.withContext
  * Unknown-sources onboarding: when `canRequestPackageInstalls()` is false
  * the Install button stays disabled behind a short explanation plus a
  * deep-link to this app's "Install unknown apps" settings page; the grant
- * is re-checked in [onResume], and install is never attempted without it.
+ * is re-checked in [onResume], and install is never attempted without it
+ * (the flow re-checks again after verify, before commit).
  *
  * Flow (explicit Install tap only): HTTPS download with progress (shared
  * OkHttp stack, 100 MB cap, Cancel action) → SHA-256 verify BEFORE any
@@ -44,14 +40,19 @@ import kotlinx.coroutines.withContext
  * every download/verify terminal state posts exactly one notification (or
  * this in-app state) and never retries.
  *
+ * Rotation-safe: the transfer lives in [AppInstallViewModel] (retained
+ * across config changes), so rotation neither cancels the download nor
+ * spawns a second flow — the recreated Activity just re-collects the
+ * state. Only a real finish (back press / explicit close) cancels.
+ *
  * Logging discipline: package names and push ids only — never APK URLs,
  * hashes, tokens, or credentials.
  */
 class AppInstallActivity : AppCompatActivity() {
 
+    private val vm: AppInstallViewModel by viewModels()
+
     private var payload: AppInstallPayload? = null
-    private var downloading = false
-    private var committed = false
 
     private lateinit var detailView: TextView
     private lateinit var packageView: TextView
@@ -95,32 +96,83 @@ class AppInstallActivity : AppCompatActivity() {
             showInvalid()
             return
         }
+        // Drop superseded/abandoned APKs on entry so a stale file never
+        // sits next to (or is mistaken for) this push.
+        AppInstallFiles.purgeStaleCache(this, parsed.pushId)
         payload = parsed
         renderDetails(parsed)
+        render(vm.uiState.value)
 
         allowButton.setOnClickListener { openUnknownSourcesSettings() }
-        installButton.setOnClickListener { startFlow(parsed) }
+        installButton.setOnClickListener { vm.start(parsed) }
         cancelButton.setOnClickListener {
-            if (downloading) {
-                // Stay open: the flow observes the flag and terminates with
-                // exactly one user-visible state.
-                AppInstallCancels.requestCancel(parsed.pushId)
+            if (vm.isFlowActive) {
+                // Stay open: the flow observes the flag and terminates
+                // with exactly one user-visible state via the funnel.
+                vm.cancel()
             } else {
                 finish()
+            }
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                vm.uiState.collect { render(it) }
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        payload?.let { renderUnknownSources(it) }
+        // The user may return from the Settings grant screen: re-check
+        // the gate (and re-render so a revoked grant disables Install).
+        payload?.let { render(vm.uiState.value) }
     }
 
     override fun onDestroy() {
-        // Abandoning the screen mid-download must not leak the transfer:
-        // the loop observes the flag and terminates with its single state.
-        payload?.let { if (downloading) AppInstallCancels.requestCancel(it.pushId) }
+        // Real finish only (back press / explicit close): abandoning the
+        // screen mid-download cancels the transfer, which funnels its
+        // single terminal state. Config changes (rotation) must NOT
+        // cancel — the ViewModel retains the flow across them.
+        if (isFinishing) vm.cancel()
         super.onDestroy()
+    }
+
+    /** Single render exit: one state → one screen, no flag agreement. */
+    private fun render(state: AppInstallViewModel.InstallUiState) {
+        val p = payload ?: return
+        when (state) {
+            is AppInstallViewModel.InstallUiState.Ready -> {
+                statusView.visibility = View.GONE
+                installButton.isEnabled = true
+            }
+            is AppInstallViewModel.InstallUiState.Downloading -> {
+                statusView.visibility = View.VISIBLE
+                statusView.text = getString(R.string.app_install_downloading, state.percent ?: 0)
+                installButton.isEnabled = false
+            }
+            is AppInstallViewModel.InstallUiState.Verifying -> {
+                statusView.visibility = View.VISIBLE
+                statusView.text = getString(R.string.app_install_verifying)
+                installButton.isEnabled = false
+            }
+            is AppInstallViewModel.InstallUiState.Installing -> {
+                statusView.visibility = View.VISIBLE
+                statusView.text = getString(R.string.app_install_installing)
+                installButton.isEnabled = false
+            }
+            is AppInstallViewModel.InstallUiState.Finished -> {
+                statusView.visibility = View.VISIBLE
+                statusView.text = state.message
+                // Retry is a fresh tap (fresh attempt nonce, fresh claim).
+                installButton.isEnabled = true
+            }
+            is AppInstallViewModel.InstallUiState.HandedToInstaller -> {
+                finish()
+                return
+            }
+        }
+        renderUnknownSources(p)
     }
 
     private fun showInvalid() {
@@ -150,8 +202,8 @@ class AppInstallActivity : AppCompatActivity() {
     private fun renderUnknownSources(p: AppInstallPayload) {
         val granted = packageManager.canRequestPackageInstalls()
         unknownSources.visibility = if (granted) View.GONE else View.VISIBLE
-        installButton.isEnabled = granted && !downloading
         if (!granted) {
+            installButton.isEnabled = false
             unknownSourcesBody.text =
                 getString(R.string.app_install_unknown_sources_body, p.label)
         }
@@ -164,163 +216,6 @@ class AppInstallActivity : AppCompatActivity() {
         )
         runCatching { startActivity(intent) }
     }
-
-    private fun startFlow(p: AppInstallPayload) {
-        // Re-check at tap time: the grant could have been revoked while the
-        // screen was open. Never install without it.
-        if (!packageManager.canRequestPackageInstalls()) {
-            renderUnknownSources(p)
-            return
-        }
-        if (downloading) return
-        downloading = true
-        // Drop any stale cancel flag from an earlier dead flow (the cancel
-        // receiver never clears: the flow owner owns the flag lifecycle, so
-        // a concurrent Cancel tap can never be lost to a clear here — this
-        // runs strictly before the download loop starts observing).
-        AppInstallCancels.clear(p.pushId)
-        installButton.isEnabled = false
-        statusView.visibility = View.VISIBLE
-        statusView.text = getString(R.string.app_install_downloading, 0)
-
-        lifecycleScope.launch {
-            var terminal: (() -> Unit)? = null
-            try {
-                val dest = AppInstallFiles.apkFile(this@AppInstallActivity, p)
-                val download = withContext(Dispatchers.IO) {
-                    AppInstallDownloader.download(p, dest) { read, total ->
-                        val pct = total?.takeIf { it > 0 }?.let { (read * 100 / it).toInt() }
-                        runOnUiThread {
-                            if (downloading) {
-                                statusView.text = getString(
-                                    R.string.app_install_downloading,
-                                    pct ?: 0,
-                                )
-                            }
-                        }
-                        AppInstallNotifications.notifyProgress(this@AppInstallActivity, p, read, total)
-                    }
-                }
-                when (download) {
-                    is AppInstallDownloader.Result.Done -> {
-                        AppInstallNotifications.notifyProgress(
-                            this@AppInstallActivity,
-                            p,
-                            download.bytes,
-                            download.bytes,
-                        )
-                        runOnUiThread { statusView.text = getString(R.string.app_install_verifying) }
-                        val match = withContext(Dispatchers.IO) {
-                            AppInstallCrypto.verifyFile(dest, p.sha256)
-                        }
-                        if (!match) {
-                            runCatching { dest.delete() }
-                            // Package only in logcat: never hashes.
-                            Log.w(TAG, "app_install sha mismatch for ${p.packageName}: refusing")
-                            if (claim(p)) {
-                                AppInstallNotifications.notifyHashMismatch(
-                                    this@AppInstallActivity,
-                                    p.packageName,
-                                    p.pushId,
-                                )
-                            }
-                            terminal = {
-                                statusView.text = getString(R.string.app_install_error_mismatch)
-                            }
-                            return@launch
-                        }
-                        runOnUiThread { statusView.text = getString(R.string.app_install_installing) }
-                        val started = withContext(Dispatchers.IO) {
-                            AppInstallInstaller.commit(this@AppInstallActivity, p, dest)
-                        }
-                        if (!started) {
-                            Log.w(TAG, "app_install commit failed for ${p.packageName}")
-                            if (claim(p)) {
-                                AppInstallNotifications.notifyFailed(
-                                    this@AppInstallActivity,
-                                    p.packageName,
-                                    p.label,
-                                    p.pushId,
-                                    null,
-                                )
-                            }
-                            terminal = {
-                                statusView.text = getString(R.string.app_install_error_install)
-                            }
-                            return@launch
-                        }
-                        // Install phase terminal state belongs to the
-                        // result receiver (exactly one notification).
-                        committed = true
-                        terminal = { finish() }
-                    }
-                    is AppInstallDownloader.Result.TooLarge -> {
-                        Log.w(TAG, "app_install over cap for ${p.packageName}")
-                        if (claim(p)) {
-                            AppInstallNotifications.notifyTooLarge(
-                                this@AppInstallActivity,
-                                p.packageName,
-                                p.pushId,
-                            )
-                        }
-                        terminal = {
-                            statusView.text = getString(R.string.app_install_error_too_large)
-                        }
-                    }
-                    is AppInstallDownloader.Result.Cancelled -> {
-                        if (claim(p)) {
-                            AppInstallNotifications.notifyDownloadCancelled(
-                                this@AppInstallActivity,
-                                p.packageName,
-                                p.pushId,
-                            )
-                        }
-                        terminal = {
-                            statusView.text = getString(R.string.app_install_error_cancelled)
-                        }
-                    }
-                    is AppInstallDownloader.Result.Failed -> {
-                        Log.w(TAG, "app_install download failed for ${p.packageName}")
-                        if (claim(p)) {
-                            AppInstallNotifications.notifyDownloadFailed(
-                                this@AppInstallActivity,
-                                p.packageName,
-                                p.pushId,
-                            )
-                        }
-                        terminal = {
-                            statusView.text = getString(R.string.app_install_error_download)
-                        }
-                    }
-                }
-            } finally {
-                downloading = false
-                AppInstallCancels.clear(p.pushId)
-                // A destroyed flow (back press / destroy mid-download) that
-                // never reached a terminal path still ends exactly once:
-                // the claim only wins when nobody posted yet (claims are
-                // TTL-managed — never cleared here, so the winner's claim
-                // keeps the loser silent).
-                if (!committed && terminal == null && !isFinishing) {
-                    if (claim(p)) {
-                        AppInstallNotifications.notifyDownloadCancelled(
-                            this@AppInstallActivity,
-                            p.packageName,
-                            p.pushId,
-                        )
-                    }
-                }
-                runOnUiThread {
-                    terminal?.invoke()
-                    if (!committed && !isFinishing) renderUnknownSources(p)
-                }
-            }
-        }
-    }
-
-    /** Claims the single terminal post for this flow (see [AppInstallTerminals]). */
-    private fun claim(p: AppInstallPayload): Boolean =
-        AppInstallTerminals.claimTerminal(p.pushId)
 
     companion object {
         private const val TAG = "AppInstallActivity"
