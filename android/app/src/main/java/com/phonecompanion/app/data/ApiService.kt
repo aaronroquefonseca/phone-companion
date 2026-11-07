@@ -47,4 +47,26 @@ interface ApiService {
      */
     @GET("api/v1/widgets")
     suspend fun getWidgetsRaw(): Response<ResponseBody>
+
+    /**
+     * Poll server-offered commands for this device (poll-triggered
+     * install path, no FCM). Requires the device Bearer token.
+     *
+     * Raw body like [getWidgetsRaw]: entries parse through
+     * [com.phonecompanion.app.notify.AppInstallCommands] with the same
+     * lenient-unknown-kinds / strict-known-fields discipline as the
+     * notification parser (unknown kinds ignored, malformed entries
+     * skipped with shape-only logging).
+     */
+    @GET("api/v1/commands")
+    suspend fun getCommandsRaw(): Response<ResponseBody>
+
+    /**
+     * Acknowledge prompted command push ids so the server stops
+     * re-offering them. Idempotent server-side: re-acks are harmless
+     * no-ops, so a failed ack is safely retried on the next poll.
+     * Requires the device Bearer token.
+     */
+    @POST("api/v1/commands/ack")
+    suspend fun ackCommands(@Body request: CommandsAckRequest): Response<ResponseBody>
 }

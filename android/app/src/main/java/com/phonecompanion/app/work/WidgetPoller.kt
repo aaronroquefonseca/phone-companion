@@ -11,6 +11,7 @@ import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.data.WidgetEnvelope
 import com.phonecompanion.app.data.WidgetJson
+import com.phonecompanion.app.notify.AppInstallCommandPoll
 import com.phonecompanion.app.widgets.CompanionWidget
 import com.phonecompanion.app.widgets.WidgetBindingResolver
 import com.phonecompanion.app.widgets.glanceKey
@@ -70,6 +71,17 @@ object WidgetPoller {
             // Transport/storage failure: the next poll retries.
         }
         updateAllWidgets(context)
+        // Poll-triggered install commands (FCM-free install path): same
+        // worker/cadence as the widget poll above — no new periodic work.
+        // Best-effort and silent: never fails the poll, never touches
+        // widgets (posts notifications only), never requires FCM.
+        try {
+            AppInstallCommandPoll.pollOnce(context)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Transport/storage failure: the next poll retries.
+        }
     }
 
     /** One poll fetch outcome, mapped from Retrofit/transport by the caller. */

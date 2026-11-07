@@ -14,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import retrofit2.Response
 import com.phonecompanion.app.data.ApiService
+import com.phonecompanion.app.data.CommandsAckRequest
 import com.phonecompanion.app.data.EnrollRequest
 import com.phonecompanion.app.data.EnrollResponse
 import com.phonecompanion.app.data.EnrollmentStore
@@ -57,6 +58,12 @@ class PairViewModelTest {
             Response.success(FcmTokenUpdateResponse(updated = true))
 
         override suspend fun getWidgetsRaw(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun getCommandsRaw(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun ackCommands(request: CommandsAckRequest): Response<ResponseBody> =
             throw UnsupportedOperationException("not under test")
     }
 

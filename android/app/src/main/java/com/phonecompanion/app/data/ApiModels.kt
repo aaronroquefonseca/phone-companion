@@ -6,8 +6,8 @@ import com.squareup.moshi.Json
  * Wire models for docs/api-contract.md v1.
  *
  * Field names match the contract's snake_case JSON. This file owns the
- * enroll/widgets/notify *shapes*; widget rendering and caching belong to
- * the widgets PR (widgets/, work/), FCM receipt to notify/.
+ * enroll/widgets/notify/commands *shapes*; widget rendering and caching
+ * belong to the widgets PR (widgets/, work/), FCM receipt to notify/.
  */
 
 // --- POST /api/v1/enroll ---
@@ -61,6 +61,18 @@ data class WidgetEnvelope(
     @Json(name = "payload") val payload: Map<String, Any?>? = null,
     // Present only for `secret`; kid of the per-device key that encrypted it.
     @Json(name = "secret_ref") val secretRef: String? = null,
+)
+
+// --- GET /api/v1/commands + POST /api/v1/commands/ack ---
+
+// Poll-triggered command queue (FCM-free install path). The app polls
+// GET with the device Bearer token; each entry is an untyped string map
+// on the wire (see AppInstallCommands: unknown kinds ignored, malformed
+// app_install entries skipped with shape-only logging). The ack body
+// lists push ids the app has prompted for; the server treats it as
+// idempotent (re-acks are harmless no-ops).
+data class CommandsAckRequest(
+    @Json(name = "push_ids") val pushIds: List<String> = emptyList(),
 )
 
 // --- Error bodies: {"error": "<code>"} ---
