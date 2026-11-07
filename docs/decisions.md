@@ -21,6 +21,10 @@ linked docs; this file is the index of decisions.
   `phone-companion-data:/data`), widget definitions at `/widgets`
   (read-only bind). No hardcoded hosts/users/credentials — everything is
   env config with fail-closed boot validation.
+- **State ops**: back up `/data` as a stopped-stack file/volume-tar copy
+  (losing it means re-pairing every phone — keys live only there and in
+  phone storage); schema auto-migrates at boot, rollback is not
+  supported (restore the backup instead). See `docs/setup.md` §§3–4.
 
 ## Pairing
 
@@ -53,6 +57,15 @@ linked docs; this file is the index of decisions.
   fallback for unknown kinds so new kinds don't need app updates);
   Android renders channels/priority/actions, `BigPictureStyle` with
   fail-closed to `BigTextStyle`. Contract: `docs/api-contract.md`.
+- **Secret notifications**: `POST /api/v1/notify` with `"secret": true`
+  (also a WebUI checkbox) per-device encrypts title/body into
+  `title_env`/`body_env` P5 envelopes bound with
+  `crypto.NotifyBinding(notification_id, field)` (fresh nonce per
+  field/device; ~3500B data budget). FCM/log drivers only ever see
+  ciphertext + the `"secret":"true"` flag; history rows are sanitized.
+  Without the flag, notify content is plaintext to the push leg — see
+  `docs/threat-model.md` ("Secret notifications") and
+  `docs/api-contract.md` (envelope rules).
 - **Delivery leg is the poll-based server outbox** (7-day TTL, max 20
   pending/device, `GET /api/v1/outbox` + 300s long-poll
   `GET /api/v1/events/wait` + idempotent ack). FCM (`NOTIFY_DRIVER=fcm`)
@@ -95,6 +108,11 @@ linked docs; this file is the index of decisions.
   (`cloudmessaging.messages.create`). No secrets in repo/logs/chat:
   `google-services.json` gitignored, credentials file must be `0600`,
   logs carry metadata only (never token/key/nonce/plaintext).
+- **Explicit non-goals at v1** (`docs/threat-model.md`): no hiding of
+  notification/pairing metadata, no device attestation (the enroll
+  token is a bearer secret, not attestation), no sqlite at-rest
+  encryption (rely on filesystem/volume controls), no cross-device key
+  history (rotation overwrites).
 
 ## CI / release / F-Droid
 
@@ -129,6 +147,11 @@ linked docs; this file is the index of decisions.
   unauth is 401, revocation takes effect immediately.
 - `docker build ./backend` + boot + `GET /healthz → {"status":"ok"}`
   verified; `gofmt`/`go vet` clean; secrets-pattern scan clean.
+- Android: covered by CI (`assembleDebug`, `testDebugUnitTest`,
+  managed-device ATD API-30 Glance suite) — last green Nov 4 (PR #43);
+  NOT re-verified today: every repo CI run today fails at job startup
+  repo-wide (infra — the workflow file is unchanged since the last
+  green run). See `android/README.md#ci`.
 - Still needs physical hardware (no phones/emulator with Play here):
   camera QR scan, launcher placement per device, production FCM
   delivery, proxy deployment. Manual checklists:
