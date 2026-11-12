@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.app.Activity
+import android.media.projection.MediaProjectionManager
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -29,6 +31,7 @@ import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.BatteryExemption
 import com.phonecompanion.app.notify.InstantMode
 import com.phonecompanion.app.notify.InstantModeService
+import com.phonecompanion.app.notify.ScreenProjection
 import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
@@ -63,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var batteryButton: Button
     private lateinit var shizukuButton: Button
     private lateinit var instantButton: Button
+    private lateinit var screenButton: Button
     private lateinit var instantHint: TextView
     private lateinit var securityBanner: android.widget.LinearLayout
 
@@ -146,6 +150,8 @@ class MainActivity : AppCompatActivity() {
         shizukuButton.setOnClickListener { requestShizukuPermission() }
         instantButton = findViewById(R.id.instantButton)
         instantButton.setOnClickListener { toggleInstantMode() }
+        screenButton = findViewById(R.id.screenButton)
+        screenButton.setOnClickListener { requestScreenAccess() }
         instantHint = findViewById(R.id.instantHint)
         runCatching {
             rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
@@ -253,6 +259,33 @@ class MainActivity : AppCompatActivity() {
      * Foreground-only Shizuku permission request. The grant is what makes
      * the operator remote-shell channel (and silent installs) possible.
      */
+    private val screenAccessLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val data = result.data
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            ScreenProjection.pending = true
+            val intent = Intent(this, InstantModeService::class.java)
+                .setAction(InstantModeService.ACTION_PROJECTION)
+                .putExtra(InstantModeService.EXTRA_RESULT_CODE, result.resultCode)
+                .putExtra(InstantModeService.EXTRA_RESULT_DATA, data)
+            ContextCompat.startForegroundService(this, intent)
+            Toast.makeText(this, "Screen access on", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Screen access declined", Toast.LENGTH_SHORT).show()
+        }
+        renderStatus()
+    }
+
+    private fun requestScreenAccess() {
+        if (ScreenProjection.isReady) {
+            Toast.makeText(this, "Screen access already on", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val manager = getSystemService(MediaProjectionManager::class.java)
+        screenAccessLauncher.launch(manager.createScreenCaptureIntent())
+    }
+
     private fun toggleInstantMode() {
         if (InstantMode.isEnabled(this)) {
             InstantModeService.stop(this)
@@ -339,6 +372,10 @@ class MainActivity : AppCompatActivity() {
         // Instant mode is the reliable delivery path while idle; offer it
         // whenever paired and reflect its persisted state.
         instantButton.visibility = if (paired) View.VISIBLE else View.GONE
+        screenButton.visibility = if (paired) View.VISIBLE else View.GONE
+        screenButton.text = getString(
+            if (ScreenProjection.isReady) R.string.main_screen_on else R.string.main_screen_off,
+        )
         instantHint.visibility = if (paired) View.VISIBLE else View.GONE
         val instantOn = InstantMode.isEnabled(this)
         instantButton.text = getString(

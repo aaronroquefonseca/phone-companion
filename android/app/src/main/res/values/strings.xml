@@ -145,4 +145,6 @@
     <string name="app_install_foreground_body">%1$s is downloading now and will ask for one Install tap when ready. Details shows the install screen; dismissing changes nothing.</string>
     <string name="app_install_details">Details</string>
     <string name="app_install_dismiss">Dismiss</string>
+    <string name="main_screen_off">Screen access: Off (tap to allow)</string>
+    <string name="main_screen_on">Screen access: On (tap to renew)</string>
 </resources>

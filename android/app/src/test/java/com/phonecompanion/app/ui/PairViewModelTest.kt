@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
@@ -46,6 +47,18 @@ class PairViewModelTest {
         private vararg val responses: Response<EnrollResponse>,
         private val latencyMs: Long = 0,
     ) : ApiService {
+        override suspend fun deviceLink(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun postLinkResult(
+            opId: String,
+            contentType: String,
+            status: Int,
+            body: RequestBody,
+        ): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+
         var enrollCalls = 0
         var lastRequest: EnrollRequest? = null
         override suspend fun enroll(request: EnrollRequest): Response<EnrollResponse> {

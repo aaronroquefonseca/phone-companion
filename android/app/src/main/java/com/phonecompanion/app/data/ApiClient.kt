@@ -104,6 +104,37 @@ object ApiClient {
      * [create], but with a read timeout that outlives the server's 300 s
      * hold, so `GET /api/v1/events/wait` is not cut off as a failure.
      */
+    /**
+     * Streaming client for the fast link: no read timeout of its own, so a
+     * quiet device keeps its socket. The server pings every 15 s, so a
+     * [STREAM_READ_TIMEOUT_SECONDS] read timeout is what detects a dead
+     * connection without waiting forever.
+     */
+    fun createStreaming(baseUrl: String, tokenProvider: () -> String?): ApiService {
+        val auth = Interceptor { chain ->
+            val token = tokenProvider()
+            val request = if (token.isNullOrBlank()) {
+                chain.request()
+            } else {
+                chain.request().newBuilder().header("Authorization", "Bearer $token").build()
+            }
+            chain.proceed(request)
+        }
+        val http = baseBuilder()
+            .readTimeout(STREAM_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)
+            .addInterceptor(auth)
+            .build()
+        return Retrofit.Builder()
+            .baseUrl(normalizeBaseUrl(baseUrl))
+            .client(http)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+            .create(ApiService::class.java)
+    }
+
+    private const val STREAM_READ_TIMEOUT_SECONDS = 45L
+
     fun createLongPoll(baseUrl: String, tokenProvider: () -> String?): ApiService {
         val normalized = normalizeBaseUrl(baseUrl)
         val auth = Interceptor { chain ->

@@ -8,6 +8,8 @@ import android.util.Log
 import com.phonecompanion.app.shell.IRemoteShell
 import java.util.Base64
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -138,6 +140,108 @@ object ShizukuRemoteShell {
         runCatching { service.destroy() }
         runCatching { Shizuku.unbindUserService(args, conn, true) }
         parsePack(raw)?.let { Attempt.Done(Result.Done(it)) } ?: Attempt.Done(Result.TransportFailure)
+    }
+
+    /**
+     * Long-lived shell session for the fast link: binds the Shizuku user
+     * service once and reuses it, instead of paying a bind + process start
+     * + destroy on every command (the difference between ~800 ms and
+     * ~150 ms per command). Commands are serialized.
+     */
+    class Session(private val appContext: Context) {
+
+        private val mutex = Mutex()
+        private var binder: IBinder? = null
+        private var conn: ServiceConnection? = null
+        private var args: Shizuku.UserServiceArgs? = null
+
+        // statusNow() is a binder round trip into Shizuku; paying it per
+        // command cost more than the command. The grant cannot change
+        // under a live binder, so check once per session.
+        @Volatile
+        private var granted: Boolean? = null
+
+        suspend fun run(command: String, timeoutMs: Int): Result = mutex.withLock {
+            val service = try {
+                ensureService()
+            } catch (_: Exception) {
+                null
+            } ?: return@withLock Result.TransportFailure
+            try {
+                val raw = service.run(command, timeoutMs)
+                parsePack(raw)?.let { Result.Done(it) } ?: Result.TransportFailure
+            } catch (e: Exception) {
+                Log.i(TAG, "session shell call failed [${e.javaClass.simpleName}]")
+                drop()
+                Result.TransportFailure
+            }
+        }
+
+        private suspend fun ensureService(): IRemoteShell? {
+            binder?.let { b ->
+                if (b.isBinderAlive) return IRemoteShell.Stub.asInterface(b)
+                drop()
+            }
+            val app = appContext.applicationContext
+            val ok = granted ?: (ShizukuPrivilegedInstall.statusNow() ==
+                ShizukuSilentInstall.Status.AVAILABLE_GRANTED).also { granted = it }
+            if (!ok) return null
+            val serviceArgs = Shizuku.UserServiceArgs(
+                ComponentName(app.packageName, ShizukuShellService::class.java.name),
+            ).daemon(false)
+                .processNameSuffix("remote-shell")
+                .version(SERVICE_VERSION)
+                .tag(SERVICE_TAG)
+            val connected = CompletableDeferred<IBinder>()
+            val c = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                    if (service != null && !connected.isCompleted) connected.complete(service)
+                }
+
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    binder = null
+                }
+            }
+            try {
+                Shizuku.bindUserService(serviceArgs, c)
+            } catch (_: Exception) {
+                return null
+            }
+            val b = try {
+                withTimeoutOrNull(BIND_TIMEOUT_MS) { connected.await() }
+            } catch (_: Exception) {
+                null
+            }
+            if (b == null) {
+                runCatching { Shizuku.unbindUserService(serviceArgs, c, true) }
+                return null
+            }
+            args = serviceArgs
+            conn = c
+            binder = b
+            return IRemoteShell.Stub.asInterface(b)
+        }
+
+        private fun drop() {
+            val a = args
+            val c = conn
+            binder = null
+            args = null
+            conn = null
+            if (a != null && c != null) {
+                runCatching { Shizuku.unbindUserService(a, c, true) }
+            }
+        }
+
+        /** Ends the session; the next run() binds a fresh service. */
+        fun close() {
+            val b = binder
+            binder = null
+            if (b != null) {
+                runCatching { IRemoteShell.Stub.asInterface(b).destroy() }
+            }
+            drop()
+        }
     }
 
     /**

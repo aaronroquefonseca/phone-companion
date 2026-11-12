@@ -39,7 +39,7 @@ object AppInstallTransfer {
     fun copyCapped(
         input: InputStream,
         output: OutputStream,
-        maxBytes: Long = AppInstallPayload.MAX_APK_BYTES,
+        maxBytes: Long = Long.MAX_VALUE,
         isCancelled: () -> Boolean = { false },
     ): Outcome {
         return try {

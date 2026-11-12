@@ -24,19 +24,17 @@ class AppInstallTransferTest {
     }
 
     @Test
-    fun `100 MB cap enforced on a fake oversized source`() {
-        // No real 100 MB download: a fake stream that yields 100 MB + 1
-        // bytes of zeros without allocating them. Uses the real 100 MB cap.
+    fun `budget cap enforced on an oversized source`() {
+        // The cap is now the device's free space (see downloadBudget), so
+        // the transfer still has to refuse a stream that exceeds whatever
+        // budget it is given.
+        val budget = 1L * 1024L * 1024L
         val oversized = object : InputStream() {
-            private var remaining = AppInstallPayload.MAX_APK_BYTES + 1
+            private var remaining = budget + 1
             override fun read(): Int = if (remaining-- > 0) 0 else -1
         }
         val out = ByteArrayOutputStream()
-        val outcome = AppInstallTransfer.copyCapped(
-            oversized,
-            out,
-            maxBytes = AppInstallPayload.MAX_APK_BYTES,
-        )
+        val outcome = AppInstallTransfer.copyCapped(oversized, out, maxBytes = budget)
         assertTrue(outcome is AppInstallTransfer.Outcome.TooLarge)
     }
 

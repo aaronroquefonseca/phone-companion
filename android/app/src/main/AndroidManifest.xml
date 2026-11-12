@@ -11,6 +11,7 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- No CAMERA permission: pairing scans with the Play services code
         scanner (GmsBarcodeScanning), which runs Google's own scanner
         activity and needs no app-side camera permission or boilerplate. -->
@@ -147,7 +148,7 @@
         <service
             android:name=".notify.InstantModeService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|mediaProjection" />
         <service
             android:name=".notify.WakeInstallService"
             android:exported="false"
