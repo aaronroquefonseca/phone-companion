@@ -9,6 +9,7 @@ import com.phonecompanion.app.shell.IRemoteShell
 import java.util.Base64
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
@@ -61,10 +62,36 @@ object ShizukuRemoteShell {
         command: String,
         timeoutMs: Int,
         bindTimeoutMs: Long = BIND_TIMEOUT_MS,
-    ): Result = withContext(Dispatchers.IO) {
+    ): Result {
+        // destroy() exits the previous user-service process, and Shizuku can
+        // still be reaping it when the next command binds the same tag. That
+        // surfaces as a transport failure *before* anything ran, so retrying
+        // is safe; a failure after the command was sent never is (at-most-
+        // once), and attempt() distinguishes the two.
+        repeat(2) { attempt ->
+            when (val r = attempt(appContext, command, timeoutMs, bindTimeoutMs)) {
+                Attempt.Retryable -> if (attempt == 0) delay(250)
+                is Attempt.Done -> return r.result
+            }
+        }
+        return Result.TransportFailure
+    }
+
+    private sealed interface Attempt {
+        /** Failed at bind/call time, before the command could have run. */
+        data object Retryable : Attempt
+        data class Done(val result: Result) : Attempt
+    }
+
+    private suspend fun attempt(
+        appContext: Context,
+        command: String,
+        timeoutMs: Int,
+        bindTimeoutMs: Long,
+    ): Attempt = withContext(Dispatchers.IO) {
         val app = appContext.applicationContext
         if (ShizukuPrivilegedInstall.statusNow() != ShizukuSilentInstall.Status.AVAILABLE_GRANTED) {
-            return@withContext Result.NotGranted
+            return@withContext Attempt.Done(Result.NotGranted)
         }
         val args = Shizuku.UserServiceArgs(
             ComponentName(app.packageName, ShizukuShellService::class.java.name),
@@ -87,7 +114,7 @@ object ShizukuRemoteShell {
         try {
             Shizuku.bindUserService(args, conn)
         } catch (_: Exception) {
-            return@withContext Result.TransportFailure
+            return@withContext Attempt.Retryable
         }
         val binder = try {
             withTimeoutOrNull(bindTimeoutMs) { connected.await() }
@@ -96,19 +123,21 @@ object ShizukuRemoteShell {
         }
         if (binder == null) {
             runCatching { Shizuku.unbindUserService(args, conn, true) }
-            return@withContext Result.TransportFailure
+            return@withContext Attempt.Retryable
         }
         val service = IRemoteShell.Stub.asInterface(binder)
         val raw = try {
             service.run(command, timeoutMs)
         } catch (e: Exception) {
+            // The command may have run before the call died: at-most-once
+            // forbids a retry here.
             Log.i(TAG, "shell call failed [${e.javaClass.simpleName}]")
             runCatching { Shizuku.unbindUserService(args, conn, true) }
-            return@withContext Result.TransportFailure
+            return@withContext Attempt.Done(Result.TransportFailure)
         }
         runCatching { service.destroy() }
         runCatching { Shizuku.unbindUserService(args, conn, true) }
-        parsePack(raw)?.let { Result.Done(it) } ?: Result.TransportFailure
+        parsePack(raw)?.let { Attempt.Done(Result.Done(it)) } ?: Attempt.Done(Result.TransportFailure)
     }
 
     /**
