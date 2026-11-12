@@ -33,3 +33,6 @@ android/app/google-services.json
 Thumbs.db
 .idea/
 .vscode/
+
+# Local scratch widget used for manual testing (never shipped).
+backend/widgets/test-note/
