@@ -7,10 +7,10 @@ compatibility: Needs adb access to the device, or the Phone Companion app link (
 
 # Phone Companion
 
-One backend serves every job: notifications, app pushes, and a shell channel
-that runs as UID 2000 — exactly `adb shell`. The same secrets discipline
-applies everywhere: reference credentials only as `"$(cat <path>)"`, never
-print, log, quote, or commit their values.
+One backend serves every job: notifications, app pushes, and two shell
+channels that both run as UID 2000 — exactly `adb shell`. The same secrets
+discipline applies everywhere: reference credentials only as
+`"$(cat <path>)"`, never print, log, quote, or commit their values.
 
 ## 0. Configure once
 
@@ -72,8 +72,8 @@ Session end, always, including on failure: restore the saved timeout.
 
 - **Shell work** (logcat, files, settings, package queries): screen state is
   irrelevant; success here says nothing about the screen.
-- **Anything holding a connection open** (instant-mode long poll, streamed
-  transfer, foreground install): the screen must stay **awake for the whole
+- **Anything holding a connection open** (a link session, streamed transfer,
+  foreground install): the screen must stay **awake for the whole
   operation**. Screen-off sleeps the radio and lets OEM power management
   freeze background apps, so the "idle" connection dies quietly.
 - **Screen work** (`screencap` whose content matters, `uiautomator dump`,
@@ -91,7 +91,71 @@ If it is not `Awake` after the wake key, stop and ask the device owner.
 
 ## 3. Reaching the device
 
-### adb — first choice: fast and binary-safe
+### The fast link — default for anything interactive
+
+A persistent, device-initiated stream. One round trip in, the payload back, no
+base64 and no 64 KB ceiling. It is a **session**: open it when you start
+working and close it when you stop, so no socket is held while idle.
+
+```sh
+# open a session (30-3600 s). It wakes the app over FCM; "online":true means it was already up.
+curl -s -X POST "$PC/api/v1/link/start" \
+  -H "Authorization: Bearer $(cat "$TOKEN")" -H 'Content-Type: application/json' \
+  -d '{"device_id":"<id>","ttl_s":900}'
+# -> {"online":false,"ttl_s":900,"wake_sent":true}   ready in ~2-3 s
+
+# one blocking call per operation; the body IS the result
+curl -s -X POST "$PC/api/v1/exec" \
+  -H "Authorization: Bearer $(cat "$TOKEN")" -H 'Content-Type: application/json' \
+  -d '{"device_id":"<id>","kind":"screenshot","args":{"width":540,"quality":60}}' \
+  -o shot.jpg
+
+# close it: the device stops the service and drops the link in <1 s
+curl -s -X POST "$PC/api/v1/link/stop" \
+  -H "Authorization: Bearer $(cat "$TOKEN")" -H 'Content-Type: application/json' \
+  -d '{"device_id":"<id>"}'
+```
+
+Kinds and args:
+
+| kind | args | returns |
+|---|---|---|
+| `screenshot` | `{"width":540,"quality":60}`, or `{"full":true}` | image/jpeg (PNG for full) |
+| `file` | `{"path":"/sdcard/…","width":1600,"quality":80}` — image downscale is optional | the bytes, original content type unless downscaled |
+| `logs` | `{"lines":200,"buffer":"main","filter":"-s TAG"}` | text/plain |
+| `shell` | `{"command":"id -u","timeout_ms":30000}` | `{"exit_code","stdout","stderr","truncated"}` |
+
+Offline (no session) answers `503 device_offline` immediately, `504
+device_timeout` if the device does not answer within `wait_ms`.
+
+Measured on a Note 20 Ultra over the public endpoint (~75 ms RTT):
+
+| operation | time |
+|---|---|
+| session open | ~2-3 s (FCM wake) |
+| screenshot 540 px | **230-350 ms** |
+| shell command | ~280 ms |
+| logs, 200 lines | ~550 ms |
+| photo 2.5 MB | ~2.1 s (professional phone uplink: ~1.2 MB/s) |
+| same photo at 1600 px | ~0.9 s (174 KB, downscaled on device) |
+| close session → 503 | <1 s |
+
+**Fast screenshots need screen-capture consent**, one system dialog per app
+process: the app's "Screen access" button → "Start now". The agent can tap
+both through the link. Without consent (or after the phone sleeps, which
+invalidates the projection) screenshots fall back to `screencap` at ~750 ms.
+So for a working session: keep the screen awake, grant access once, and the
+fast path holds.
+
+Two artifact rules learned the hard way:
+
+- A capture taken mid-transition can composite two screens. Settle ~200 ms
+  after an input, or capture twice.
+- `input swipe` is ~50% reliable in browsers; `input motionevent DOWN/MOVE…/UP`
+  lands far more often, and a board that did not change means "resend", not
+  "the app ignores input".
+
+### adb — when a cable is attached
 
 ```sh
 adb devices
@@ -102,37 +166,30 @@ adb -s <serial> logcat -d -s <TAG>
 adb -s <serial> install -r app.apk
 ```
 
-### App-link shell — when there is no cable
+### Outbox shell — fallback only
+
+`POST /api/v1/shell` + `GET /api/v1/shell/{id}`: same privilege, but queued
+and polled, ~1.5 s per command, **64 KB of text per result** (base64 and slice
+binaries at ~48 KB), and `timeout_ms` 1 000-120 000. Use it when the link
+cannot start (no FCM), never for routine work.
 
 ```sh
-POST /api/v1/shell  {"device_id","command","timeout_ms"}   -> {"command_id"}
-GET  /api/v1/shell/{command_id}   -> pending | done {exit_code,stdout,stderr}
-```
-
-`timeout_ms` 1 000–120 000 (default 30 000). Commands are at-most-once.
-
-- **64 KB of text per result.** Binaries must be base64'd and sliced (~48 KB
-  per slice, 1–3 s each): a 1.5 MB photo is 40+ round trips. Fine for a
-  one-off, never for routine work.
-- **`done` with empty stdout and `stderr: shell_transport_failure`** means the
-  Shizuku bind raced and *nothing ran*: retry once. Fixed in app 0.26.0+.
-- Don't `am force-stop` the companion app while commands are in flight; that
-  kills the poll and queued results come back empty.
-
-```sh
-# chunked pull
 base64 file | tr -d '\n' > /sdcard/_pull.b64
 wc -c < /sdcard/_pull.b64
 tail -c +<offset> /sdcard/_pull.b64 | head -c 48000
 ```
 
+Two known edges: a `done` with empty stdout and `stderr:
+shell_transport_failure` means the Shizuku bind raced and *nothing ran* —
+retry once (fixed in app 0.26.0+); and do not `am force-stop` the companion
+app while commands are in flight.
+
 ### Delivery modes (why "it didn't arrive")
 
 - **FCM wake** — seconds while the screen is on; some OEMs (Samsung among
   them) hold data messages while the screen is off.
-- **Instant mode** — opt-in in the app, a held long poll: ~1 s regardless of
-  screen state, at the cost of one persistent notification. It survives
-  reboot and app updates on 0.25.0+.
+- **Instant mode** — the user's always-on toggle; holds the link permanently.
+  The agent-driven session above is the battery-friendly equivalent.
 - **Poll-only** (no FCM token) — hourly, or manual Refresh in the app.
 
 ## 4. Send a notification
@@ -161,7 +218,8 @@ Check in order:
    note. Fix is uninstall-first, then fresh install + re-pair — say so upfront
    when continuity is in doubt.
 3. `apk_url` https ≤2048, `sha256` exactly 64 lowercase hex, `package`
-   reverse-DNS, APK under 100 MB.
+   reverse-DNS. There is **no size cap**: the download budget is the device's
+   free space minus a 256 MB reserve.
 
 Getting a URL, ranked:
 
@@ -171,7 +229,8 @@ Getting a URL, ranked:
   directory, keep it ephemeral, and restore the host's original state when
   done. Never store the hosting credentials.
 - **GitHub release** — `gh release upload` when it should live permanently.
-  Never commit APKs.
+  Never commit APKs. Use a **fresh tag per build**; `--clobber` on an existing
+  tag can serve the previous asset from the CDN and fail the hash check.
 
 There is no backend upload endpoint: app-push is URL-only by design. Do not
 invent one.
@@ -193,30 +252,30 @@ On device: silent privileged install when Shizuku is granted (no dialog),
 otherwise progress → verified commit → system Install dialog (one press).
 Missing unknown-sources grant routes to onboarding once. Failures post Retry
 (transient) or App-info (signature) — never re-push blindly on a deterministic
-failure.
+failure. Downloads live in `cacheDir/app_push/<pushId>.apk`; deleted on
+success, cancel, or failure; a verified APK whose install failed is kept for
+retry and swept after 24 h.
 
 ## 6. Look at the device
 
 ```sh
-# screenshot (adb)
-adb -s <serial> exec-out screencap -p > shot.png
-# screenshot (app link): screencap -p /sdcard/shot.png, then chunk-pull it
+# screenshot (fast link)
+…/exec kind=screenshot {"width":540,"quality":60}   # -> image/jpeg
 
-# newest photos, newest first
+# newest photos, newest first (run through kind=shell)
 content query --uri content://media/external/images/media \
   --projection _id:_data:date_added:_size --sort "date_added DESC"
-# skip your own screenshots; the newest DCIM/Camera row is the real photo
+# then kind=file {"path":"<_data>","width":1600} to fetch it small, or no width for the original
 
 # logs
-logcat -d -t 5                                   # recent, system-wide
-logcat -d --pid=$(pidof <pkg>) -t 5              # one app
-logcat -d -b crash -t 50 | grep -E "FATAL|Process:"
+kind=logs {"lines":200}                        # main buffer, ~550 ms
+kind=logs {"lines":200,"buffer":"crash"}       # crash buffer
+kind=shell {"command":"logcat -d --pid=$(pidof <pkg>) -t 5"}
 
 # UI: read, then act
-uiautomator dump /sdcard/ui.xml && cat /sdcard/ui.xml
-input tap 653 795
-input swipe 950 1150 150 1150 120
-input text 'hello'
+kind=shell {"command":"uiautomator dump /sdcard/ui.xml && cat /sdcard/ui.xml"}
+kind=shell {"command":"input tap 653 795"}
+kind=shell {"command":"input motionevent DOWN 900 1300; input motionevent MOVE 500 1300; input motionevent UP 200 1300"}
 ```
 
 Element positions only mean something if the layout is stable: re-read after
@@ -238,8 +297,10 @@ for r in db.execute(\"SELECT device_id, status FROM outbox WHERE push_id='<id>'\
 "
 ```
 
-`pending` = waiting for poll, `received` = fetched + acked. `received` without
-progress on device means the app side swallowed it — say so and stop.
+The database runs in WAL mode: copy `-wal` alongside the `.db` or recent rows
+are missing. `pending` = waiting for poll, `received` = fetched + acked.
+`received` without progress on device means the app side swallowed it — say
+so and stop.
 
 Report: target name(s), id (first 8), accepted count, file/version where
 relevant, what to expect on device (instant vs next poll). No credentials, no
@@ -254,6 +315,8 @@ tokens, no device secrets — ever.
   secure lock, ask the device owner to unlock once; never disable their PIN.
 - Never infer a working screen from a working shell — prove it with a real
   read and a state that changed.
+- Never leave a link session open when you stop working: `link/stop`, and
+  restore the screen timeout.
 - Never re-push blindly after a deterministic failure.
 
 ## Installing this skill
