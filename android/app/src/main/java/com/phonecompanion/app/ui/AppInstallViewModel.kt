@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import com.phonecompanion.app.R
 import com.phonecompanion.app.notify.AppInstallCrypto
 import com.phonecompanion.app.notify.AppInstallDownloader
+import com.phonecompanion.app.notify.AppInstallFallback
 import com.phonecompanion.app.notify.AppInstallFiles
 import com.phonecompanion.app.notify.AppInstallFlow
 import com.phonecompanion.app.notify.AppInstallInstaller
@@ -149,6 +150,22 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         if (outcome is AppInstallFlow.Outcome.Committed) {
             // Install phase terminal state belongs to the result receiver.
             _uiState.value = InstallUiState.HandedToInstaller
+            return
+        }
+        if (outcome is AppInstallFlow.Outcome.CommitFailed) {
+            // Last resort instead of the FAILED terminal: re-verify + open
+            // the cached APK in the system installer (VIEW fallback, same
+            // funnel as the auto-download flow). Only when the fallback
+            // cannot start does the FAILED terminal post.
+            val app = getApplication<Application>()
+            val opened = AppInstallFallback.finishCommitFailed(app, payload, attempt, outcome)
+            _uiState.value = InstallUiState.Finished(
+                if (opened) {
+                    app.getString(R.string.app_install_fallback_body, payload.label)
+                } else {
+                    app.getString(R.string.app_install_error_install)
+                },
+            )
             return
         }
         val kind = with(AppInstallFlow) { outcome.terminalKind() }

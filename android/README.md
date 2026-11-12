@@ -202,7 +202,14 @@ The FCM token upload paths stay as-is for the notification feature.
   neither cancels the download nor spawns a second flow. The
   unknown-sources grant is re-checked after verify, before commit
   (revoked → onboarding gate, fail closed); stale `app_push/` entries
-  are purged on download-start/activity entry (24 h retention).
+  are purged on download-start/activity entry (24 h retention). When the
+  session commit itself throws (installer unavailable on some devices),
+  the flow re-verifies the cached APK and opens it in the system's package
+  installer via an `ACTION_VIEW` FileProvider intent as a last resort (the
+  VIEW returns no result, so an informational notification replaces the
+  failure note — complete the install there; the verified APK stays cached
+  until the 24 h purge). Signature-mismatch failures never take this path:
+  retrying the same bytes is futile, so they still offer App-info.
 
 Manual test checklist (needs a paired device + operator backend; FCM
 steps only for the instant-wake path):

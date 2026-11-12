@@ -132,6 +132,15 @@ object AppInstallAutoDownload {
                 // flow instead of committing behind the user's back.
                 AppInstallNotifications.notifyGrant(app, payload, attempt)
             }
+            is AppInstallFlow.Outcome.CommitFailed -> {
+                // Last resort instead of the FAILED terminal: re-verify +
+                // open the cached APK in the system installer (VIEW
+                // fallback). Only when the fallback cannot start does the
+                // existing FAILED terminal post. The command stays acked
+                // (acked at download start) — nothing re-offers, nothing
+                // loops.
+                AppInstallFallback.finishCommitFailed(app, payload, attempt, outcome)
+            }
             else -> {
                 val kind = with(AppInstallFlow) { outcome.terminalKind() }
                 if (kind != null) {
