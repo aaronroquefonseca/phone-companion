@@ -243,6 +243,14 @@ dependencies {
     // (see AndroidManifest.xml) is mandatory or binder acquisition fails.
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
+    // --- Hidden-API access for the Shizuku-privileged installer path ---
+    // Apache-2.0, version-pinned (6.1 is the newest release compatible
+    // with this project's compileSdk 34 ceiling — newer releases require
+    // 37+). Used ONLY to open the platform PackageInstaller/IPackageManager
+    // surface (hidden constructor + service interfaces) behind the
+    // Shizuku-held binder — plain reflection, no bundled native code. The
+    // dialog install path and every other feature work without it.
+    implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:6.1'
 
     // --- Tests ---
     testImplementation 'junit:junit:4.13.2'

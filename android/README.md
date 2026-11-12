@@ -250,14 +250,31 @@ steps only for the instant-wake path):
 
 When the Shizuku manager app is running and this app has been granted
 Shizuku permission, verified APKs commit silently — no system install
-confirmation, no unknown-sources grant needed (shell `pm install` needs
-none, like `adb install`). Everything else stays exactly as above: the
-progress notification posts first and grows the same way, SHA-256 is
-verified BEFORE anything installs (mismatch = hard refuse, same
-notification), and terminal notifications are the same success/failure
-copy (the raw `pm` output feeds the existing cause-aware mapping, so a
-signature mismatch still offers App-info with no Retry, and anything else
-still offers Retry from the kept verified cache).
+confirmation, no unknown-sources grant needed (privileged installer
+sessions need none, like `adb install`). Shell `pm` is deliberately NOT
+used: it is fragile across ROMs (user targeting, output parsing, file
+visibility). Instead the app builds a `PackageInstaller` on the Shizuku-
+held `package` system-service binder (hidden-API access via the
+Apache-2.0 HiddenApiBypass lib, version-pinned — reflection only,
+written for this call path), creates a MODE_FULL_INSTALL session
+(replace-existing semantics) for the verified staged APK, writes the
+APK bytes into the session from our own storage, and commits. The commit
+carries a status receiver that is only ever observed — a user-
+confirmation intent is never launched on this path, ever. The commit
+call alone is never trusted: the installed package's versionCode is read
+back afterwards and must equal the staged APK's versionCode (parsed once
+before commit and passed through), or the silent attempt fails over.
+Everything else stays exactly as above: the progress notification posts
+first and grows the same way, SHA-256 is verified BEFORE anything
+installs (mismatch = hard refuse, same notification), and terminal
+notifications are the same success copy. An unverified silent attempt
+(mismatch or absent version after the grace window, binder trouble)
+falls back to the existing chain — dialog PackageInstaller path →
+ACTION_VIEW fallback → terminal — so a signature mismatch still reaches
+its App-info screen with no Retry via the dialog result mapping, and
+anything transient still offers Retry from the kept verified cache.
+Unknown installer states fail closed to the dialog path; nothing ever
+silent-retries in a loop.
 
 User setup (all in the pre-install screen — nothing auto-starts, no new
 periodic work, no boot receiver):
@@ -281,19 +298,25 @@ Behavior matrix:
   enable lives).
 - Shizuku missing / pre-v11 / binder dead / permission denied →
   current dialog flow, unchanged (grant gate included).
-- Binder dies mid-install or staging is impossible → falls back to the
-  dialog flow from the cached verified APK; transport trouble never fails
-  the install attempt.
+- Binder dies mid-install, staging is impossible, the staged APK is
+  unparseable, or the post-commit version read-back mismatches/is
+  absent after the grace window → falls back to the dialog flow from
+  the cached verified APK; silent trouble never fails the install
+  attempt and never loops.
 - A cancelled attempt never commits behind the user (checked before
   staging, same as the dialog tail).
 
-Plumbing notes: shell (UID 2000 over ADB) cannot read the app's private
-dirs, so the verified APK is staged to the app-specific external dir
-(`getExternalFilesDir("apk")/<pushId>.apk` — not media-scanned, no extra
-permissions). The staged copy is deleted after every silent terminal and
-covered by the same 24 h stale purge as the cache. The client library
-(`dev.rikka.shizuku:api/provider:13.1.5`, Apache-2.0) ships with the app;
-only the manager app is a separate install.
+Plumbing notes: the verified APK is staged to the app-specific external
+dir (`getExternalFilesDir("apk")/<pushId>.apk` — not media-scanned, no extra
+permissions) so the privileged session writer reads it from our own
+storage; no cross-uid readability is required. The staged copy is deleted
+after every silent terminal and covered by the same 24 h stale purge as
+the cache. The client library
+(`dev.rikka.shizuku:api/provider:13.1.5`, Apache-2.0) plus HiddenApiBypass
+(`org.lsposed.hiddenapibypass:hiddenapibypass:6.1`, Apache-2.0,
+version-pinned, reflection only) ship with the app; only the Shizuku
+manager app is a separate install. The privileged installer targets the
+current user only — work-profile installs are future work.
 
 Manual test checklist (needs a paired device + the Shizuku app running;
 cannot be CI-verified — no emulator runs Shizuku):
@@ -309,6 +332,10 @@ cannot be CI-verified — no emulator runs Shizuku):
 5. Negative paths: wrong `sha256` → blocked error, nothing installed
    (verify-before-stage holds); stop the Shizuku server mid-download →
    falls back to the system dialog from the verified cache.
+6. Version check: push an APK whose install cannot land (e.g. a build
+   that will not install, or kill the Shizuku server mid-install) →
+   NO silent success is posted; the dialog path (then ACTION_VIEW, then
+   terminal) owns the outcome exactly as without Shizuku.
 
 ### Pushing this app's own release APK (self-update)
 

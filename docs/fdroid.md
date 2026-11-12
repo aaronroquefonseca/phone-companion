@@ -14,7 +14,10 @@ day. This note records exactly what remains so enabling later is trivial.
   `security-crypto` — all Apache 2.0), plus the Shizuku silent-install
   client lib (`dev.rikka.shizuku:api/provider:13.1.5`, Apache-2.0 — the
   Shizuku manager app itself stays a separate user install, never
-  bundled), BUT three proprietary Google Play
+  bundled) and HiddenApiBypass
+  (`org.lsposed.hiddenapibypass:hiddenapibypass:6.1`, Apache-2.0,
+  version-pinned, reflection-only, used solely for the privileged
+  installer session path), BUT three proprietary Google Play
   services deps remain in `android/app/build.gradle`:
   - `com.google.firebase:firebase-messaging` (via BoM `33.2.0`)
   - `com.google.android.gms:play-services-mlkit-barcode-scanning`

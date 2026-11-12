@@ -114,19 +114,6 @@ object AppInstallAutoDownload {
                     attempt,
                 )
             }
-            is AppInstallFlow.Outcome.SilentFailed -> {
-                // Raw pm output as detail: the existing cause-aware
-                // mapping renders it (signature → App-info, else Retry
-                // from the kept verified cache).
-                AppInstallNotifications.notifyTerminal(
-                    app,
-                    AppInstallFlow.TerminalKind.FAILED,
-                    AppInstallNotifications.TerminalTarget.from(payload),
-                    attempt,
-                    outcome.detail,
-                    payload,
-                )
-            }
             is AppInstallFlow.Outcome.UnknownSourcesRevoked -> {
                 // Verified APK stays cached; route to the one-time grant
                 // flow instead of committing behind the user's back.
@@ -205,27 +192,34 @@ object AppInstallAutoDownload {
          * Silent branch (Shizuku): availability is probed at commit time —
          * a command arriving while backgrounded goes silent only when the
          * grant is already in place; permission is never requested here
-         * (foreground-only). Staging copies the verified APK where the
-         * shell UID can read it (app-private dirs are unreadable to
-         * shell); the flow deletes the staged copy after every silent
-         * terminal, and the 24 h purge bounds abandoned copies.
+         * (foreground-only). The privileged session writer reads the
+         * staged bytes from our own storage; the flow deletes the staged
+         * copy after every silent terminal, and the 24 h purge bounds
+         * abandoned copies.
          */
         override fun silentStatus(): ShizukuSilentInstall.Status =
-            ShizukuShell.statusNow()
+            ShizukuPrivilegedInstall.statusNow()
 
-        override suspend fun stageForShell(verifiedApk: File): File? =
+        override suspend fun stagePrivileged(verifiedApk: File): File? =
             withContext(Dispatchers.IO) {
-                try {
-                    val staged = AppInstallFiles.stagedApkFile(app, pushId) ?: return@withContext null
-                    staged.parentFile?.mkdirs()
-                    verifiedApk.copyTo(staged, overwrite = true)
-                    staged.takeIf { it.isFile }
-                } catch (_: Exception) {
-                    null
-                }
+                ShizukuPrivilegedInstall.stagePrivileged(app, pushId, verifiedApk)
             }
 
-        override suspend fun shellCommit(stagedApk: File): ShizukuSilentInstall.ShellOutcome =
-            ShizukuShell.installOnce(app, stagedApk.absolutePath)
+        override suspend fun stagedVersionCode(stagedApk: File): Long? =
+            withContext(Dispatchers.IO) {
+                ShizukuPrivilegedInstall.stagedVersionCode(app, stagedApk)
+            }
+
+        override suspend fun privilegedCommit(
+            stagedApk: File,
+            packageName: String,
+        ): ShizukuSilentInstall.PrivilegedOutcome =
+            ShizukuPrivilegedInstall.commitPrivileged(app, stagedApk, packageName, attempt)
+
+        override suspend fun awaitInstalledVersion(
+            packageName: String,
+            expectedVersionCode: Long,
+        ): Long? =
+            ShizukuPrivilegedInstall.awaitInstalledVersion(app, packageName, expectedVersionCode)
     }
 }

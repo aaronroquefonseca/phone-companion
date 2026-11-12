@@ -133,8 +133,6 @@ class AppInstallFallbackTest {
             AppInstallFlow.Outcome.HashMismatch,
             AppInstallFlow.Outcome.UnknownSourcesRevoked,
             AppInstallFlow.Outcome.SilentInstalled,
-            AppInstallFlow.Outcome.SilentFailed(null),
-            AppInstallFlow.Outcome.SilentFailed("INSTALL_FAILED_INSUFFICIENT_STORAGE"),
         )
         for (outcome in others) {
             assertFalse(

@@ -1,12 +1,35 @@
 package com.phonecompanion.app.notify
 
 /**
- * Shizuku silent-install gateway: classification + shell-result parsing.
+ * Shizuku silent-install gateway: classification + verification decision.
  *
- * Pure JVM (zero Android imports): the live Shizuku statics live behind
- * [Probe] (implemented by `ShizukuProbe` on the Android side), so the
- * status model, the ask-once affordance rule, and the result packing are
+ * Pure JVM (zero Android imports): the live Shizuku statics stay behind
+ * [Probe] (implemented on the Android side), so the status model, the
+ * ask-once affordance rule, and the install-verified decision are
  * unit-testable without a device.
+ *
+ * Mechanism (Android side, `ShizukuPrivilegedInstall`): the `package`
+ * system-service binder fetched through Shizuku is wrapped so calls run
+ * with shell privilege; a `PackageInstaller` built on that binder creates
+ * a MODE_FULL_INSTALL session (replace-existing semantics) for the
+ * verified staged APK, writes the APK bytes into the session from our
+ * own storage, and commits. The commit carries a status receiver whose
+ * broadcast is only ever observed — a user-confirmation intent is never
+ * launched on this path, ever. Shell `pm` is deliberately NOT used: it
+ * is fragile across ROMs (user targeting, output parsing, file
+ * visibility), where the privileged session path is the proven one.
+ *
+ * Verification (never trust the commit call alone): after commit the
+ * installed package's versionCode (read back via PackageManager) must
+ * equal the staged APK's versionCode (parsed once before commit and
+ * passed through). Mismatch or absent after the grace window is a
+ * failure of the silent attempt — the caller falls back to the existing
+ * chain (dialog PackageInstaller path → ACTION_VIEW → terminal), exactly
+ * as for transport trouble. Unknown installer states fail closed to the
+ * dialog path, never silent-retry loops.
+ *
+ * Multi-user: the privileged installer targets the current user only.
+ * Work-profile installs are future work, not implemented here.
  *
  * Status model:
  * - [Status.UNAVAILABLE] — Shizuku pre-v11 (unsupported) or no live
@@ -15,7 +38,7 @@ package com.phonecompanion.app.notify
  *   foreground UI may offer the one-time enable (see
  *   [shouldOfferRequest]); background receipts stay on the dialog path.
  * - [Status.AVAILABLE_GRANTED] — binder alive + permission granted: a
- *   verified APK may commit silently via the shell UserService.
+ *   verified APK may commit silently via the privileged session.
  *
  * Permission-request discipline (Shizuku semantics, which are INVERTED
  * from AOSP runtime permissions): `shouldShowRationale == true` means the
@@ -24,11 +47,11 @@ package com.phonecompanion.app.notify
  * dialog flow proceeds silently (ask once, never nag).
  *
  * Logging discipline: package names only — never APK paths, URLs, hashes,
- * tokens, or shell output.
+ * tokens, or installer output.
  */
 object ShizukuSilentInstall {
 
-    /** Shell-install availability for one install attempt. */
+    /** Silent-install availability for one install attempt. */
     enum class Status {
         /** Pre-v11 or binder dead: dialog path, unchanged. */
         UNAVAILABLE,
@@ -42,7 +65,7 @@ object ShizukuSilentInstall {
 
     /**
      * Android edge of the gateway (Shizuku statics). The flow hosts
-     * implement the install half; [ShizukuProbe] implements the
+     * implement the install half; `ShizukuProbe` implements the
      * classification half against the live binder.
      */
     interface Probe {
@@ -62,21 +85,42 @@ object ShizukuSilentInstall {
         fun shouldShowRationale(): Boolean
     }
 
-    /** Outcome of one shell `pm install` attempt. */
-    sealed interface ShellOutcome {
-        /** pm exited (0 = installed); [output] is capped display detail. */
-        data class Finished(val exitCode: Int, val output: String) : ShellOutcome
+    /** Outcome of one privileged-session commit attempt. */
+    sealed interface PrivilegedOutcome {
+        /**
+         * The session committed (or the commit call returned). [status]
+         * is the installer's status int when one arrived in time, null
+         * when no status was received (unknown — the read-back decides).
+         * Never terminal on its own: the caller must still verify via
+         * [isVerifiedInstall].
+         */
+        data class Committed(val status: Int?) : PrivilegedOutcome
 
         /**
-         * Transport failure (binder died mid-flow, bind timeout, staging
-         * failure): NEVER a terminal failure — the caller falls back to
-         * the dialog flow from the cached verified APK.
+         * Transport failure (no binder, bind/permission loss, commit
+         * threw, session could not be written): NEVER a terminal failure
+         * — the caller falls back to the dialog flow from the cached
+         * verified APK.
          */
-        data object BinderDied : ShellOutcome
+        data object TransportDied : PrivilegedOutcome
     }
 
-    /** Packed shell-result cap: pm output is short; bound it anyway. */
-    const val MAX_SHELL_OUTPUT_CHARS = 4096
+    /**
+     * Budget for one privileged session status to arrive (slow devices
+     * finalize large sessions late). Expiry is NOT a failure — the
+     * read-back still decides; it only stops waiting for the broadcast.
+     */
+    const val COMMIT_STATUS_TIMEOUT_MS = 120_000L
+
+    /**
+     * Grace window for the post-commit read-back: the installed
+     * versionCode must equal the expected one within this long, else the
+     * silent attempt fails over to the dialog chain.
+     */
+    const val VERIFY_GRACE_MS = 30_000L
+
+    /** Poll interval inside the verify grace window. */
+    const val VERIFY_POLL_MS = 500L
 
     /**
      * Classifies one attempt. Order matters: an unsupported server or a
@@ -119,10 +163,10 @@ object ShizukuSilentInstall {
     }
 
     /**
-     * Staged-path sanity: absolute, an APK file, no control characters
-     * that could smuggle extra pm arguments. The flow always stages
-     * `<dir>/<pushId>.apk`, so anything else is a protocol violation —
-     * the service rejects it before spawning.
+     * Staged-path sanity: absolute, an APK file, no control characters.
+     * The flow always stages `<dir>/<pushId>.apk`, so anything else is a
+     * protocol violation — the privileged commit refuses it before any
+     * session is created.
      */
     fun isStagedApkPath(path: String): Boolean {
         if (path.isEmpty() || !path.startsWith("/") || !path.endsWith(".apk")) return false
@@ -133,19 +177,14 @@ object ShizukuSilentInstall {
     }
 
     /**
-     * Parses the UserService result (`"exit:<code>\n<output>"`). Never
-     * throws: a malformed pack is a Finished failure (transient,
-     * retryable), never a transport fallback and never a crash. Output is
-     * capped ([MAX_SHELL_OUTPUT_CHARS]) before it rides into notification
-     * extras.
+     * Post-commit verification decision: the install counts as silently
+     * installed ONLY when the staged APK's versionCode (parsed once
+     * before commit) equals the currently installed versionCode (read
+     * back after commit). Null on either side — unparseable staged APK,
+     * package absent, PackageManager unreadable — is a mismatch (fail
+     * closed to the dialog path), never a silent success. Never throws.
      */
-    fun parseShellResult(raw: String?): ShellOutcome.Finished {
-        if (raw.isNullOrEmpty()) return ShellOutcome.Finished(-1, "")
-        val nl = raw.indexOf('\n')
-        val first = if (nl < 0) raw else raw.substring(0, nl)
-        val rest = if (nl < 0) "" else raw.substring(nl + 1)
-        val code = first.removePrefix("exit:").toIntOrNull()
-            ?: return ShellOutcome.Finished(-1, raw.take(MAX_SHELL_OUTPUT_CHARS))
-        return ShellOutcome.Finished(code, rest.take(MAX_SHELL_OUTPUT_CHARS))
-    }
+    fun isVerifiedInstall(expectedVersionCode: Long?, installedVersionCode: Long?): Boolean =
+        expectedVersionCode != null && installedVersionCode != null &&
+            expectedVersionCode == installedVersionCode
 }
