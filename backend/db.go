@@ -78,8 +78,35 @@ func OpenDB(path string) (*sql.DB, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return nil, err
 	}
-	// TODO (auth PR): set busy_timeout / journal_mode pragmas via DSN.
-	return sql.Open("sqlite", path)
+	// Pragmas must ride on the DSN, not as a one-off Exec: database/sql
+	// hands out a pool of connections, and busy_timeout is per-connection,
+	// so exec'ing it once left every other connection failing instantly
+	// with SQLITE_BUSY under concurrent polls. journal_mode=WAL is stored
+	// in the file, but it belongs here too so a fresh DB gets it too.
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"+
+			"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// Verify the pool actually opens with those pragmas rather than
+	// discovering it at the first concurrent write.
+	var mode string
+	var timeout int
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("journal_mode: %w", err)
+	}
+	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("busy_timeout: %w", err)
+	}
+	if timeout != 5000 {
+		_ = db.Close()
+		return nil, fmt.Errorf("busy_timeout not applied (got %d)", timeout)
+	}
+	return db, nil
 }
 
 // Migrate applies the minimal schema stub. Future migrations are versioned
