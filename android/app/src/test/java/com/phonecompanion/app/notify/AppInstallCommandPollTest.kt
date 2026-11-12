@@ -277,7 +277,7 @@ class AppInstallCommandPollTest {
         // the operator remote-shell channel (execute + result upload).
         val names = AppInstallCommandPoll.Collaborators::class.java.declaredMethods
             .map { it.name }.toSet()
-        assertEquals(setOf("fetch", "startDownload", "executeShell", "postShellResult", "ack"), names)
+        assertEquals(setOf("fetch", "startDownload", "executeShell", "postShellResult", "queueShellResult", "takeQueuedShellResult", "dropQueuedShellResult", "ack"), names)
     }
 
     @Test
