@@ -116,12 +116,20 @@ object AppInstallNotifications {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val determinate = totalBytes != null && totalBytes > 0
+        // When the server sends no Content-Length the bar must stay
+        // indeterminate, but "bytes downloaded" still tells the user it is
+        // moving (a bare spinner used to look like nothing was happening).
+        val progressText = if (determinate) {
+            "${payload.packageName} • ${payload.displayVersion()}"
+        } else {
+            "${payload.packageName} • ${formatDownloaded(bytesRead)} downloaded"
+        }
         manager.notify(
             payload.notifyId(),
             NotificationCompat.Builder(context, NotificationChannels.INSTALL_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle(context.getString(R.string.app_install_progress_title, payload.label))
-                .setContentText("${payload.packageName} • ${payload.displayVersion()}")
+                .setContentText(progressText)
                 .setProgress(
                     if (determinate) totalBytes!!.toInt().coerceAtLeast(1) else 0,
                     bytesRead.toInt().coerceAtLeast(0),
@@ -134,6 +142,13 @@ object AppInstallNotifications {
                 .addAction(0, context.getString(R.string.app_install_cancel), cancel)
                 .build(),
         )
+    }
+
+    /** Human byte count for the unknown-length progress line. */
+    internal fun formatDownloaded(bytesRead: Long): String {
+        val mb = bytesRead / (1024.0 * 1024.0)
+        return if (mb >= 1.0) String.format(java.util.Locale.US, "%.1f MB", mb)
+        else String.format(java.util.Locale.US, "%.0f KB", bytesRead / 1024.0)
     }
 
     /**
