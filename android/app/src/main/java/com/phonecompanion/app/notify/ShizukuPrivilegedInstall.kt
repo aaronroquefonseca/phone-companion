@@ -190,6 +190,20 @@ object ShizukuPrivilegedInstall {
             // exactly as before, and the dialog fallback + read-back
             // verification decide the outcome.
             markSessionInstallFromAdb(params, packageName)
+            // ackpine-proven silent shape (originating UID = Shizuku peer,
+            // user-initiated reason, no user action required): without these
+            // the system treats the privileged session as app-initiated and
+            // posts the confirmation dialog. Each attribute fails open
+            // (absent APIs leave the session as before); the dialog fallback
+            // + read-back verification decide the outcome.
+            val trust = ShizukuSilentInstall.applySessionTrust(
+                params,
+                peerUid(),
+                Build.VERSION.SDK_INT,
+                ShizukuSilentInstall.resolveInstallReasonUser(PackageManager::class.java),
+                ShizukuSilentInstall.resolveUserActionNotRequired(params.javaClass),
+            )
+            Log.i(TAG, "commitPrivileged trust ou=${trust.originatingUid} reason=${trust.installReason} action=${trust.userAction} for $packageName")
             if (!ShizukuSilentInstall.isStagedApkPath(stagedApk.absolutePath)) {
                 Log.w(TAG, "commitPrivileged refused path shape for $packageName")
                 return@withContext ShizukuSilentInstall.PrivilegedOutcome.TransportDied

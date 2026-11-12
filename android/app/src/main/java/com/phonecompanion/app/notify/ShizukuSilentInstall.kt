@@ -175,6 +175,109 @@ object ShizukuSilentInstall {
     }
 
     /**
+     * Fallback for the hidden `PackageManager.INSTALL_REASON_USER`
+     * install reason (AOSP value `4`) when the field is absent on some
+     * API level. The privileged session reports a user-initiated install
+     * so PackageManagerService treats it like an `adb install`, which is
+     * never user-confirmed.
+     */
+    const val INSTALL_REASON_USER_FALLBACK = 4
+
+    /**
+     * Fallback for the hidden `USER_ACTION_NOT_REQUIRED` session flag
+     * (AOSP value `2`) when the field is absent on some API level.
+     * Explicitly marks the privileged session as needing no user action —
+     * the ackpine-proven way to suppress the system confirmation dialog.
+     */
+    const val USER_ACTION_NOT_REQUIRED_FALLBACK = 2
+
+    /**
+     * Per-attribute result of [applySessionTrust]: which ackpine-proven
+     * session attributes were actually applied. The caller decides the
+     * outcome from this (dialog fallback + read-back verification), never
+     * from assumed behavior.
+     */
+    data class SessionTrustApplied(
+        val originatingUid: Boolean = false,
+        val installReason: Boolean = false,
+        val userAction: Boolean = false,
+    )
+
+    /**
+     * Resolves the hidden `PackageManager.INSTALL_REASON_USER` install
+     * reason reflectively from [packageManagerClass], falling back to
+     * [INSTALL_REASON_USER_FALLBACK] when the field is absent. Never
+     * throws. Pure ([Class]-in) so it is unit-testable without a device.
+     */
+    fun resolveInstallReasonUser(packageManagerClass: Class<*>): Int {
+        return try {
+            packageManagerClass.getField("INSTALL_REASON_USER").getInt(null)
+        } catch (_: Exception) {
+            INSTALL_REASON_USER_FALLBACK
+        }
+    }
+
+    /**
+     * Resolves the hidden `USER_ACTION_NOT_REQUIRED` session flag
+     * reflectively from [sessionParamsClass], falling back to
+     * [USER_ACTION_NOT_REQUIRED_FALLBACK] when the field is absent. Never
+     * throws. Pure ([Class]-in) so it is unit-testable without a device.
+     */
+    fun resolveUserActionNotRequired(sessionParamsClass: Class<*>): Int {
+        return try {
+            sessionParamsClass.getField("USER_ACTION_NOT_REQUIRED").getInt(null)
+        } catch (_: Exception) {
+            USER_ACTION_NOT_REQUIRED_FALLBACK
+        }
+    }
+
+    /**
+     * Applies the ackpine-proven silent session shape to [sessionParams]:
+     * originating UID = the Shizuku peer (shell), user-initiated install
+     * reason, and no user action required. Without these,
+     * PackageManagerService treats the privileged session as an ordinary
+     * app install and posts the system confirmation dialog. Each attribute
+     * is applied reflectively under the caller's HiddenApiBypass
+     * exemptions and fails open individually: absent methods leave that
+     * attribute unset, and an absent Shizuku UID ([shizukuUid] null, e.g.
+     * binder died mid-read) skips the originating UID — the dialog
+     * fallback + read-back verification decide the outcome either way.
+     * API gates mirror the platform: originating UID needs 24+,
+     * install reason 26+, no-user-action 31+. Never throws. Takes
+     * [sessionParams] as [Any] so it is unit-testable without a device.
+     */
+    fun applySessionTrust(
+        sessionParams: Any,
+        shizukuUid: Int?,
+        sdkInt: Int,
+        installReasonUser: Int,
+        userActionNotRequired: Int,
+    ): SessionTrustApplied {
+        var originatingUid = false
+        var installReason = false
+        var userAction = false
+        if (shizukuUid != null && sdkInt >= 24) {
+            originatingUid = invokeIntSetter(sessionParams, "setOriginatingUid", shizukuUid)
+        }
+        if (sdkInt >= 26) {
+            installReason = invokeIntSetter(sessionParams, "setInstallReason", installReasonUser)
+        }
+        if (sdkInt >= 31) {
+            userAction = invokeIntSetter(sessionParams, "setRequireUserAction", userActionNotRequired)
+        }
+        return SessionTrustApplied(originatingUid, installReason, userAction)
+    }
+
+    private fun invokeIntSetter(sessionParams: Any, name: String, value: Int): Boolean {
+        return try {
+            sessionParams.javaClass.getMethod(name, Int::class.javaPrimitiveType).invoke(sessionParams, value)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
      * Classifies one attempt. Order matters: an unsupported server or a
      * dead binder is UNAVAILABLE even if a stale grant flag lingers.
      */
