@@ -285,6 +285,11 @@ object AppInstallCommandPoll {
         var shellResults = 0
         for (command in parsed.shell) {
             if (posted.isPosted(command.commandId)) continue
+            // At-most-once: mark before executing. A shell command is not
+            // idempotent (`rm`, `input tap`), so a process death between
+            // execution and ack must NOT re-run it; the operator sees a
+            // pending command and can re-issue knowingly instead.
+            posted.markPosted(listOf(command.commandId))
             val execution = try {
                 deps.executeShell(command)
             } catch (e: CancellationException) {
@@ -300,7 +305,6 @@ object AppInstallCommandPoll {
                 false
             }
             if (uploaded) shellResults++
-            posted.markPosted(listOf(command.commandId))
         }
         // Ack every valid offered id already resolved (this round or an
         // earlier one): the ack is idempotent, so failed acks converge

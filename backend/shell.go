@@ -113,6 +113,15 @@ func handleShellQueue(db *sql.DB) http.HandlerFunc {
 			writeAPIError(w, http.StatusNotFound, "device_not_found")
 			return
 		}
+		// Per-device pending cap (same ceiling as app-push): an operator
+		// token leak must not be able to pile up unbounded shell work.
+		if n, cerr := outboxPendingCount(db, dev, utcNow()); cerr != nil {
+			writeAPIError(w, http.StatusInternalServerError, "internal")
+			return
+		} else if n >= maxOutboxPendingPerDevice {
+			writeAPIError(w, http.StatusTooManyRequests, "too_many_pending")
+			return
+		}
 		commandID, err := newNotificationID()
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "internal")
