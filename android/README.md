@@ -239,6 +239,70 @@ steps only for the instant-wake path):
    → no duplicate download or dialog for an already-posted id; the re-offer is
    acked as a no-op.
 
+#### Silent installs via Shizuku (optional, off until the user enables it)
+
+When the Shizuku manager app is running and this app has been granted
+Shizuku permission, verified APKs commit silently — no system install
+confirmation, no unknown-sources grant needed (shell `pm install` needs
+none, like `adb install`). Everything else stays exactly as above: the
+progress notification posts first and grows the same way, SHA-256 is
+verified BEFORE anything installs (mismatch = hard refuse, same
+notification), and terminal notifications are the same success/failure
+copy (the raw `pm` output feeds the existing cause-aware mapping, so a
+signature mismatch still offers App-info with no Retry, and anything else
+still offers Retry from the kept verified cache).
+
+User setup (all in the pre-install screen — nothing auto-starts, no new
+periodic work, no boot receiver):
+
+1. Install the Shizuku manager app (`https://shizuku.rikka.app/download/`,
+   a separate user install, never bundled) and start it — via wireless
+   debugging (Android 11+) or ADB from a computer.
+2. Open any app push's pre-install screen (Details from the progress
+   notification): a “silent install via Shizuku” line appears with an
+   Enable button. Tap it once and approve in Shizuku.
+3. Later pushes then go silent. Deny once (or “deny and don’t ask again”)
+   and the line disappears for good — installs fall back to the system
+   confirmation with no nagging.
+
+Behavior matrix:
+
+- Binder alive + granted → silent commit at commit time, foreground or
+  background (background never requests permission: a backgrounded
+  command without an existing grant takes the dialog path as today, and
+  the next foreground dialog routes to the pre-install screen where the
+  enable lives).
+- Shizuku missing / pre-v11 / binder dead / permission denied →
+  current dialog flow, unchanged (grant gate included).
+- Binder dies mid-install or staging is impossible → falls back to the
+  dialog flow from the cached verified APK; transport trouble never fails
+  the install attempt.
+- A cancelled attempt never commits behind the user (checked before
+  staging, same as the dialog tail).
+
+Plumbing notes: shell (UID 2000 over ADB) cannot read the app's private
+dirs, so the verified APK is staged to the app-specific external dir
+(`getExternalFilesDir("apk")/<pushId>.apk` — not media-scanned, no extra
+permissions). The staged copy is deleted after every silent terminal and
+covered by the same 24 h stale purge as the cache. The client library
+(`dev.rikka.shizuku:api/provider:13.1.5`, Apache-2.0) ships with the app;
+only the manager app is a separate install.
+
+Manual test checklist (needs a paired device + the Shizuku app running;
+cannot be CI-verified — no emulator runs Shizuku):
+
+1. Without granting Shizuku: enqueue a test push → progress notification,
+   system install dialog, success — exactly as before.
+2. Pre-install screen shows the Shizuku status line + Enable button; tap
+   Enable, approve in Shizuku, return → line hides (granted).
+3. Enqueue another push → progress notification as usual, NO system
+   dialog → success notification, app installed.
+4. Deny path: revoke Shizuku permission in the Shizuku manager app,
+   enqueue again → system dialog path, no nagging, no stuck state.
+5. Negative paths: wrong `sha256` → blocked error, nothing installed
+   (verify-before-stage holds); stop the Shizuku server mid-download →
+   falls back to the system dialog from the verified cache.
+
 ### Pushing this app's own release APK (self-update)
 
 Each GitHub Release attaches `phone-companion-vX.Y.Z.apk` with a real

@@ -11,6 +11,8 @@ import com.phonecompanion.app.notify.AppInstallInstaller
 import com.phonecompanion.app.notify.AppInstallNotifications
 import com.phonecompanion.app.notify.AppInstallPayload
 import com.phonecompanion.app.notify.AppInstallSessions
+import com.phonecompanion.app.notify.ShizukuShell
+import com.phonecompanion.app.notify.ShizukuSilentInstall
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +55,9 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         /** Installer commit attempted; the system dialog owns the UI now. */
         data object Installing : InstallUiState
 
+        /** Silent commit via Shizuku running; no system dialog appears. */
+        data object SilentInstalling : InstallUiState
+
         /** Single terminal exit: in-app text (the notification, if any, posted). */
         data class Finished(val message: String) : InstallUiState
 
@@ -74,16 +79,19 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Starts the install flow for one explicit Install tap. Re-checks the
      * unknown-sources grant at tap time (it could have been revoked while
-     * the screen was open) and mints a fresh attempt nonce — never
-     * reuses a previous attempt, so a retry always claims fresh. Runs the
-     * resume entry: a verified APK left behind by a grant-gated
-     * auto-download commits without re-fetching; otherwise the full
-     * download runs.
+     * the screen was open) — UNLESS Shizuku silent install is granted, in
+     * which case no grant is needed (shell `pm install` needs none, like
+     * `adb install`) and the tap proceeds silently. Mints a fresh attempt
+     * nonce — never reuses a previous attempt, so a retry always claims
+     * fresh. Runs the resume entry: a verified APK left behind by a
+     * grant-gated auto-download commits without re-fetching; otherwise the
+     * full download runs.
      */
     fun start(payload: AppInstallPayload) {
         if (isFlowActive) return
         val app = getApplication<Application>()
-        if (!app.packageManager.canRequestPackageInstalls()) return
+        val shizukuSilent = ShizukuShell.statusNow() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED
+        if (!app.packageManager.canRequestPackageInstalls() && !shizukuSilent) return
         val attempt = AppInstallSessions.startAttempt(payload.pushId)
         currentPushId = payload.pushId
         val dest = AppInstallFiles.apkFile(app, payload)
@@ -92,6 +100,7 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
             _uiState.value = when (phase) {
                 Phase.VERIFYING -> InstallUiState.Verifying
                 Phase.INSTALLING -> InstallUiState.Installing
+                Phase.SILENT_INSTALLING -> InstallUiState.SilentInstalling
             }
         }
         activeJob = flowScope.launch {
@@ -144,18 +153,23 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         }
         val kind = with(AppInstallFlow) { outcome.terminalKind() }
         if (kind != null) {
+            val detail = (outcome as? AppInstallFlow.Outcome.SilentFailed)?.detail
             AppInstallNotifications.notifyTerminal(
                 getApplication(),
                 kind,
                 AppInstallNotifications.TerminalTarget.from(payload),
                 attempt,
-                payload = payload,
+                detail,
+                // Retry target for FAILED posts (silent or dialog): the
+                // pre-install UI, whose Install tap resumes via runResume
+                // (re-verified cache, no re-download when intact).
+                payload.takeIf { kind == AppInstallFlow.TerminalKind.FAILED },
             )
         }
-        _uiState.value = InstallUiState.Finished(messageFor(outcome))
+        _uiState.value = InstallUiState.Finished(messageFor(payload, outcome))
     }
 
-    private fun messageFor(outcome: AppInstallFlow.Outcome): String {
+    private fun messageFor(payload: AppInstallPayload, outcome: AppInstallFlow.Outcome): String {
         val app = getApplication<Application>()
         return when (outcome) {
             is AppInstallFlow.Outcome.TooLarge ->
@@ -168,6 +182,10 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
                 app.getString(R.string.app_install_error_mismatch)
             is AppInstallFlow.Outcome.CommitFailed ->
                 app.getString(R.string.app_install_error_install)
+            is AppInstallFlow.Outcome.SilentInstalled ->
+                app.getString(R.string.app_install_silent_done, payload.label)
+            is AppInstallFlow.Outcome.SilentFailed ->
+                app.getString(R.string.app_install_error_install)
             is AppInstallFlow.Outcome.UnknownSourcesRevoked ->
                 app.getString(R.string.app_install_error_unknown_sources)
             is AppInstallFlow.Outcome.Committed ->
@@ -175,7 +193,7 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private enum class Phase { VERIFYING, INSTALLING }
+    private enum class Phase { VERIFYING, INSTALLING, SILENT_INSTALLING }
 
     /**
      * Android side of [AppInstallFlow.Host]. Reports phase transitions
@@ -224,5 +242,31 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
                 onPhase(Phase.INSTALLING)
                 AppInstallInstaller.commit(app, payload, apkFile, attempt)
             }
+
+        /**
+         * Silent branch (Shizuku): the Install tap goes silent only when
+         * the grant is already in place (checked in [start]); this probe
+         * re-checks at commit time so a binder dying mid-download falls
+         * back to the dialog tail instead of failing.
+         */
+        override fun silentStatus(): ShizukuSilentInstall.Status =
+            ShizukuShell.statusNow()
+
+        override suspend fun stageForShell(verifiedApk: File): File? =
+            withContext(Dispatchers.IO) {
+                try {
+                    val staged = AppInstallFiles.stagedApkFile(app, pushId) ?: return@withContext null
+                    staged.parentFile?.mkdirs()
+                    verifiedApk.copyTo(staged, overwrite = true)
+                    staged.takeIf { it.isFile }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+
+        override suspend fun shellCommit(stagedApk: File): ShizukuSilentInstall.ShellOutcome {
+            onPhase(Phase.SILENT_INSTALLING)
+            return ShizukuShell.installOnce(app, stagedApk.absolutePath)
+        }
     }
 }

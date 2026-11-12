@@ -76,6 +76,29 @@
 
         </LinearLayout>
 
+        <LinearLayout
+            android:id="@+id/appInstallShizuku"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/appInstallShizukuBody"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/app_install_shizuku_body" />
+
+            <Button
+                android:id="@+id/appInstallShizukuButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/app_install_shizuku_allow" />
+
+        </LinearLayout>
+
         <TextView
             android:id="@+id/appInstallStatus"
             android:layout_width="match_parent"
