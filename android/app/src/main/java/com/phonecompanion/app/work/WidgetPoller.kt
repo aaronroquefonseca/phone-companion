@@ -12,6 +12,8 @@ import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.data.WidgetEnvelope
 import com.phonecompanion.app.data.WidgetJson
 import com.phonecompanion.app.notify.AppInstallCommandPoll
+import com.phonecompanion.app.notify.InstantMode
+import com.phonecompanion.app.notify.InstantModeService
 import com.phonecompanion.app.widgets.CompanionWidget
 import com.phonecompanion.app.widgets.WidgetBindingResolver
 import com.phonecompanion.app.widgets.glanceKey
@@ -54,6 +56,14 @@ object WidgetPoller {
     internal fun payloadToJson(payload: Map<String, Any?>?): String = WidgetJson.toJson(payload)
 
     suspend fun refresh(context: Context) {
+        // Instant mode is user-enabled state that survives updates, but the
+        // service itself dies with the process. Any poll (hourly worker or
+        // app open) revives it, so an update cannot leave delivery off.
+        runCatching {
+            if (InstantMode.isEnabled(context) && !InstantModeService.isActive) {
+                InstantModeService.start(context)
+            }
+        }
         if (pollOnce(context)) {
             // Wiped after N consecutive auth failures: fail-closed states
             // already pushed by handleRevoked.

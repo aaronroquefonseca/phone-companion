@@ -92,7 +92,7 @@ func main() {
 	// no-store-wrapped handler).
 	base.Handle("POST /api/v1/notify", operatorAdminChain(sessionStore, csrf, handleNotify(db, sender)))
 	registerPushOutboxRoutes(base, db, sessionStore, csrf, sender)
-	registerShellRoutes(base, db, sessionStore, csrf)
+	registerShellRoutes(base, db, sessionStore, csrf, sender)
 	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,
