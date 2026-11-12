@@ -99,6 +99,21 @@
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <!-- FileProvider for the ACTION_VIEW commit-failure fallback: serves
+             the verified cached APK to the system installer ONLY from the
+             app_push cache dir (see res/xml/app_install_filepaths.xml —
+             never the whole cache, never external dirs). Exported=false:
+             cross-uid access flows through the per-intent read grant. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/app_install_filepaths" />
+        </provider>
+
         <!-- Single Glance widget receiver. One picker entry ("Widget");
               placement and tap-to-configure choose any cached row. -->
         <receiver

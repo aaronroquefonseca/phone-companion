@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths for the ACTION_VIEW commit-failure fallback ONLY:
+     the app_push cache dir, nothing else — never the whole cache, never
+     external dirs (the Shizuku staged dir is excluded on purpose). Must
+     stay in sync with AppInstallFiles.pushDir. -->
+<paths>
+    <cache-path name="app_push" path="app_push/" />
+</paths>

@@ -172,6 +172,36 @@ object AppInstallNotifications {
     }
 
     /**
+     * Informational post after the ACTION_VIEW commit-failure fallback
+     * ([AppInstallFallback]) opened the system installer: the VIEW intent
+     * returns no result, so this note — not a FAILED terminal — is the
+     * attempt's single post, telling the user to complete the install in
+     * the system screen. The verified APK stays cached until the 24 h
+     * stale purge (the install may complete minutes later; no installer
+     * result ever returns to clean it). Claimed per attempt like every
+     * terminal post, so a racing path stays silent. No actions: nothing
+     * retries — the system installer owns the install now.
+     */
+    fun notifyFallbackOpened(
+        context: Context,
+        target: TerminalTarget,
+        attempt: String?,
+    ): Boolean {
+        if (!AppInstallSessions.claimTerminal(target.pushId, attempt)) return false
+        val display = target.label ?: target.packageName
+        postTerminal(
+            context,
+            target.pushId,
+            context.getString(R.string.app_install_fallback_title, display),
+            context.getString(R.string.app_install_fallback_body, display),
+            context.getString(R.string.app_install_fallback_body, display),
+            contentIntent = null,
+            actions = emptyList(),
+        )
+        return true
+    }
+
+    /**
      * Single terminal funnel: claims ([AppInstallSessions.claimTerminal])
      * and posts exactly one notification for the attempt. Every terminal
      * path in the flow (activity exit, cancel receiver, result receiver)

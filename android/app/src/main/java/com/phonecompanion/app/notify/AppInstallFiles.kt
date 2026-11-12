@@ -38,7 +38,16 @@ object AppInstallFiles {
         apkFile(context, payload.pushId)
 
     fun apkFile(context: Context, pushId: String): File =
-        File(File(context.cacheDir, DIR), AppInstallPayload.cacheFileNameFor(pushId))
+        File(pushDir(context.cacheDir), AppInstallPayload.cacheFileNameFor(pushId))
+
+    /**
+     * The app_push cache dir under [cacheDir]. Single owner so the cached
+     * APK path, the fallback scope gate ([AppInstallFallback]), and the
+     * FileProvider paths (`res/xml/app_install_filepaths.xml`, which covers
+     * ONLY this dir — never the whole cache, never external dirs) always
+     * agree.
+     */
+    internal fun pushDir(cacheDir: File): File = File(cacheDir, DIR)
 
     /**
      * Shell-readable staged copy of the verified APK for [pushId], or null
