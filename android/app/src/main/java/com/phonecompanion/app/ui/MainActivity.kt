@@ -26,6 +26,7 @@ import com.phonecompanion.app.R
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.notify.AppInstallEvents
+import com.phonecompanion.app.notify.BatteryExemption
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
 import com.phonecompanion.app.work.RefreshWorker
@@ -181,6 +182,9 @@ class MainActivity : AppCompatActivity() {
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         val paired = SecureStorage.getInstance(this).isPaired
         menu.findItem(R.id.menu_unpair)?.isVisible = paired
+        // Only offer the battery exemption while it is actually missing.
+        menu.findItem(R.id.menu_battery_exemption)?.isVisible =
+            paired && !BatteryExemption.isExempt(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -197,7 +201,25 @@ class MainActivity : AppCompatActivity() {
             showAbout()
             true
         }
+        R.id.menu_battery_exemption -> {
+            requestBatteryExemption()
+            true
+        }
         else -> super.onOptionsItemSelected(item)
+    }
+
+    /**
+     * One-time "Unrestricted" battery request. Without it, a high-priority
+     * FCM wake starts the app but Doze/Samsung sleep blocks the follow-up
+     * poll's network, so installs wait until the phone is used. The grant
+     * is user-owned; this only opens the system prompt.
+     */
+    private fun requestBatteryExemption() {
+        try {
+            startActivity(BatteryExemption.requestIntent(this))
+        } catch (_: Exception) {
+            // No handler: the menu action is a best-effort aid, never a crash.
+        }
     }
 
     /**

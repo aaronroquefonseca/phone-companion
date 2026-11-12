@@ -8,6 +8,7 @@
     <!-- Targeted notifications: requested only after a successful pairing
         (see MainActivity), never on the unpaired launcher. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- No CAMERA permission: pairing scans with the Play services code
         scanner (GmsBarcodeScanning), which runs Google's own scanner
         activity and needs no app-side camera permission or boilerplate. -->
