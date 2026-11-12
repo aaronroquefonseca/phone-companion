@@ -243,4 +243,110 @@ class ShizukuSilentInstallTest {
             ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", null),
         )
     }
+
+    // Fakes for the session-trust helpers: same reflective shapes as the
+    // platform (static reason/action fields; int setters), without any
+    // Android dependency.
+
+    object FakePmWithReason {
+        const val INSTALL_REASON_USER = 77
+    }
+
+    object FakePmNoReason
+
+    object FakeSessionParamsWithAction {
+        const val USER_ACTION_NOT_REQUIRED = 88
+    }
+
+    object FakeSessionParamsNoAction
+
+    class FakeTrustSessionParams {
+        var storedOriginatingUid: Int = -1
+        var storedInstallReason: Int = -1
+        var storedUserAction: Int = -1
+        fun setOriginatingUid(uid: Int) {
+            storedOriginatingUid = uid
+        }
+        fun setInstallReason(reason: Int) {
+            storedInstallReason = reason
+        }
+        fun setRequireUserAction(action: Int) {
+            storedUserAction = action
+        }
+    }
+
+    class FakeTrustSessionParamsNoSetters
+
+    @Test
+    fun `install reason resolves to the platform value when the field exists`() {
+        assertEquals(77, ShizukuSilentInstall.resolveInstallReasonUser(FakePmWithReason::class.java))
+    }
+
+    @Test
+    fun `install reason falls back to 4 when the field is absent`() {
+        assertEquals(4, ShizukuSilentInstall.INSTALL_REASON_USER_FALLBACK)
+        assertEquals(
+            ShizukuSilentInstall.INSTALL_REASON_USER_FALLBACK,
+            ShizukuSilentInstall.resolveInstallReasonUser(FakePmNoReason::class.java),
+        )
+    }
+
+    @Test
+    fun `user action resolves to the platform value when the field exists`() {
+        assertEquals(
+            88,
+            ShizukuSilentInstall.resolveUserActionNotRequired(FakeSessionParamsWithAction::class.java),
+        )
+    }
+
+    @Test
+    fun `user action falls back to 2 when the field is absent`() {
+        assertEquals(2, ShizukuSilentInstall.USER_ACTION_NOT_REQUIRED_FALLBACK)
+        assertEquals(
+            ShizukuSilentInstall.USER_ACTION_NOT_REQUIRED_FALLBACK,
+            ShizukuSilentInstall.resolveUserActionNotRequired(FakeSessionParamsNoAction::class.java),
+        )
+    }
+
+    @Test
+    fun `trust shape applies all attributes on API 33 with a granted uid`() {
+        val params = FakeTrustSessionParams()
+        val applied = ShizukuSilentInstall.applySessionTrust(params, 2000, 33, 77, 88)
+        assertEquals(ShizukuSilentInstall.SessionTrustApplied(true, true, true), applied)
+        assertEquals(2000, params.storedOriginatingUid)
+        assertEquals(77, params.storedInstallReason)
+        assertEquals(88, params.storedUserAction)
+    }
+
+    @Test
+    fun `trust shape skips user action below API 31`() {
+        val params = FakeTrustSessionParams()
+        val applied = ShizukuSilentInstall.applySessionTrust(params, 2000, 30, 77, 88)
+        assertEquals(ShizukuSilentInstall.SessionTrustApplied(true, true, false), applied)
+        assertEquals(2000, params.storedOriginatingUid)
+        assertEquals(77, params.storedInstallReason)
+        assertEquals(-1, params.storedUserAction)
+    }
+
+    @Test
+    fun `trust shape needs at least API 24 and skips the uid when unknown`() {
+        val noUid = FakeTrustSessionParams()
+        val appliedNoUid = ShizukuSilentInstall.applySessionTrust(noUid, null, 33, 77, 88)
+        assertEquals(ShizukuSilentInstall.SessionTrustApplied(false, true, true), appliedNoUid)
+        assertEquals(-1, noUid.storedOriginatingUid)
+
+        val oldApi = FakeTrustSessionParams()
+        val appliedOld = ShizukuSilentInstall.applySessionTrust(oldApi, 2000, 23, 77, 88)
+        assertEquals(ShizukuSilentInstall.SessionTrustApplied(false, false, false), appliedOld)
+        assertEquals(-1, oldApi.storedOriginatingUid)
+        assertEquals(-1, oldApi.storedInstallReason)
+        assertEquals(-1, oldApi.storedUserAction)
+    }
+
+    @Test
+    fun `trust shape fails open when setters are absent`() {
+        val params = FakeTrustSessionParamsNoSetters()
+        val applied = ShizukuSilentInstall.applySessionTrust(params, 0, 33, 77, 88)
+        assertEquals(ShizukuSilentInstall.SessionTrustApplied(false, false, false), applied)
+    }
 }
