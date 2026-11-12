@@ -102,6 +102,10 @@ object AppInstallNotifications {
         bytesRead: Long,
         totalBytes: Long?,
     ) {
+        // The wake-triggered foreground service mirrors this same progress
+        // into its own mandatory notification; posting here too would show
+        // the user two progress lines. Terminal posts are unaffected.
+        if (WakeInstallService.isActive) return
         val manager = context.notificationManager()
         NotificationChannels.ensureInstalls(manager)
         val cancel = PendingIntent.getBroadcast(
@@ -164,6 +168,10 @@ object AppInstallNotifications {
         context: Context,
         payload: AppInstallPayload,
     ) {
+        if (WakeInstallService.isActive) {
+            WakeInstallService.noteInstalling(payload.label)
+            return
+        }
         val manager = context.notificationManager()
         NotificationChannels.ensureInstalls(manager)
         manager.notify(

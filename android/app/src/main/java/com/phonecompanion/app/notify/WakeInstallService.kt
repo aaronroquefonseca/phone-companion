@@ -35,28 +35,34 @@ import kotlinx.coroutines.launch
  * Doze freeze, no background network restriction) for the duration of
  * the transfer. The service:
  *  1. runs one outbox poll,
- *  2. waits until every install download it started has reached its
- *     terminal (the [AppInstallProgress] registry is empty), then
- *  3. stops itself.
+ *  2. mirrors the live transfer into its ONE foreground notification
+ *     (download percentage, then "Installing…"),
+ *  3. stops itself once the in-flight registry empties.
  * Bounded by [MAX_LIFETIME_MS] so a stuck transfer cannot pin the
- * service forever; the progress notification is already the user-visible
- * surface.
+ * service forever.
  *
- * Its own notification is a silent, low-importance "checking" line that
- * lives only while the service runs; the real progress/terminal posts
- * come from [AppInstallNotifications] on the install channel.
+ * Notifications: the platform requires a foreground notification, so the
+ * install flow does not post a second one while this service is active —
+ * [AppInstallNotifications] checks [isActive] and lets the service own
+ * the progress/installing state. The terminal post is separate and
+ * replaces the service notification after the service stops.
  */
 class WakeInstallService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var work: Job? = null
+    private var mirror: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        isActive = true
         startInForeground()
         if (work?.isActive != true) {
             work = scope.launch { runOnce() }
+        }
+        if (mirror?.isActive != true) {
+            mirror = scope.launch { mirrorProgress() }
         }
         return START_NOT_STICKY
     }
@@ -64,28 +70,69 @@ class WakeInstallService : Service() {
     private fun startInForeground() {
         try {
             ensureChannel()
-            val notification: Notification =
-                NotificationCompat.Builder(this, CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_notification)
-                    .setContentTitle(getString(R.string.app_name))
-                    .setContentText("Checking for installs…")
-                    .setPriority(NotificationCompat.PRIORITY_MIN)
-                    .setOngoing(true)
-                    .setSilent(true)
-                    .build()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            startForegroundCompat(buildNotification())
         } catch (e: Exception) {
             // FGS not allowed (OEM policy): the caller's inline/worker
             // path still runs; never crash the service start.
             Log.i(TAG, "foreground start refused [${e.javaClass.simpleName}]")
+        }
+    }
+
+    private fun startForegroundCompat(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    /**
+     * One notification, live: shows the current download percentage (or
+     * bytes when the length is unknown) and switches to "Installing…"
+     * during the commit phase. Re-posting the same id keeps the service
+     * in the foreground.
+     */
+    private fun buildNotification(): Notification {
+        val installing = installingLabel
+        val entry = AppInstallProgress.entries.value.values.firstOrNull()
+        return if (installing != null) {
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("Installing ${installing}…")
+                .setProgress(0, 0, true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+                .setSilent(true)
+                .build()
+        } else if (entry != null) {
+            val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(getString(R.string.app_install_progress_title, entry.label))
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+                .setSilent(true)
+            val percent = entry.percent
+            if (percent != null) {
+                builder.setProgress(100, percent, false)
+                    .setContentText("${entry.packageName} • $percent%")
+            } else {
+                builder.setProgress(0, 0, true)
+                    .setContentText("${entry.packageName} • downloading")
+            }
+            builder.build()
+        } else {
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(getString(R.string.app_name))
+                .setContentText("Checking for installs…")
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setOngoing(true)
+                .setSilent(true)
+                .build()
         }
     }
 
@@ -96,10 +143,28 @@ class WakeInstallService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             "Background checks",
-            NotificationManager.IMPORTANCE_MIN,
+            NotificationManager.IMPORTANCE_LOW,
         )
         channel.description = "Brief background checks for pushed app installs."
+        channel.setShowBadge(false)
         manager.createNotificationChannel(channel)
+    }
+
+    private suspend fun mirrorProgress() {
+        try {
+            AppInstallProgress.entries.collect {
+                try {
+                    val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    manager.notify(NOTIFICATION_ID, buildNotification())
+                } catch (_: Exception) {
+                    // Mirroring is cosmetic; the transfer is unaffected.
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Never fail the service on notification trouble.
+        }
     }
 
     private suspend fun runOnce() {
@@ -123,6 +188,8 @@ class WakeInstallService : Service() {
     }
 
     override fun onDestroy() {
+        isActive = false
+        installingLabel = null
         scope.cancel()
         super.onDestroy()
     }
@@ -133,6 +200,24 @@ class WakeInstallService : Service() {
         private const val NOTIFICATION_ID = 0x5043_0001
         private const val POLL_MS = 1_000L
         private const val MAX_LIFETIME_MS = 15L * 60L * 1000L
+
+        /**
+         * True while the service owns the progress notification. The
+         * install flow checks this and skips its own pre-terminal posts so
+         * the user never sees a duplicate "Checking" + "Downloading" pair.
+         */
+        @Volatile
+        var isActive: Boolean = false
+            private set
+
+        /** Non-null during the commit phase; drives the same notification. */
+        @Volatile
+        private var installingLabel: String? = null
+
+        /** Switches the shared notification to "Installing…". */
+        fun noteInstalling(label: String) {
+            installingLabel = label
+        }
 
         /**
          * Starts the service. Returns true when the platform accepted the
