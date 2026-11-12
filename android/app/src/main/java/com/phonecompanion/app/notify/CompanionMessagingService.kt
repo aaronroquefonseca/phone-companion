@@ -129,8 +129,17 @@ class CompanionMessagingService : FirebaseMessagingService() {
         // also runs. All other message types fall through to the render
         // path untouched.
         if (AppInstallCommandPoll.isWake(message.data)) {
-            runCatching { AppInstallWakeWorker.enqueue(this) }
-            handleWakeInline(this)
+            // Foreground service first: it keeps the process alive through
+            // the WHOLE download+commit, so the terminal notification
+            // always posts (the field report: stuck at "Installing…"
+            // forever because the detached coroutine died mid-install).
+            // High-priority FCM is the platform's allowed background-FGS
+            // exemption. Only when the platform refuses the start do we
+            // fall back to the enqueue + inline path.
+            if (!WakeInstallService.start(this)) {
+                runCatching { AppInstallWakeWorker.enqueue(this) }
+                handleWakeInline(this)
+            }
             return
         }
         val payload = NotificationPayload.from(message)
