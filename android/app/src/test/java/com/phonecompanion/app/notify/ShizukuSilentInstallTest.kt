@@ -7,9 +7,10 @@ import org.junit.Test
 
 /**
  * Covers the Shizuku silent-install gateway ([ShizukuSilentInstall]):
- * status classification, the ask-once affordance rule, shell-result
- * parsing, and the staged-path sanity check. Pure JVM — the Android
- * Shizuku statics stay behind [ShizukuSilentInstall.Probe], faked here.
+ * status classification, the ask-once affordance rule, the staged-path
+ * sanity check, and the post-commit verification decision. Pure JVM —
+ * the Android Shizuku statics stay behind [ShizukuSilentInstall.Probe],
+ * faked here.
  */
 class ShizukuSilentInstallTest {
 
@@ -105,32 +106,40 @@ class ShizukuSilentInstallTest {
     }
 
     @Test
-    fun `shell result parses exit code and preserves pm output`() {
-        val ok = ShizukuSilentInstall.parseShellResult("exit:0\nSuccess\n")
-        assertEquals(0, ok.exitCode)
-        assertEquals("Success\n", ok.output)
-
-        val pmFailure = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: " +
-            "Package com.example.app signatures do not match previously installed version]"
-        val failed = ShizukuSilentInstall.parseShellResult("exit:1\n$pmFailure")
-        assertEquals(1, failed.exitCode)
-        assertEquals(pmFailure, failed.output)
+    fun `verified install requires exact versionCode equality`() {
+        assertTrue(ShizukuSilentInstall.isVerifiedInstall(12345L, 12345L))
+        // Mismatch (stale install, wrong update landed): not verified.
+        assertFalse(ShizukuSilentInstall.isVerifiedInstall(12345L, 12344L))
+        assertFalse(ShizukuSilentInstall.isVerifiedInstall(12344L, 12345L))
     }
 
     @Test
-    fun `malformed shell result is a failure never a throw`() {
-        assertEquals(-1, ShizukuSilentInstall.parseShellResult(null).exitCode)
-        assertEquals(-1, ShizukuSilentInstall.parseShellResult("").exitCode)
-        assertEquals(-1, ShizukuSilentInstall.parseShellResult("Success").exitCode)
-        assertEquals(-1, ShizukuSilentInstall.parseShellResult("exit:oops\nx").exitCode)
+    fun `verification fails closed on unknown state, never throws`() {
+        // Absent package, unparseable staged APK, unreadable
+        // PackageManager: every null side refuses the silent success and
+        // the caller falls back to the dialog path.
+        assertFalse(ShizukuSilentInstall.isVerifiedInstall(null, 12345L))
+        assertFalse(ShizukuSilentInstall.isVerifiedInstall(12345L, null))
+        assertFalse(ShizukuSilentInstall.isVerifiedInstall(null, null))
     }
 
     @Test
-    fun `shell output is capped`() {
-        val big = "x".repeat(ShizukuSilentInstall.MAX_SHELL_OUTPUT_CHARS + 100)
-        val parsed = ShizukuSilentInstall.parseShellResult("exit:1\n$big")
-        assertEquals(1, parsed.exitCode)
-        assertEquals(ShizukuSilentInstall.MAX_SHELL_OUTPUT_CHARS, parsed.output.length)
+    fun `commit status alone never decides — the read-back does`() {
+        // Committed with a success status, without any status (unknown),
+        // even with a failure status: all still require the versionCode
+        // read-back. The outcome type only separates transport trouble
+        // (dialog fallback) from "session returned, verify it".
+        val commits = listOf(
+            ShizukuSilentInstall.PrivilegedOutcome.Committed(0),
+            ShizukuSilentInstall.PrivilegedOutcome.Committed(null),
+            ShizukuSilentInstall.PrivilegedOutcome.Committed(1),
+        )
+        for (commit in commits) {
+            assertTrue(commit is ShizukuSilentInstall.PrivilegedOutcome.Committed)
+            // Same decision rule regardless of the carried status.
+            assertTrue(ShizukuSilentInstall.isVerifiedInstall(7L, 7L))
+            assertFalse(ShizukuSilentInstall.isVerifiedInstall(7L, 8L))
+        }
     }
 
     @Test

@@ -12,7 +12,7 @@ import com.phonecompanion.app.notify.AppInstallInstaller
 import com.phonecompanion.app.notify.AppInstallNotifications
 import com.phonecompanion.app.notify.AppInstallPayload
 import com.phonecompanion.app.notify.AppInstallSessions
-import com.phonecompanion.app.notify.ShizukuShell
+import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import com.phonecompanion.app.notify.ShizukuSilentInstall
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -81,7 +81,7 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
      * Starts the install flow for one explicit Install tap. Re-checks the
      * unknown-sources grant at tap time (it could have been revoked while
      * the screen was open) — UNLESS Shizuku silent install is granted, in
-     * which case no grant is needed (shell `pm install` needs none, like
+     * which case no grant is needed (privileged sessions need none, like
      * `adb install`) and the tap proceeds silently. Mints a fresh attempt
      * nonce — never reuses a previous attempt, so a retry always claims
      * fresh. Runs the resume entry: a verified APK left behind by a
@@ -91,7 +91,7 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
     fun start(payload: AppInstallPayload) {
         if (isFlowActive) return
         val app = getApplication<Application>()
-        val shizukuSilent = ShizukuShell.statusNow() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED
+        val shizukuSilent = ShizukuPrivilegedInstall.statusNow() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED
         if (!app.packageManager.canRequestPackageInstalls() && !shizukuSilent) return
         val attempt = AppInstallSessions.startAttempt(payload.pushId)
         currentPushId = payload.pushId
@@ -170,17 +170,17 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         }
         val kind = with(AppInstallFlow) { outcome.terminalKind() }
         if (kind != null) {
-            val detail = (outcome as? AppInstallFlow.Outcome.SilentFailed)?.detail
             AppInstallNotifications.notifyTerminal(
                 getApplication(),
                 kind,
                 AppInstallNotifications.TerminalTarget.from(payload),
                 attempt,
-                detail,
-                // Retry target for FAILED posts (silent or dialog): the
-                // pre-install UI, whose Install tap resumes via runResume
-                // (re-verified cache, no re-download when intact).
-                payload.takeIf { kind == AppInstallFlow.TerminalKind.FAILED },
+                // Retry target for FAILED posts (dialog path only now —
+                // the silent path fails over to the dialog chain instead
+                // of posting FAILED itself): the pre-install UI, whose
+                // Install tap resumes via runResume (re-verified cache,
+                // no re-download when intact).
+                payload = payload.takeIf { kind == AppInstallFlow.TerminalKind.FAILED },
             )
         }
         _uiState.value = InstallUiState.Finished(messageFor(payload, outcome))
@@ -201,8 +201,6 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
                 app.getString(R.string.app_install_error_install)
             is AppInstallFlow.Outcome.SilentInstalled ->
                 app.getString(R.string.app_install_silent_done, payload.label)
-            is AppInstallFlow.Outcome.SilentFailed ->
-                app.getString(R.string.app_install_error_install)
             is AppInstallFlow.Outcome.UnknownSourcesRevoked ->
                 app.getString(R.string.app_install_error_unknown_sources)
             is AppInstallFlow.Outcome.Committed ->
@@ -267,23 +265,30 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
          * back to the dialog tail instead of failing.
          */
         override fun silentStatus(): ShizukuSilentInstall.Status =
-            ShizukuShell.statusNow()
+            ShizukuPrivilegedInstall.statusNow()
 
-        override suspend fun stageForShell(verifiedApk: File): File? =
+        override suspend fun stagePrivileged(verifiedApk: File): File? =
             withContext(Dispatchers.IO) {
-                try {
-                    val staged = AppInstallFiles.stagedApkFile(app, pushId) ?: return@withContext null
-                    staged.parentFile?.mkdirs()
-                    verifiedApk.copyTo(staged, overwrite = true)
-                    staged.takeIf { it.isFile }
-                } catch (_: Exception) {
-                    null
-                }
+                ShizukuPrivilegedInstall.stagePrivileged(app, pushId, verifiedApk)
             }
 
-        override suspend fun shellCommit(stagedApk: File): ShizukuSilentInstall.ShellOutcome {
+        override suspend fun stagedVersionCode(stagedApk: File): Long? =
+            withContext(Dispatchers.IO) {
+                ShizukuPrivilegedInstall.stagedVersionCode(app, stagedApk)
+            }
+
+        override suspend fun privilegedCommit(
+            stagedApk: File,
+            packageName: String,
+        ): ShizukuSilentInstall.PrivilegedOutcome {
             onPhase(Phase.SILENT_INSTALLING)
-            return ShizukuShell.installOnce(app, stagedApk.absolutePath)
+            return ShizukuPrivilegedInstall.commitPrivileged(app, stagedApk, packageName, attempt)
         }
+
+        override suspend fun awaitInstalledVersion(
+            packageName: String,
+            expectedVersionCode: Long,
+        ): Long? =
+            ShizukuPrivilegedInstall.awaitInstalledVersion(app, packageName, expectedVersionCode)
     }
 }

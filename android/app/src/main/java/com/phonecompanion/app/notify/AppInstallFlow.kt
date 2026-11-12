@@ -7,11 +7,13 @@ import java.io.File
  * download → verify → unknown-sources re-check → commit.
  *
  * When the host reports Shizuku granted, the post-verify tail commits
- * silently instead (verify → stage → shell `pm install`, no grant gate —
- * shell installs need none, like `adb install`): success and pm-failure
- * are terminal here; transport edges (staging impossible, binder died)
- * fall back to the dialog tail from the cached verified APK, never a
- * failure. Dialog path is untouched when Shizuku is absent or denied.
+ * silently instead (verify → stage → privileged installer session, no
+ * grant gate — privileged sessions need none, like `adb install` — then
+ * a post-commit versionCode read-back): a verified install is terminal
+ * here; transport edges (staging impossible, unparseable staged APK,
+ * binder died, version mismatch/absent after the grace window) fall back
+ * to the dialog tail from the cached verified APK, never a failure.
+ * Dialog path is untouched when Shizuku is absent or denied.
  *
  * Two entries: [runFlow] downloads unconditionally (poll-triggered
  * auto-download and fresh Install taps); [runResume] reuses an already
@@ -74,21 +76,47 @@ object AppInstallFlow {
             ShizukuSilentInstall.Status.UNAVAILABLE
 
         /**
-         * Copies the verified APK where the shell UID can read it (the
-         * shell cannot read app-private dirs). Returns the staged file, or
-         * null when staging is impossible — the caller falls back to the
-         * dialog flow, never a failure. Called only AFTER a passed verify,
-         * and only on the silent path.
+         * Copies the verified APK to the staged location the privileged
+         * session writer reads (our own storage — no cross-uid
+         * readability needed). Returns the staged file, or null when
+         * staging is impossible — the caller falls back to the dialog
+         * flow, never a failure. Called only AFTER a passed verify, and
+         * only on the silent path.
          */
-        suspend fun stageForShell(verifiedApk: File): File? = null
+        suspend fun stagePrivileged(verifiedApk: File): File? = null
 
         /**
-         * One shell `pm install` of the staged APK. Any transport edge
-         * surfaces as [ShizukuSilentInstall.ShellOutcome.BinderDied] so the
-         * caller falls back to the dialog flow — never a terminal failure.
+         * Parses the staged APK's versionCode once (before commit). Null
+         * when unparseable — the caller fails closed to the dialog flow,
+         * never a silent success.
          */
-        suspend fun shellCommit(stagedApk: File): ShizukuSilentInstall.ShellOutcome =
-            ShizukuSilentInstall.ShellOutcome.BinderDied
+        suspend fun stagedVersionCode(stagedApk: File): Long? = null
+
+        /**
+         * One privileged-session commit of the staged APK. Any transport
+         * edge surfaces as
+         * [ShizukuSilentInstall.PrivilegedOutcome.TransportDied] so the
+         * caller falls back to the dialog flow — never a terminal
+         * failure. The outcome is never trusted alone: the caller reads
+         * back the installed version via [awaitInstalledVersion].
+         */
+        suspend fun privilegedCommit(
+            stagedApk: File,
+            packageName: String,
+        ): ShizukuSilentInstall.PrivilegedOutcome =
+            ShizukuSilentInstall.PrivilegedOutcome.TransportDied
+
+        /**
+         * Polls the installed versionCode until it equals
+         * [expectedVersionCode] or the grace window elapses; returns the
+         * last observed value (null when the package never appeared).
+         * The caller decides via
+         * [ShizukuSilentInstall.isVerifiedInstall].
+         */
+        suspend fun awaitInstalledVersion(
+            packageName: String,
+            expectedVersionCode: Long,
+        ): Long? = null
     }
 
     /** Bounded download outcome (mirrors the downloader, host-agnostic). */
@@ -138,21 +166,12 @@ object AppInstallFlow {
         data object UnknownSourcesRevoked : Outcome
 
         /**
-         * Silent commit succeeded (Shizuku shell `pm install` exit 0):
+         * Silent commit succeeded (privileged session committed AND the
+         * installed versionCode read back equal to the staged one):
          * terminal — the caller posts SUCCESS. The staged copy and the
          * cache copy are already deleted.
          */
         data object SilentInstalled : Outcome
-
-        /**
-         * Silent commit ran but pm refused (nonzero exit): terminal — the
-         * caller posts FAILED with [detail] (raw pm output, capped), which
-         * the existing cause-aware mapping renders (signature mismatch →
-         * App-info, otherwise Retry). The staged copy is deleted; the
-         * verified cache is KEPT so Retry resumes via [runResume]
-         * (which re-verifies before reuse) without re-fetching.
-         */
-        data class SilentFailed(val detail: String?) : Outcome
     }
 
     /**
@@ -202,13 +221,15 @@ object AppInstallFlow {
         // Re-check AFTER verify, BEFORE commit: the grant could have been
         // revoked while the (long) download ran. Fail closed.
         // Silent path first: when Shizuku is granted, the verified bytes
-        // commit via the shell service — shell `pm install` needs no
-        // unknown-sources grant (like `adb install`), so the grant gate is
-        // skipped ONLY here. Any transport edge (staging impossible,
-        // binder died) falls through to the dialog tail below from the
-        // cached verified APK — never a failure.
+        // commit via the privileged installer session — privileged
+        // commits need no unknown-sources grant (like `adb install`), so
+        // the grant gate is skipped ONLY here. Any transport edge
+        // (staging impossible, unparseable staged APK, binder died,
+        // version mismatch/absent after the grace window) falls through
+        // to the dialog tail below from the cached verified APK — never
+        // a failure.
         if (host.silentStatus() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED) {
-            runSilentCommit(dest, host)?.let { return it }
+            runSilentCommit(payload, dest, host)?.let { return it }
         }
         if (!host.canInstall()) {
             if (!keepVerifiedOnRevoked) runCatching { dest.delete() }
@@ -242,58 +263,84 @@ object AppInstallFlow {
         if (!reuse) return runFlow(payload, dest, host, onProgress)
         if (host.isCancelled()) return Outcome.Cancelled
         // Retry of a silent-capable attempt re-enters the silent branch
-        // from the re-verified cache (stage → shell, no re-download);
-        // transport edges fall through to the dialog tail below.
+        // from the re-verified cache (stage → privileged session, no
+        // re-download); transport/verification edges fall through to the
+        // dialog tail below.
         if (host.silentStatus() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED) {
-            runSilentCommit(dest, host)?.let { return it }
+            runSilentCommit(payload, dest, host)?.let { return it }
         }
         if (!host.canInstall()) return Outcome.UnknownSourcesRevoked
         return commitTail(payload, dest, host)
     }
 
     /**
-     * Silent commit tail: stage the verified APK where shell can read it,
-     * run one shell `pm install`, then exactly one outcome. Returns null
-     * when the silent attempt is impossible (staging failed, binder died
-     * mid-flow, or cancelled before staging) so the caller falls through
-     * to the dialog tail from the cached verified APK. A cancel landing
-     * here never commits behind the user's back — it reports Cancelled.
+     * Silent commit tail: stage the verified APK, parse its versionCode
+     * once, commit via the privileged installer session, then read back
+     * the installed versionCode and require equality. Returns the
+     * terminal [Outcome.SilentInstalled] only on a verified install;
+     * returns null (fall through to the dialog tail from the cached
+     * verified APK) when the silent attempt is impossible or unverified:
+     * cancelled before staging, staging failed, staged APK unparseable,
+     * binder died mid-flow, or version mismatch/absent after the grace
+     * window. A cancel landing here never commits behind the user's back
+     * — it reports Cancelled.
      *
-     * Cleanup: the staged copy is always deleted (success, pm failure, or
+     * Cleanup: the staged copy is always deleted (success, unverified, or
      * fallback); the cache copy follows the existing rules (deleted on
-     * silent success, kept on pm failure for Retry, kept on fallback for
-     * the dialog tail).
+     * silent success, kept on fallback for the dialog tail).
      */
     private suspend fun runSilentCommit(
+        payload: AppInstallPayload,
         dest: File,
         host: Host,
     ): Outcome? {
         if (host.isCancelled()) return Outcome.Cancelled
         val staged = try {
-            host.stageForShell(dest)
+            host.stagePrivileged(dest)
         } catch (_: Exception) {
             null
         }
         if (staged == null) return null
-        return when (val r = try {
-            host.shellCommit(staged)
+        if (!ShizukuSilentInstall.isStagedApkPath(staged.absolutePath)) {
+            runCatching { staged.delete() }
+            return null
+        }
+        // Parse once, pass through: the expected versionCode threads from
+        // the staged APK into the read-back below. Unparseable fails
+        // closed to the dialog path (unknown state, never silent-retry).
+        val expected = try {
+            host.stagedVersionCode(staged)
         } catch (_: Exception) {
-            ShizukuSilentInstall.ShellOutcome.BinderDied
-        }) {
-            is ShizukuSilentInstall.ShellOutcome.Finished -> {
-                if (r.exitCode == 0) {
-                    runCatching { staged.delete() }
-                    runCatching { dest.delete() }
-                    Outcome.SilentInstalled
-                } else {
-                    runCatching { staged.delete() }
-                    Outcome.SilentFailed(r.output.ifBlank { null })
-                }
-            }
-            is ShizukuSilentInstall.ShellOutcome.BinderDied -> {
-                runCatching { staged.delete() }
-                null
-            }
+            null
+        }
+        if (expected == null) {
+            runCatching { staged.delete() }
+            return null
+        }
+        val commit = try {
+            host.privilegedCommit(staged, payload.packageName)
+        } catch (_: Exception) {
+            ShizukuSilentInstall.PrivilegedOutcome.TransportDied
+        }
+        if (commit is ShizukuSilentInstall.PrivilegedOutcome.TransportDied) {
+            runCatching { staged.delete() }
+            return null
+        }
+        // The commit call alone is never trusted: the installed
+        // versionCode must equal the staged one after the grace window.
+        // Mismatch/absent fails over to the dialog chain (the verified
+        // cache is kept for it) — exactly as transport trouble does.
+        val installed = try {
+            host.awaitInstalledVersion(payload.packageName, expected)
+        } catch (_: Exception) {
+            null
+        }
+        runCatching { staged.delete() }
+        return if (ShizukuSilentInstall.isVerifiedInstall(expected, installed)) {
+            runCatching { dest.delete() }
+            Outcome.SilentInstalled
+        } else {
+            null
         }
     }
 
@@ -337,7 +384,6 @@ object AppInstallFlow {
         is Outcome.HashMismatch -> TerminalKind.HASH_MISMATCH
         is Outcome.CommitFailed -> TerminalKind.FAILED
         is Outcome.SilentInstalled -> TerminalKind.SUCCESS
-        is Outcome.SilentFailed -> TerminalKind.FAILED
         is Outcome.UnknownSourcesRevoked -> null
     }
 }

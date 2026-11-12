@@ -3,6 +3,7 @@ package com.phonecompanion.app.notify
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -11,10 +12,11 @@ import java.io.File
 
 /**
  * Covers the Shizuku silent branch of [AppInstallFlow] (verify → stage →
- * shell commit): when it is attempted, when it falls back to the dialog
- * tail, and what each terminal leaves on disk. The Android hosts (auto +
- * activity) only adapt calls; the ordering and fallback rules live here
- * and are faked without a device.
+ * version parse → privileged commit → version read-back): when it is
+ * attempted, when it falls back to the dialog tail, and what each
+ * terminal leaves on disk. The Android hosts (auto + activity) only
+ * adapt calls; the ordering and fallback rules live here and are faked
+ * without a device.
  */
 class AppInstallSilentFlowTest {
 
@@ -32,7 +34,7 @@ class AppInstallSilentFlowTest {
         ),
     )!!
 
-    /** Fake host with the silent branch scripted (status/stage/shell). */
+    /** Fake host with the silent branch scripted (status/stage/version/commit/await). */
     private class SilentFakeHost(
         var downloadResult: AppInstallFlow.DownloadResult = AppInstallFlow.DownloadResult.Done(10),
         var verifyResults: ArrayDeque<Boolean> = ArrayDeque(listOf(true)),
@@ -43,13 +45,20 @@ class AppInstallSilentFlowTest {
             ShizukuSilentInstall.Status.UNAVAILABLE,
         /** Null stages nothing (staging impossible → dialog fallback). */
         var staged: File? = null,
-        var shellResult: ShizukuSilentInstall.ShellOutcome =
-            ShizukuSilentInstall.ShellOutcome.Finished(0, "Success"),
+        /** Null means the staged APK is unparseable → dialog fallback. */
+        var stagedVersion: Long? = 42L,
+        var commitOutcome: ShizukuSilentInstall.PrivilegedOutcome =
+            ShizukuSilentInstall.PrivilegedOutcome.Committed(0),
+        /** Last read-back result (null = package absent after grace). */
+        var installedVersion: Long? = 42L,
+        /** When true, privilegedCommit throws (binder vanished mid-flow). */
+        var throwOnCommit: Boolean = false,
     ) : AppInstallFlow.Host {
         val events = mutableListOf<String>()
         var downloadCalls = 0
         var commitCalls = 0
-        var shellStaged: File? = null
+        var committedStaged: File? = null
+        var awaitExpected: Long? = null
 
         override suspend fun download(
             payload: AppInstallPayload,
@@ -86,15 +95,33 @@ class AppInstallSilentFlowTest {
 
         override fun silentStatus(): ShizukuSilentInstall.Status = status
 
-        override suspend fun stageForShell(verifiedApk: File): File? {
+        override suspend fun stagePrivileged(verifiedApk: File): File? {
             events += "stage"
             return staged
         }
 
-        override suspend fun shellCommit(stagedApk: File): ShizukuSilentInstall.ShellOutcome {
-            events += "shell"
-            shellStaged = stagedApk
-            return shellResult
+        override suspend fun stagedVersionCode(stagedApk: File): Long? {
+            events += "version"
+            return stagedVersion
+        }
+
+        override suspend fun privilegedCommit(
+            stagedApk: File,
+            packageName: String,
+        ): ShizukuSilentInstall.PrivilegedOutcome {
+            events += "silent"
+            if (throwOnCommit) throw IllegalStateException("binder vanished")
+            committedStaged = stagedApk
+            return commitOutcome
+        }
+
+        override suspend fun awaitInstalledVersion(
+            packageName: String,
+            expectedVersionCode: Long,
+        ): Long? {
+            events += "await"
+            awaitExpected = expectedVersionCode
+            return installedVersion
         }
     }
 
@@ -114,10 +141,13 @@ class AppInstallSilentFlowTest {
         val file = dest()
         val outcome = AppInstallFlow.runFlow(payload(), file, host)
         assertEquals(AppInstallFlow.Outcome.SilentInstalled, outcome)
-        // Verify-before-stage ordering, and the dialog tail (grant
-        // re-check + PackageInstaller commit) is never touched.
-        assertEquals(listOf("download", "verify", "stage", "shell"), host.events)
-        assertEquals(staged, host.shellStaged)
+        // Verify-before-stage ordering, then parse → commit → read-back;
+        // the dialog tail (grant re-check + PackageInstaller commit) is
+        // never touched.
+        assertEquals(listOf("download", "verify", "stage", "version", "silent", "await"), host.events)
+        assertEquals(staged, host.committedStaged)
+        // Parse-once value passes through to the read-back.
+        assertEquals(42L, host.awaitExpected)
         assertEquals(0, host.commitCalls)
         // Silent success deletes both copies: nothing installable lingers.
         assertFalse(file.exists())
@@ -142,14 +172,14 @@ class AppInstallSilentFlowTest {
         val host = SilentFakeHost(
             status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
             staged = staged,
-            shellResult = ShizukuSilentInstall.ShellOutcome.BinderDied,
+            commitOutcome = ShizukuSilentInstall.PrivilegedOutcome.TransportDied,
         )
         val file = dest()
         file.writeBytes(ByteArray(10))
         val outcome = AppInstallFlow.runFlow(payload(), file, host)
         // Transport trouble never fails the attempt: the dialog tail owns it.
         assertEquals(AppInstallFlow.Outcome.Committed, outcome)
-        assertEquals(listOf("download", "verify", "stage", "shell", "canInstall", "commit"), host.events)
+        assertEquals(listOf("download", "verify", "stage", "version", "silent", "canInstall", "commit"), host.events)
         // Staged copy cleaned; verified cache kept for the dialog commit.
         assertFalse(staged.exists())
         assertTrue(file.exists())
@@ -164,6 +194,24 @@ class AppInstallSilentFlowTest {
         val outcome = AppInstallFlow.runFlow(payload(), dest(), host)
         assertEquals(AppInstallFlow.Outcome.Committed, outcome)
         assertEquals(listOf("download", "verify", "stage", "canInstall", "commit"), host.events)
+    }
+
+    @Test
+    fun `unparseable staged apk fails closed to the dialog path`() = runBlocking {
+        val staged = stagedFile()
+        val host = SilentFakeHost(
+            status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
+            staged = staged,
+            stagedVersion = null,
+        )
+        val file = dest()
+        val outcome = AppInstallFlow.runFlow(payload(), file, host)
+        // Unknown state: never a silent success, never a failure — the
+        // dialog tail decides from the cached verified APK.
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
+        assertEquals(listOf("download", "verify", "stage", "version", "canInstall", "commit"), host.events)
+        assertFalse(staged.exists())
+        assertTrue(file.exists())
     }
 
     @Test
@@ -193,33 +241,89 @@ class AppInstallSilentFlowTest {
         )
         val outcome = AppInstallFlow.runFlow(payload(), dest(), host)
         assertEquals(AppInstallFlow.Outcome.Cancelled, outcome)
-        assertTrue(host.events.none { it == "stage" || it == "shell" })
+        assertTrue(host.events.none { it == "stage" || it == "silent" })
         assertEquals(0, host.commitCalls)
     }
 
     @Test
-    fun `pm failure keeps the cache with detail for retry`() = runBlocking {
+    fun `version mismatch falls back to the dialog chain, never failed`() = runBlocking {
         val staged = stagedFile()
-        val raw = "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: " +
-            "Package com.example.app signatures do not match previously installed version]"
         val host = SilentFakeHost(
             status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
             staged = staged,
-            shellResult = ShizukuSilentInstall.ShellOutcome.Finished(1, raw),
+            stagedVersion = 42L,
+            commitOutcome = ShizukuSilentInstall.PrivilegedOutcome.Committed(0),
+            // A different build is installed: the silent attempt is
+            // unverified even though the session reported success.
+            installedVersion = 41L,
         )
         val file = dest()
         val outcome = AppInstallFlow.runFlow(payload(), file, host)
-        val failed = outcome as AppInstallFlow.Outcome.SilentFailed
-        assertEquals(raw, failed.detail)
-        // Reuses the existing cause-aware mapping downstream.
+        // Fail over to the existing chain (dialog commit → ACTION_VIEW →
+        // terminal), exactly as transport trouble does — never a silent
+        // failure terminal, never a retry loop.
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
         assertEquals(
-            AppInstallResult.FailureKind.SIGNATURE_MISMATCH,
-            AppInstallResult.failureKindOf(failed.detail),
+            listOf("download", "verify", "stage", "version", "silent", "await", "canInstall", "commit"),
+            host.events,
         )
-        assertEquals(AppInstallFlow.TerminalKind.FAILED, with(AppInstallFlow) { outcome.terminalKind() })
-        // Verified cache kept so Retry resumes without re-fetching.
-        assertTrue(file.exists())
+        assertEquals(42L, host.awaitExpected)
+        // Staged copy cleaned; verified cache kept for the dialog commit.
         assertFalse(staged.exists())
+        assertTrue(file.exists())
+    }
+
+    @Test
+    fun `absent package after grace falls back to the dialog chain`() = runBlocking {
+        val staged = stagedFile()
+        val host = SilentFakeHost(
+            status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
+            staged = staged,
+            commitOutcome = ShizukuSilentInstall.PrivilegedOutcome.Committed(0),
+            installedVersion = null,
+        )
+        val file = dest()
+        val outcome = AppInstallFlow.runFlow(payload(), file, host)
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
+        assertTrue(host.events.contains("await"))
+        assertEquals(1, host.commitCalls)
+        assertFalse(staged.exists())
+        assertTrue(file.exists())
+    }
+
+    @Test
+    fun `unknown commit status still verifies via read-back`() = runBlocking {
+        val staged = stagedFile()
+        val host = SilentFakeHost(
+            status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
+            staged = staged,
+            // No status arrived in time: unknown — the read-back decides.
+            commitOutcome = ShizukuSilentInstall.PrivilegedOutcome.Committed(null),
+            installedVersion = 42L,
+        )
+        val file = dest()
+        val outcome = AppInstallFlow.runFlow(payload(), file, host)
+        assertEquals(AppInstallFlow.Outcome.SilentInstalled, outcome)
+        assertFalse(file.exists())
+        assertFalse(staged.exists())
+    }
+
+    @Test
+    fun `failure status without matching read-back falls back`() = runBlocking {
+        val staged = stagedFile()
+        val host = SilentFakeHost(
+            status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
+            staged = staged,
+            commitOutcome = ShizukuSilentInstall.PrivilegedOutcome.Committed(1),
+            installedVersion = null,
+        )
+        val file = dest()
+        val outcome = AppInstallFlow.runFlow(payload(), file, host)
+        // The status alone never fails the attempt: unverified means the
+        // dialog tail decides (it re-derives signature vs transient).
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
+        assertEquals(1, host.commitCalls)
+        assertTrue(file.exists())
     }
 
     @Test
@@ -245,8 +349,8 @@ class AppInstallSilentFlowTest {
         val outcome = AppInstallFlow.runResume(payload(), file, host)
         assertEquals(AppInstallFlow.Outcome.SilentInstalled, outcome)
         assertEquals(0, host.downloadCalls)
-        // Re-verify before reuse, then stage → shell.
-        assertEquals(listOf("verify", "stage", "shell"), host.events)
+        // Re-verify before reuse, then stage → version → commit → await.
+        assertEquals(listOf("verify", "stage", "version", "silent", "await"), host.events)
         assertFalse(file.exists())
         assertFalse(staged.exists())
     }
@@ -265,7 +369,7 @@ class AppInstallSilentFlowTest {
         val outcome = AppInstallFlow.runResume(payload(), file, host)
         assertEquals(AppInstallFlow.Outcome.SilentInstalled, outcome)
         assertEquals(1, host.downloadCalls)
-        assertEquals(listOf("verify", "download", "verify", "stage", "shell"), host.events)
+        assertEquals(listOf("verify", "download", "verify", "stage", "version", "silent", "await"), host.events)
     }
 
     @Test
@@ -274,13 +378,28 @@ class AppInstallSilentFlowTest {
             verifyResults = ArrayDeque(listOf(true)),
             status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
             staged = stagedFile(),
-            shellResult = ShizukuSilentInstall.ShellOutcome.BinderDied,
+            commitOutcome = ShizukuSilentInstall.PrivilegedOutcome.TransportDied,
         )
         val file = dest()
         file.writeBytes(ByteArray(10))
         val outcome = AppInstallFlow.runResume(payload(), file, host)
         assertEquals(AppInstallFlow.Outcome.Committed, outcome)
         assertEquals(0, host.downloadCalls)
-        assertEquals(listOf("verify", "stage", "shell", "canInstall", "commit"), host.events)
+        assertEquals(listOf("verify", "stage", "version", "silent", "canInstall", "commit"), host.events)
+    }
+
+    @Test
+    fun `privileged host exceptions fail closed to the dialog path`() = runBlocking {
+        val staged = stagedFile()
+        val host = SilentFakeHost(
+            status = ShizukuSilentInstall.Status.AVAILABLE_GRANTED,
+            staged = staged,
+            throwOnCommit = true,
+        )
+        val file = dest()
+        val outcome = AppInstallFlow.runFlow(payload(), file, host)
+        assertEquals(AppInstallFlow.Outcome.Committed, outcome)
+        assertNull(host.awaitExpected)
+        assertTrue(file.exists())
     }
 }

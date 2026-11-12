@@ -134,7 +134,7 @@ object AppInstallCommandPoll {
             override suspend fun startDownload(payload: AppInstallPayload) {
                 // Drop superseded/abandoned APKs before starting so a
                 // stale file never sits next to this command's download —
-                // cache and the shell-readable staged dir alike.
+                // cache and the staged dir alike.
                 AppInstallFiles.purgeStaleCache(app, payload.pushId)
                 AppInstallFiles.purgeStaleStaged(app, payload.pushId)
                 val attempt = AppInstallSessions.startAttempt(payload.pushId)

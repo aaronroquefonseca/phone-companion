@@ -14,14 +14,15 @@ object AppInstallFiles {
     private const val DIR = "app_push"
 
     /**
-     * Shell-readable staging dir for Shizuku silent installs: the shell
-     * UID (2000 over ADB) CANNOT read the app's private dirs
-     * (`/data/data/<pkg>`), so verified APKs are copied here — the
-     * app-specific external dir (`getExternalFilesDir("apk")`), which the
-     * app can write and shell can read, is not media-scanned, and needs no
-     * extra permissions. Same sanitized file name as the cache, same 24 h
-     * stale purge (see [purgeStaleStaged]). Deleted after every silent
-     * terminal; the cache copy follows the existing keep/delete rules.
+     * Staging dir for Shizuku silent installs: the verified APK is copied
+     * here before the privileged installer session reads its bytes (same
+     * sanitized file name as the cache, same 24 h stale purge — see
+     * [purgeStaleStaged]). The session writer is our own process, so no
+     * cross-uid readability is required; the app-specific external dir
+     * (`getExternalFilesDir("apk")`) is used for continuity with the
+     * cache lifecycle, is not media-scanned, and needs no extra
+     * permissions. Deleted after every silent terminal; the cache copy
+     * follows the existing keep/delete rules.
      */
     private const val STAGED_DIR = "apk"
 
@@ -76,7 +77,7 @@ object AppInstallFiles {
 
     /**
      * Android entry point: purges stale staged APKs around [currentPushId]
-     * in the shell-readable external dir (same 24 h rule as the cache).
+     * in the external staged dir (same 24 h rule as the cache).
      * Call wherever [purgeStaleCache] is called so an abandoned staged copy
      * never lingers on shared storage.
      */

@@ -19,7 +19,7 @@ import com.phonecompanion.app.R
 import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.AppInstallFiles
 import com.phonecompanion.app.notify.AppInstallPayload
-import com.phonecompanion.app.notify.ShizukuShell
+import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 
@@ -39,7 +39,7 @@ import rikka.shizuku.Shizuku
  * deep-link to this app's "Install unknown apps" settings page; the grant
  * is re-checked in [onResume], and install is never attempted without it
  * (the flow re-checks again after verify, before commit), EXCEPT on the
- * Shizuku silent path (shell `pm install` needs no grant — the flow skips
+ * Shizuku silent path (privileged sessions need no grant — the flow skips
  * the gate only there, and only when already granted at commit time).
  * When Shizuku is reachable but ungranted, this screen shows the one-time
  * enable affordance (status line + request button, foreground-only
@@ -131,7 +131,7 @@ class AppInstallActivity : AppCompatActivity() {
         }
         // Drop superseded/abandoned APKs on entry so a stale file never
         // sits next to (or is mistaken for) this push — cache and the
-        // shell-readable staged dir alike.
+        // staged dir alike.
         AppInstallFiles.purgeStaleCache(this, parsed.pushId)
         AppInstallFiles.purgeStaleStaged(this, parsed.pushId)
         payload = parsed
@@ -265,14 +265,14 @@ class AppInstallActivity : AppCompatActivity() {
      * this foreground screen, never from background context.
      */
     private fun renderShizuku() {
-        val offer = runCatching { ShizukuShell.shouldOfferRequest() }.getOrDefault(false)
+        val offer = runCatching { ShizukuPrivilegedInstall.shouldOfferRequest() }.getOrDefault(false)
         shizukuBox.visibility = if (offer) View.VISIBLE else View.GONE
     }
 
     private fun requestShizukuPermission() {
         // Foreground only (this screen): a dead binder throws — swallow
         // and re-render on resume instead of crashing.
-        runCatching { ShizukuShell.requestPermission(SHIZUKU_REQUEST_CODE) }
+        runCatching { ShizukuPrivilegedInstall.requestPermission(SHIZUKU_REQUEST_CODE) }
     }
 
     private fun openUnknownSourcesSettings() {
