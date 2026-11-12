@@ -28,6 +28,7 @@
     <string name="main_shizuku_button">Allow Shizuku access</string>
     <string name="main_instant_off">Instant delivery: Off (tap to enable)</string>
     <string name="main_instant_on">Instant delivery: On (tap to disable)</string>
+    <string name="main_instant_hint">Keeps a connection open to your server so pushed installs and commands arrive in about a second, even while the phone is locked or asleep. While it is on you will see a small "Instant delivery on" notification (tap "Turn off" there or this button to stop). Uses a negligible amount of battery: the connection is idle, not polling.</string>
     <string name="main_security_banner">Shizuku access is powerful: granting it lets this app run anything ADB can (read logs, change settings, take screenshots, control the screen). Only enable it if you trust this device build and your backend is protected by a strong, unique password — anyone with backend access could otherwise control this phone.</string>
     <string name="main_security_banner_got_it">Got it</string>
     <string name="about_title">About Phone Companion</string>
