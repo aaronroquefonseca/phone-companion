@@ -63,6 +63,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var batteryButton: Button
     private lateinit var shizukuButton: Button
     private lateinit var instantButton: Button
+    private lateinit var instantHint: TextView
     private lateinit var securityBanner: android.widget.LinearLayout
 
     /**
@@ -145,6 +146,7 @@ class MainActivity : AppCompatActivity() {
         shizukuButton.setOnClickListener { requestShizukuPermission() }
         instantButton = findViewById(R.id.instantButton)
         instantButton.setOnClickListener { toggleInstantMode() }
+        instantHint = findViewById(R.id.instantHint)
         runCatching {
             rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         }
@@ -337,6 +339,7 @@ class MainActivity : AppCompatActivity() {
         // Instant mode is the reliable delivery path while idle; offer it
         // whenever paired and reflect its persisted state.
         instantButton.visibility = if (paired) View.VISIBLE else View.GONE
+        instantHint.visibility = if (paired) View.VISIBLE else View.GONE
         val instantOn = InstantMode.isEnabled(this)
         instantButton.text = getString(
             if (instantOn) R.string.main_instant_on else R.string.main_instant_off,
