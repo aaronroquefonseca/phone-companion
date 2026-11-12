@@ -30,6 +30,8 @@ import java.io.ByteArrayOutputStream
  */
 object ScreenProjection {
 
+    private var appContext: Context? = null
+
     private const val TAG = "ScreenProjection"
 
     private var projection: MediaProjection? = null
@@ -42,6 +44,17 @@ object ScreenProjection {
     // screen produces no new frames, so without this cache every capture
     // after the first had no image to acquire and fell back to the slow
     // screencap path.
+    // A mirrored display stops producing frames when the screen turns off,
+    // and after waking it can keep serving the frame from before sleep.
+    // Without this flag a capture returned a stale image (clock stuck at
+    // the sleep time) instead of falling back to screencap.
+    @Volatile
+    private var staleSinceScreenOn = false
+    @Volatile
+    private var screenOnAtMs = 0L
+    private var frameAtMs = 0L
+    private var screenReceiver: android.content.BroadcastReceiver? = null
+
     private val frameLock = Any()
     private var framePixels: IntArray? = null
     private var frameWidth = 0
@@ -59,6 +72,7 @@ object ScreenProjection {
 
     fun start(app: Context, resultCode: Int, data: Intent): Boolean {
         pending = false
+        appContext = app.applicationContext
         stop()
         return try {
             val manager = app.getSystemService(MediaProjectionManager::class.java)
@@ -82,6 +96,9 @@ object ScreenProjection {
             reader = r
             display = d
             isReady = true
+            screenOnAtMs = android.os.SystemClock.elapsedRealtime()
+            staleSinceScreenOn = false
+            registerScreenReceiver(app)
             Log.i(TAG, "projection ready ${width}x$height")
             true
         } catch (e: Exception) {
@@ -124,6 +141,8 @@ object ScreenProjection {
                 frameWidth = w
                 frameHeight = h
             }
+            frameAtMs = android.os.SystemClock.elapsedRealtime()
+            if (frameAtMs >= screenOnAtMs) staleSinceScreenOn = false
         } catch (_: Exception) {
             // A bad frame is skipped; the previous cache stays valid.
         } finally {
@@ -133,6 +152,9 @@ object ScreenProjection {
 
     /** Latest mirrored frame as JPEG at [targetWidth]; null when not ready. */
     fun capture(targetWidth: Int, quality: Int): ByteArray? {
+        // No frame since the screen came back on: the cache is from before
+        // sleep. Refuse it so LinkOps falls back to a live screencap.
+        if (staleSinceScreenOn) return null
         val (pixels, w, h) = synchronized(frameLock) {
             val p = framePixels ?: return null
             Triple(p, frameWidth, frameHeight)
@@ -161,8 +183,34 @@ object ScreenProjection {
         }
     }
 
+    private fun registerScreenReceiver(app: Context) {
+        if (screenReceiver != null) return
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        staleSinceScreenOn = true
+                        screenOnAtMs = android.os.SystemClock.elapsedRealtime()
+                    }
+                    Intent.ACTION_SCREEN_ON -> {
+                        staleSinceScreenOn = true
+                        screenOnAtMs = android.os.SystemClock.elapsedRealtime()
+                    }
+                }
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        runCatching { app.registerReceiver(receiver, filter) }
+        screenReceiver = receiver
+    }
+
     fun stop() {
         isReady = false
+        screenReceiver?.let { runCatching { appContext?.unregisterReceiver(it) } }
+        screenReceiver = null
         runCatching { display?.release() }
         runCatching { reader?.close() }
         runCatching { projection?.stop() }
