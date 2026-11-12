@@ -14,25 +14,32 @@ import java.util.concurrent.ConcurrentHashMap
  * cannot show.
  *
  * On Android 13+ a denied [android.Manifest.permission.POST_NOTIFICATIONS]
- * makes [NotificationManager.notify] a silent no-op, and a user-blocked
- * channel does the same on every version. The install flow must detect that
- * and surface its progress in-app instead, so there is always exactly one
- * visible source of truth (the notification when it can post, an in-app
- * indicator otherwise).
+ * makes [NotificationManager.notify] a silent no-op; a user-blocked
+ * channel does the same on every version, and an IMPORTANCE_MIN channel
+ * renders posts invisibly (no status-bar icon). The install flow must
+ * detect any of those and surface its progress in-app instead, so there
+ * is always exactly one visible source of truth.
  */
 object AppInstallVisibility {
 
     /**
      * Whether the status-bar notification can be the install flow's source
-     * of truth. False when POST_NOTIFICATIONS is denied (API 33+) or the
-     * shared general channel is blocked by the user. Pure ([sdkInt] and the
-     * two platform flags injected) so it is unit-testable.
+     * of truth. False when the app's notifications are disabled, when
+     * POST_NOTIFICATIONS is denied (API 33+), or when the install channel
+     * is blocked or MIN-importance (invisible). Pure flags injected so it
+     * is unit-testable.
      */
     fun canPostNotifications(
         sdkInt: Int,
         notificationsGranted: Boolean,
         channelBlocked: Boolean,
-    ): Boolean = if (sdkInt >= 33) notificationsGranted && !channelBlocked else !channelBlocked
+        channelMin: Boolean = false,
+        appNotificationsEnabled: Boolean = true,
+    ): Boolean {
+        if (!appNotificationsEnabled) return false
+        if (channelBlocked || channelMin) return false
+        return if (sdkInt >= 33) notificationsGranted else true
+    }
 
     /** Android edge: reads the live platform state for [canPostNotifications]. */
     fun canPostNotifications(context: Context): Boolean {
@@ -43,12 +50,23 @@ object AppInstallVisibility {
         } else {
             true
         }
-        val blocked = runCatching {
-            val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.getNotificationChannel(NotificationChannels.GENERAL_CHANNEL_ID)
-                ?.importance == NotificationManager.IMPORTANCE_NONE
-        }.getOrDefault(false)
-        return canPostNotifications(Build.VERSION.SDK_INT, granted, blocked)
+        val manager = runCatching {
+            app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        }.getOrNull()
+        val enabled = runCatching { manager?.areNotificationsEnabled() ?: true }
+            .getOrDefault(true)
+        val channel = runCatching {
+            manager?.getNotificationChannel(NotificationChannels.INSTALL_CHANNEL_ID)
+        }.getOrNull()
+        val blocked = channel?.importance == NotificationManager.IMPORTANCE_NONE
+        val min = channel?.importance == NotificationManager.IMPORTANCE_MIN
+        return canPostNotifications(
+            Build.VERSION.SDK_INT,
+            granted,
+            blocked,
+            min,
+            enabled,
+        )
     }
 }
 

@@ -28,6 +28,7 @@ import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
+import com.phonecompanion.app.work.RefreshWorker
 import kotlinx.coroutines.launch
 
 /**
@@ -151,6 +152,17 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         renderStatus()
+        // Opening the app is a refresh trigger. Without this, the outbox was
+        // only polled from the Widgets screen or the deferrable FCM wake, so
+        // install pushes could sit unclaimed until the user happened to visit
+        // Widgets. Schedule the hourly worker here too: it used to be
+        // scheduled only from WidgetsActivity, leaving installs with no
+        // periodic poll on a phone that never opened that screen.
+        val storage = SecureStorage.getInstance(this)
+        if (storage.isPaired) {
+            RefreshWorker.scheduleHourly(this)
+            RefreshWorker.requestManualRefresh(this)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -33,6 +33,30 @@ class AppInstallVisibilityTest {
     }
 
     @Test
+    fun `a min-importance channel is invisible and hides the notification`() {
+        assertFalse(
+            AppInstallVisibility.canPostNotifications(
+                sdkInt = 33,
+                notificationsGranted = true,
+                channelBlocked = false,
+                channelMin = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `app-level notifications disabled hides the notification`() {
+        assertFalse(
+            AppInstallVisibility.canPostNotifications(
+                sdkInt = 33,
+                notificationsGranted = true,
+                channelBlocked = false,
+                appNotificationsEnabled = false,
+            ),
+        )
+    }
+
+    @Test
     fun `progress registry set get and clear`() {
         try {
             AppInstallProgress.set("p1", "com.example.app", "Example", 42)
