@@ -140,7 +140,14 @@ when the app has an FCM token: the server sends a best-effort silent
 `app_push_wake` data message on every app-push, and the client polls
 immediately on receipt instead of waiting for the next cycle (poll
 otherwise; no `google-services.json`, no new dependencies, no
-Play-services-gated paths in this flow).
+Play-services-gated paths in this flow). The wake fetch runs inline
+inside `onMessageReceived` under a 15 s timeout (FCM holds the service
+alive for the call, bypassing all WorkManager/OEM deferral); on failure
+or timeout the expedited wake worker is enqueued as the backstop, as
+before. The pre-install screen also shows one battery row
+(`Background: unrestricted/restricted` + Fix) that opens the system's
+battery-optimization exemption screen — Samsung standby buckets can defer
+even expedited work, so unrestricted keeps wakes prompt.
 Each `app_install` command entry carries string fields
 `type=app_install`, `command_id` (per-device id used for dedupe and
 ack), `push_id`, `apk_url` (https only), `sha256` (64

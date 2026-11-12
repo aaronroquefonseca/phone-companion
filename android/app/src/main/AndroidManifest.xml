@@ -17,6 +17,14 @@
         attempted without the grant. PackageInstaller sessions need this to
         commit. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Battery-exemption affordance (pre-install screen Fix button):
+         REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is a normal (install-time)
+         permission — declaring it only allows firing the system's own
+         ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS screen for this
+         package; it changes no behavior by itself. Samsung standby
+         buckets can defer even expedited wake work, so the row lets the
+         user lift the app to unrestricted. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- No RECEIVE_BOOT_COMPLETED: WorkManager persists the hourly poll
         across reboots on its own; no boot receiver is promised or needed. -->
 

@@ -16,7 +16,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 /**
  * FCM receiver: renders data messages per [NotificationPayload] — one
@@ -39,9 +42,11 @@ import kotlinx.coroutines.launch
  * forwarded into activity extras.
  *
  * Silent app-push wake (`type=app_push_wake`, see
- * [AppInstallCommandPoll.isWake]): never rendered — the service enqueues
- * the expedited [AppInstallWakeWorker] poll so the auto-download starts
- * instantly instead of waiting for the next cycle.
+ * [AppInstallCommandPoll.isWake]): never rendered — the service polls the
+ * outbox INLINE (same [AppInstallCommandPoll.pollOnce] as the scheduled
+ * cycle) under a hard timeout, and only enqueues the expedited
+ * [AppInstallWakeWorker] as the backstop when the inline fetch fails or
+ * times out.
  */
 class CompanionMessagingService : FirebaseMessagingService() {
 
@@ -114,14 +119,20 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     private fun onMessageReceivedInternal(message: RemoteMessage) {
-        // Silent app-push wake FIRST: never render anything — enqueue the
-        // expedited wake poll (a Service has no goAsync; WorkManager owns
-        // the wakelock and the backstop). Enqueue never throws out; a
-        // failed wake stays silent because the next scheduled poll
-        // retries. All other types fall through to the existing render
-        // path untouched.
+        // Silent app-push wake FIRST: never render anything. The outbox
+        // fetch runs INLINE here (blocking, capped by
+        // INLINE_POLL_TIMEOUT_MS) instead of only enqueueing the expedited
+        // wake worker: Samsung standby buckets can defer even expedited
+        // WorkManager work minutes-to-hours, while FCM holds this service
+        // alive for the duration of onMessageReceived — so a synchronous
+        // fetch inside this call bypasses all WorkManager deferral and the
+        // auto-download starts instantly. The worker remains the backstop
+        // (slow/blocked fetch, or any inline failure), exactly as before.
+        // Enqueue-or-inline never throws out: a failed wake stays silent
+        // because the next scheduled poll retries. All other types fall
+        // through to the existing render path untouched.
         if (AppInstallCommandPoll.isWake(message.data)) {
-            runCatching { AppInstallWakeWorker.enqueue(this) }
+            handleWakeInlineBlocking()
             return
         }
         val payload = NotificationPayload.from(message)
@@ -185,6 +196,29 @@ class CompanionMessagingService : FirebaseMessagingService() {
                     .setSummaryText(shown.displayBody()),
             )
             manager.notify(payload.notifyId(), builder.build())
+        }
+    }
+
+    /**
+     * Silent-wake entry: best-effort inline fetch, never throws.
+     *
+     * `onMessageReceived` runs synchronously under FCM's wakelock, so
+     * blocking here (up to [INLINE_POLL_TIMEOUT_MS]) is held alive by
+     * the platform — unlike a detached service coroutine, which would die
+     * with the process (a Service has no `goAsync`; only
+     * BroadcastReceiver does). The outer runCatching is the no-throw
+     * guarantee: even genuine coroutine teardown (rethrown by the
+     * decision function, with nothing extra enqueued) is swallowed here —
+     * a failed wake stays silent and the next scheduled poll retries.
+     */
+    private fun handleWakeInlineBlocking() {
+        runCatching {
+            runBlocking {
+                handleWakeInline(
+                    inlinePoll = { AppInstallCommandPoll.pollOnce(this@CompanionMessagingService) },
+                    enqueueWakeWorker = { AppInstallWakeWorker.enqueue(this@CompanionMessagingService) },
+                )
+            }
         }
     }
 
@@ -268,6 +302,46 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     companion object {
+        /**
+         * Hard cap for the synchronous inline outbox fetch on an FCM wake.
+         * The fetch runs inside `onMessageReceived` (held alive by FCM),
+         * so it must never block the receiver indefinitely: past this
+         * budget the fetch is abandoned and the wake worker backstop takes
+         * over, exactly as the old enqueue-only path did.
+         */
+        internal const val INLINE_POLL_TIMEOUT_MS = 15_000L
+
+        /**
+         * Wake-branch decision matrix (pure collaborators, JVM-testable):
+         * runs [inlinePoll] under [timeoutMs]; on success returns WITHOUT
+         * touching [enqueueWakeWorker] (the posted-set dedupes the race
+         * when the worker also runs, so skipping the enqueue only saves
+         * work). On inline failure OR timeout, enqueues the existing wake
+         * worker as the backstop — the same enqueue the old path always
+         * did. [TimeoutCancellationException] is caught distinctly from a
+         * genuine [CancellationException] (its subclass): a timeout
+         * enqueues the backstop and returns, while genuine teardown of our
+         * own coroutine rethrows and enqueues nothing extra (the next
+         * scheduled poll is the backstop there). Never throws otherwise.
+         */
+        internal suspend fun handleWakeInline(
+            inlinePoll: suspend () -> Unit,
+            enqueueWakeWorker: () -> Unit,
+            timeoutMs: Long = INLINE_POLL_TIMEOUT_MS,
+        ) {
+            try {
+                withTimeout(timeoutMs) {
+                    inlinePoll()
+                }
+            } catch (e: TimeoutCancellationException) {
+                runCatching { enqueueWakeWorker() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                runCatching { enqueueWakeWorker() }
+            }
+        }
+
         /**
          * Stable, collision-resistant request codes (finding 26).
          *

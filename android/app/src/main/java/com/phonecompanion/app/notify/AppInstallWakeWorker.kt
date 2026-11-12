@@ -16,18 +16,23 @@ import kotlinx.coroutines.CancellationException
 import java.util.concurrent.TimeUnit
 
 /**
- * FCM-wake worker: the silent app-push wake ([AppInstallCommandPoll.isWake])
- * enqueues this (expedited) instead of rendering anything, and the worker
- * runs the same outbox poll as the scheduled cycle
- * ([AppInstallCommandPoll.pollOnce]) so the auto-download starts instantly
- * instead of waiting for the next poll.
+ * FCM-wake worker (backstop): the silent app-push wake
+ * ([AppInstallCommandPoll.isWake]) first polls the outbox INLINE inside
+ * `onMessageReceived` (see `CompanionMessagingService`), and only enqueues
+ * this (expedited) when the inline fetch fails or times out — plus the
+ * usual next-scheduled-poll safety net behind that.
  *
- * NOTE: a FirebaseMessagingService cannot hold itself alive for async
- * work — `goAsync()` exists only on BroadcastReceiver, not on Service —
- * so the wake hands off to WorkManager (which owns the wakelock and the
- * retry/backstop) rather than a detached service coroutine that would die
- * with the process. No screen-on gate here (unlike [RefreshWorker]):
- * a server wake means deliver now, foreground or not.
+ * Once enqueued the worker runs the same outbox poll as the scheduled
+ * cycle ([AppInstallCommandPoll.pollOnce]) so the auto-download still
+ * starts without waiting for the next poll.
+ *
+ * NOTE: only the SYNCHRONOUS inline fetch runs in the service (FCM
+ * holds the service alive for the duration of `onMessageReceived`; a
+ * Service has no `goAsync()`, so a detached service coroutine would die
+ * with the process). The worker handoff owns the wakelock and the
+ * retry/backstop for everything past the inline timeout. No screen-on
+ * gate here (unlike [RefreshWorker]): a server wake means deliver now,
+ * foreground or not.
  *
  * Logging discipline: shape only, never ids/content.
  */

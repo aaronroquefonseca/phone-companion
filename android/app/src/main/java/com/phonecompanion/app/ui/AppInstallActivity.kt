@@ -19,6 +19,7 @@ import com.phonecompanion.app.R
 import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.AppInstallFiles
 import com.phonecompanion.app.notify.AppInstallPayload
+import com.phonecompanion.app.notify.BatteryExemption
 import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
@@ -80,6 +81,9 @@ class AppInstallActivity : AppCompatActivity() {
     private lateinit var allowButton: Button
     private lateinit var shizukuBox: View
     private lateinit var shizukuButton: Button
+    private lateinit var batteryBox: View
+    private lateinit var batteryBody: TextView
+    private lateinit var batteryButton: Button
     private lateinit var installButton: Button
     private lateinit var cancelButton: Button
     private lateinit var statusView: TextView
@@ -111,6 +115,9 @@ class AppInstallActivity : AppCompatActivity() {
         allowButton = findViewById(R.id.appInstallAllowButton)
         shizukuBox = findViewById(R.id.appInstallShizuku)
         shizukuButton = findViewById(R.id.appInstallShizukuButton)
+        batteryBox = findViewById(R.id.appInstallBattery)
+        batteryBody = findViewById(R.id.appInstallBatteryBody)
+        batteryButton = findViewById(R.id.appInstallBatteryButton)
         installButton = findViewById(R.id.appInstallButton)
         cancelButton = findViewById(R.id.appInstallCancelButton)
         statusView = findViewById(R.id.appInstallStatus)
@@ -140,6 +147,7 @@ class AppInstallActivity : AppCompatActivity() {
 
         allowButton.setOnClickListener { openUnknownSourcesSettings() }
         shizukuButton.setOnClickListener { requestShizukuPermission() }
+        batteryButton.setOnClickListener { requestBatteryExemption() }
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         installButton.setOnClickListener { vm.start(parsed) }
         cancelButton.setOnClickListener {
@@ -219,6 +227,7 @@ class AppInstallActivity : AppCompatActivity() {
         }
         renderUnknownSources(p)
         renderShizuku()
+        renderBattery()
     }
 
     private fun showInvalid() {
@@ -228,6 +237,7 @@ class AppInstallActivity : AppCompatActivity() {
         installButton.isEnabled = false
         unknownSources.visibility = View.GONE
         shizukuBox.visibility = View.GONE
+        batteryBox.visibility = View.GONE
         cancelButton.text = getString(R.string.app_install_close)
         cancelButton.setOnClickListener { finish() }
     }
@@ -273,6 +283,36 @@ class AppInstallActivity : AppCompatActivity() {
         // Foreground only (this screen): a dead binder throws — swallow
         // and re-render on resume instead of crashing.
         runCatching { ShizukuPrivilegedInstall.requestPermission(SHIZUKU_REQUEST_CODE) }
+    }
+
+    /**
+     * Battery-exemption row: always shows the current state
+     * (unrestricted/restricted); the Fix button appears only while
+     * restricted and opens the system's own exemption screen. No
+     * auto-prompting, no repeat asks — one quiet row next to the Shizuku
+     * affordance. Re-checked on every resume (the user returns here from
+     * Settings) via [render].
+     */
+    private fun renderBattery() {
+        val exempt = runCatching { BatteryExemption.isExempt(this) }.getOrDefault(false)
+        batteryBox.visibility = View.VISIBLE
+        batteryBody.text = getString(
+            if (exempt) {
+                R.string.app_install_battery_unrestricted
+            } else {
+                R.string.app_install_battery_restricted
+            },
+        )
+        batteryButton.visibility =
+            if (BatteryExemption.shouldOfferFix(exempt)) View.VISIBLE else View.GONE
+    }
+
+    private fun requestBatteryExemption() {
+        // Foreground only (this screen), plain startActivity: the
+        // exemption action carries no result contract, so it consumes no
+        // request code — nothing to collide with SHIZUKU_REQUEST_CODE
+        // (a Shizuku-listener code, different namespace entirely).
+        runCatching { startActivity(BatteryExemption.requestIntent(packageName)) }
     }
 
     private fun openUnknownSourcesSettings() {

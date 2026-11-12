@@ -99,6 +99,27 @@
 
         </LinearLayout>
 
+        <LinearLayout
+            android:id="@+id/appInstallBattery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/appInstallBatteryBody"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+            <Button
+                android:id="@+id/appInstallBatteryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/app_install_battery_fix" />
+
+        </LinearLayout>
+
         <TextView
             android:id="@+id/appInstallStatus"
             android:layout_width="match_parent"
