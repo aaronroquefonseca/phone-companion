@@ -4,6 +4,9 @@
         android:id="@+id/menu_notification_settings"
         android:title="@string/menu_notification_settings" />
     <item
+        android:id="@+id/menu_battery_exemption"
+        android:title="@string/menu_battery_exemption" />
+    <item
         android:id="@+id/menu_about"
         android:title="@string/menu_about" />
     <item
