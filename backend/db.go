@@ -78,8 +78,28 @@ func OpenDB(path string) (*sql.DB, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return nil, err
 	}
-	// TODO (auth PR): set busy_timeout / journal_mode pragmas via DSN.
-	return sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	// Without WAL + a busy timeout, concurrent writers (device long-poll,
+	// operator polls, shell results) fail with SQLITE_BUSY. Callers then
+	// misreport those as "device_not_found" or a bare 500, which looked
+	// like a flaky app link until traced. WAL keeps readers off the
+	// writer's back; busy_timeout makes the remaining contention wait
+	// instead of failing.
+	for _, pragma := range []string{
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA foreign_keys = ON",
+	} {
+		if _, perr := db.Exec(pragma); perr != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("%s: %w", pragma, perr)
+		}
+	}
+	return db, nil
 }
 
 // Migrate applies the minimal schema stub. Future migrations are versioned

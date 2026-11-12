@@ -109,7 +109,12 @@ func handleShellQueue(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			writeAPIError(w, http.StatusUnprocessableEntity, "invalid_timeout")
 			return
 		}
-		dev, ok := lookupActiveDevice(r, db, deviceID)
+		dev, ok, lerr := lookupActiveDevice(r, db, deviceID)
+		if lerr != nil {
+			log.Printf("shell: device lookup: %v", lerr)
+			writeAPIError(w, http.StatusInternalServerError, "internal")
+			return
+		}
 		if !ok {
 			writeAPIError(w, http.StatusNotFound, "device_not_found")
 			return
@@ -253,6 +258,7 @@ func handleShellGet(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			log.Printf("shell: read command_id=%s: %v", commandID, err)
 			writeAPIError(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -268,14 +274,20 @@ func handleShellGet(db *sql.DB) http.HandlerFunc {
 // lookupActiveDevice returns the device id when it exists and is not
 // revoked. Device ids are opaque; no existence oracle beyond the
 // operator credential that already lists them.
-func lookupActiveDevice(r *http.Request, db *sql.DB, deviceID string) (string, bool) {
+// A missing/revoked device is not an error; a failing query is. Folding
+// both into "not found" hid transient database errors (SQLITE_BUSY) as a
+// bogus 404 that looked like a client bug.
+func lookupActiveDevice(r *http.Request, db *sql.DB, deviceID string) (string, bool, error) {
 	var id string
 	err := db.QueryRow(
 		`SELECT id FROM devices WHERE id = ? AND revoked_at IS NULL`, deviceID).Scan(&id)
-	if err != nil {
-		return "", false
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
 	}
-	return id, true
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 func boolInt(b bool) int {
