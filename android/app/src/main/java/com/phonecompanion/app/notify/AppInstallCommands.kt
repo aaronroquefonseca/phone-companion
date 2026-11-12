@@ -40,7 +40,25 @@ object AppInstallCommands {
         val malformed: Int,
         /** True when the body was not decodable JSON at all. */
         val syntaxError: Boolean,
+        /** Validated `shell` commands (operator remote-shell channel). */
+        val shell: List<ShellCommand> = emptyList(),
     )
+
+    /**
+     * One operator remote-shell command. Bounded like every other command:
+     * a 4 KB command ceiling and a 1–120 s timeout, both re-validated on
+     * the device so a malformed server row can never run unbounded.
+     */
+    data class ShellCommand(
+        val commandId: String,
+        val command: String,
+        val timeoutMs: Int,
+    )
+
+    private const val MAX_SHELL_COMMAND_CHARS = 4096
+    private const val MIN_SHELL_TIMEOUT_MS = 1_000
+    private const val MAX_SHELL_TIMEOUT_MS = 120_000
+    private const val DEFAULT_SHELL_TIMEOUT_MS = 30_000
 
     private val envelopeType =
         Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
@@ -65,6 +83,7 @@ object AppInstallCommands {
             emptyList(), 0, emptyList(), 0, syntaxError = true,
         )
         val valid = ArrayList<AppInstallPayload>(entries.size)
+        val shell = ArrayList<ShellCommand>()
         var unknown = 0
         val unknownIds = ArrayList<String>()
         var malformed = 0
@@ -72,6 +91,27 @@ object AppInstallCommands {
             val map = if (entry is Map<*, *>) stringify(entry) else null
             if (map == null) {
                 malformed++
+                continue
+            }
+            if (map["type"]?.trim() == "shell") {
+                val commandId = map["command_id"]?.trim().orEmpty()
+                val command = map["command"]?.trim().orEmpty()
+                // timeout_ms arrives as a JSON number (stringify keeps only
+                // strings), so read it from the raw entry.
+                val rawTimeout = (entry as Map<*, *>)["timeout_ms"]
+                val timeout = when (rawTimeout) {
+                    is Number -> rawTimeout.toInt()
+                    is String -> rawTimeout.trim().toIntOrNull()
+                    else -> null
+                }?.coerceIn(MIN_SHELL_TIMEOUT_MS, MAX_SHELL_TIMEOUT_MS)
+                    ?: DEFAULT_SHELL_TIMEOUT_MS
+                if (commandId.isEmpty() || command.isEmpty() ||
+                    command.length > MAX_SHELL_COMMAND_CHARS
+                ) {
+                    malformed++
+                } else {
+                    shell.add(ShellCommand(commandId, command, timeout))
+                }
                 continue
             }
             if (!AppInstallPayload.isAppInstall(map)) {
@@ -88,7 +128,7 @@ object AppInstallCommands {
                 valid.add(payload)
             }
         }
-        return ParsedCommands(valid, unknown, unknownIds, malformed, syntaxError = false)
+        return ParsedCommands(valid, unknown, unknownIds, malformed, syntaxError = false, shell = shell)
     }
 
     /**

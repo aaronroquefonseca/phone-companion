@@ -15,6 +15,7 @@ import org.junit.Test
 import retrofit2.Response
 import com.phonecompanion.app.data.ApiService
 import com.phonecompanion.app.data.CommandsAckRequest
+import com.phonecompanion.app.data.ShellResultRequest
 import com.phonecompanion.app.data.EnrollRequest
 import com.phonecompanion.app.data.EnrollResponse
 import com.phonecompanion.app.data.EnrollmentStore
@@ -64,6 +65,9 @@ class PairViewModelTest {
             throw UnsupportedOperationException("not under test")
 
         override suspend fun ackCommands(request: CommandsAckRequest): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun postShellResult(request: ShellResultRequest): Response<ResponseBody> =
             throw UnsupportedOperationException("not under test")
     }
 

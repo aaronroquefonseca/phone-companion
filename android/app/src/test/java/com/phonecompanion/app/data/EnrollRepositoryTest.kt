@@ -60,6 +60,9 @@ class EnrollRepositoryTest {
 
         override suspend fun ackCommands(request: CommandsAckRequest): Response<ResponseBody> =
             throw UnsupportedOperationException("not under test")
+
+        override suspend fun postShellResult(request: ShellResultRequest): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
     }
 
     private fun okResponse() = Response.success(

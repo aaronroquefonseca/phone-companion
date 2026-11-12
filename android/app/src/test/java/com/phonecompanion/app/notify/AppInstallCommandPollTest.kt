@@ -272,12 +272,12 @@ class AppInstallCommandPollTest {
     }
 
     @Test
-    fun `collaborators are exactly fetch start and ack`() {
-        // No widget, cache, or Glance edge exists on this path: the
-        // interface the poll core can reach is fetch/startDownload/ack only.
+    fun `collaborators are exactly fetch start shell and ack`() {
+        // No widget, cache, or Glance edge exists on this path. Shell is
+        // the operator remote-shell channel (execute + result upload).
         val names = AppInstallCommandPoll.Collaborators::class.java.declaredMethods
             .map { it.name }.toSet()
-        assertEquals(setOf("fetch", "startDownload", "ack"), names)
+        assertEquals(setOf("fetch", "startDownload", "executeShell", "postShellResult", "ack"), names)
     }
 
     @Test
