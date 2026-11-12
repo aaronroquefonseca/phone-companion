@@ -110,4 +110,18 @@
         app:layout_constraintTop_toBottomOf="@id/pairButton"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- Shown only while paired AND the OS still restricts background work:
+         without the exemption Android throttles the network fetch that a
+         wake triggers, so pushed installs wait until the phone is used. -->
+    <Button
+        android:id="@+id/batteryButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/main_battery_button"
+        android:visibility="gone"
+        app:layout_constraintTop_toBottomOf="@id/widgetsButton"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 </androidx.constraintlayout.widget.ConstraintLayout>
