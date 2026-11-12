@@ -6,7 +6,10 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
-import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * Single source-of-truth decision for the install flow's visible progress:
@@ -91,22 +94,30 @@ object AppInstallProgress {
         val percent: Int?,
     )
 
-    private val active = ConcurrentHashMap<String, Entry>()
+    private val state = MutableStateFlow<Map<String, Entry>>(emptyMap())
+
+    /**
+     * Live view of all in-flight install downloads. The pre-install screen
+     * collects this so its in-app percentage tracks the detached
+     * background flow; a plain map read froze at whatever value was
+     * present when the screen last rendered.
+     */
+    val entries: StateFlow<Map<String, Entry>> = state.asStateFlow()
 
     fun set(pushId: String, packageName: String, label: String, percent: Int?) {
-        active[pushId] = Entry(pushId, packageName, label, percent)
+        state.update { it + (pushId to Entry(pushId, packageName, label, percent)) }
     }
 
     fun clear(pushId: String) {
-        active.remove(pushId)
+        state.update { it - pushId }
     }
 
-    fun get(pushId: String): Entry? = active[pushId]
+    fun get(pushId: String): Entry? = state.value[pushId]
 
-    fun active(): List<Entry> = active.values.toList()
+    fun active(): List<Entry> = state.value.values.toList()
 
     /** Test-only reset. Production never clears (see [AppInstallSessions]). */
     fun clearForTest() {
-        active.clear()
+        state.value = emptyMap()
     }
 }
