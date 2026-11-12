@@ -135,6 +135,15 @@
              FCM wake (the platform's allowed background-FGS exemption). -->
         <!-- Instant mode: holds the backend long-poll so commands arrive
              immediately regardless of Doze/FCM batching. Opt-in. -->
+        <!-- Restarts instant mode after reboot or app update. -->
+        <receiver
+            android:name=".notify.InstantModeBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".notify.InstantModeService"
             android:exported="false"
