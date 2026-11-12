@@ -81,6 +81,10 @@
     <string name="app_install_install">Install</string>
     <string name="app_install_cancel">Cancel</string>
     <string name="app_install_downloading">Downloading… %1$d%%</string>
+    <!-- In-app indicator when the status-bar notification cannot post
+         (POST_NOTIFICATIONS denied or the channel blocked): the download is
+         still visible here instead, so there is always one source of truth. -->
+    <string name="app_install_notifications_off">Notifications are off — download progress shows here instead.</string>
     <string name="app_install_verifying">Verifying download…</string>
     <string name="app_install_installing">Installing… check the system install dialog.</string>
     <string name="app_install_silent_installing">Installing silently… no confirmation needed.</string>

@@ -95,6 +95,10 @@ object AppInstallCommandPoll {
         val baseUrl = storage.baseUrl
         val token = storage.deviceToken
         if (baseUrl.isNullOrBlank() || token.isNullOrBlank()) return
+        // Bounded retention sweep: abandoned/superseded APKs (cache and the
+        // Shizuku staged dir) age out on every poll, not just when a new
+        // command arrives. Never deletes a file a live flow still uses.
+        AppInstallFiles.sweepStale(app)
         val posted: AppInstallPostedStore = PrefsAppInstallPostedStore(app)
         val deps = object : Collaborators {
             override suspend fun fetch(): FetchOutcome {

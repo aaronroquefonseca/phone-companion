@@ -2,6 +2,7 @@ package com.phonecompanion.app.ui
 
 import android.os.Bundle
 import android.util.Log
+import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -13,6 +14,8 @@ import androidx.lifecycle.lifecycleScope
 import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.WidgetCacheEntity
 import com.phonecompanion.app.notify.AppInstallEvents
+import com.phonecompanion.app.notify.AppInstallProgress
+import com.phonecompanion.app.notify.AppInstallVisibility
 import com.phonecompanion.app.widgets.WidgetBindingResolver
 import com.phonecompanion.app.widgets.WidgetDirectory
 import com.phonecompanion.app.widgets.WidgetProviderEntry
@@ -44,6 +47,7 @@ class WidgetsActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var rowsContainer: LinearLayout
     private lateinit var instancesContainer: LinearLayout
+    private lateinit var downloadsView: TextView
 
     /**
      * Foreground install surfacing (same contract as MainActivity's): a
@@ -86,8 +90,12 @@ class WidgetsActivity : AppCompatActivity() {
         instancesContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
+        downloadsView = TextView(this).apply {
+            visibility = View.GONE
+        }
         layout.addView(statusView)
         layout.addView(refreshButton)
+        layout.addView(downloadsView)
         layout.addView(rowsContainer)
         layout.addView(instancesContainer)
         setContentView(layout)
@@ -110,7 +118,31 @@ class WidgetsActivity : AppCompatActivity() {
         super.onResume()
         // Manual refresh on open: re-pull cached state on every foreground.
         RefreshWorker.requestManualRefresh(this)
+        renderDownloads()
         renderCached()
+    }
+
+    /**
+     * In-app visibility fallback: when a download is in flight but the
+     * status-bar notification cannot post (permission denied / channel
+     * blocked), show the download here so there is always one visible
+     * source of truth. When notifications can post this row stays hidden —
+     * the notification is the source of truth and this row would be noise.
+     */
+    private fun renderDownloads() {
+        val active = AppInstallProgress.active()
+        val canNotify = AppInstallVisibility.canPostNotifications(this)
+        if (active.isEmpty() || canNotify) {
+            downloadsView.visibility = View.GONE
+            downloadsView.text = ""
+            return
+        }
+        val lines = active.joinToString("\n") { entry ->
+            val pct = entry.percent?.let { " $it%" } ?: ""
+            "Downloading ${entry.label}…$pct"
+        }
+        downloadsView.visibility = View.VISIBLE
+        downloadsView.text = lines
     }
 
     /**

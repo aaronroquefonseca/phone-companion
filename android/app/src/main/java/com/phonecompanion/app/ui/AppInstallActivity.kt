@@ -19,6 +19,8 @@ import com.phonecompanion.app.R
 import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.AppInstallFiles
 import com.phonecompanion.app.notify.AppInstallPayload
+import com.phonecompanion.app.notify.AppInstallProgress
+import com.phonecompanion.app.notify.AppInstallVisibility
 import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
@@ -181,6 +183,23 @@ class AppInstallActivity : AppCompatActivity() {
     /** Single render exit: one state → one screen, no flag agreement. */
     private fun render(state: AppInstallViewModel.InstallUiState) {
         val p = payload ?: return
+        // A receipt-triggered auto-download for this push runs detached from
+        // this screen's ViewModel; its progress lives in the registry. When
+        // this screen is idle (Ready) but a download is in flight, surface it
+        // here so the user always sees progress — even when the status-bar
+        // notification cannot post.
+        val activeDownload = AppInstallProgress.get(p.pushId)
+        if (state is AppInstallViewModel.InstallUiState.Ready && activeDownload != null) {
+            statusView.visibility = View.VISIBLE
+            statusView.text = getString(R.string.app_install_downloading, activeDownload.percent ?: 0)
+            if (!AppInstallVisibility.canPostNotifications(this)) {
+                statusView.append("\n" + getString(R.string.app_install_notifications_off))
+            }
+            installButton.isEnabled = false
+            renderUnknownSources(p)
+            renderShizuku()
+            return
+        }
         when (state) {
             is AppInstallViewModel.InstallUiState.Ready -> {
                 statusView.visibility = View.GONE
