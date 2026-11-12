@@ -27,6 +27,8 @@ import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.BatteryExemption
+import com.phonecompanion.app.notify.InstantMode
+import com.phonecompanion.app.notify.InstantModeService
 import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
@@ -60,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var secretRefreshNote: TextView
     private lateinit var batteryButton: Button
     private lateinit var shizukuButton: Button
+    private lateinit var instantButton: Button
     private lateinit var securityBanner: android.widget.LinearLayout
 
     /**
@@ -140,6 +143,8 @@ class MainActivity : AppCompatActivity() {
         }
         shizukuButton = findViewById(R.id.shizukuButton)
         shizukuButton.setOnClickListener { requestShizukuPermission() }
+        instantButton = findViewById(R.id.instantButton)
+        instantButton.setOnClickListener { toggleInstantMode() }
         runCatching {
             rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         }
@@ -246,6 +251,15 @@ class MainActivity : AppCompatActivity() {
      * Foreground-only Shizuku permission request. The grant is what makes
      * the operator remote-shell channel (and silent installs) possible.
      */
+    private fun toggleInstantMode() {
+        if (InstantMode.isEnabled(this)) {
+            InstantModeService.stop(this)
+        } else {
+            InstantModeService.start(this)
+        }
+        renderStatus()
+    }
+
     private fun requestShizukuPermission() {
         try {
             ShizukuPrivilegedInstall.requestPermission(SHIZUKU_REQUEST_CODE)
@@ -320,6 +334,17 @@ class MainActivity : AppCompatActivity() {
             ShizukuPrivilegedInstall.shouldOfferRequest()
         }.getOrDefault(false)
         shizukuButton.visibility = if (offerShizuku) View.VISIBLE else View.GONE
+        // Instant mode is the reliable delivery path while idle; offer it
+        // whenever paired and reflect its persisted state.
+        instantButton.visibility = if (paired) View.VISIBLE else View.GONE
+        val instantOn = InstantMode.isEnabled(this)
+        instantButton.text = getString(
+            if (instantOn) R.string.main_instant_on else R.string.main_instant_off,
+        )
+        if (paired && instantOn && !InstantModeService.isActive) {
+            // Process death restarts the service from the persisted flag.
+            InstantModeService.start(this)
+        }
     }
 
     /**

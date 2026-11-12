@@ -99,6 +99,38 @@ object ApiClient {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Long-poll client for instant mode: same auth + URL validation as
+     * [create], but with a read timeout that outlives the server's 300 s
+     * hold, so `GET /api/v1/events/wait` is not cut off as a failure.
+     */
+    fun createLongPoll(baseUrl: String, tokenProvider: () -> String?): ApiService {
+        val normalized = normalizeBaseUrl(baseUrl)
+        val auth = Interceptor { chain ->
+            val token = tokenProvider()
+            val request = if (token.isNullOrBlank()) {
+                chain.request()
+            } else {
+                chain.request().newBuilder().header("Authorization", "Bearer $token").build()
+            }
+            chain.proceed(request)
+        }
+        val http = baseBuilder()
+            .readTimeout(LONG_POLL_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)
+            .addInterceptor(auth)
+            .build()
+        return Retrofit.Builder()
+            .baseUrl(normalized)
+            .client(http)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+            .create(ApiService::class.java)
+    }
+
+    /** Server holds events/wait for 300 s; allow 30 s of slack. */
+    private const val LONG_POLL_READ_TIMEOUT_SECONDS = 330L
+
     private fun baseBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
         .apply {
             // Debug-only BASIC logs method/URL/status only, compiled out of

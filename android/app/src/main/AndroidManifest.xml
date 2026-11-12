@@ -133,6 +133,12 @@
              process alive through download + commit so the terminal
              notification always posts. Started only from a high-priority
              FCM wake (the platform's allowed background-FGS exemption). -->
+        <!-- Instant mode: holds the backend long-poll so commands arrive
+             immediately regardless of Doze/FCM batching. Opt-in. -->
+        <service
+            android:name=".notify.InstantModeService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <service
             android:name=".notify.WakeInstallService"
             android:exported="false"

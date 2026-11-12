@@ -69,6 +69,9 @@ class PairViewModelTest {
 
         override suspend fun postShellResult(request: ShellResultRequest): Response<ResponseBody> =
             throw UnsupportedOperationException("not under test")
+
+        override suspend fun waitForEventsRaw(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
     }
 
     private fun ok() = Response.success(

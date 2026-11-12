@@ -64,6 +64,17 @@ interface ApiService {
     suspend fun getCommandsRaw(): Response<ResponseBody>
 
     /**
+     * Long-poll the outbox: returns `{"events":["outbox"]}` immediately
+     * when the device has pending work, else after up to 300 s. Used by
+     * instant mode (the persistent foreground service) so the operator
+     * never depends on FCM wake delivery while the phone is idle.
+     * Requires the device Bearer token; the client must allow a >300 s
+     * read timeout (see [ApiClient.createLongPoll]).
+     */
+    @GET("api/v1/events/wait")
+    suspend fun waitForEventsRaw(): Response<ResponseBody>
+
+    /**
      * Acknowledge the caller's own command ids so the server stops
      * re-offering them. Idempotent server-side: re-acks are harmless
      * no-ops (unknown/foreign ids are silently ignored), so a failed
