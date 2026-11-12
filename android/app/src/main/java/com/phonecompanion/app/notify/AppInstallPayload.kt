@@ -1,5 +1,7 @@
 package com.phonecompanion.app.notify
 
+import java.io.File
+
 /**
  * Remote APK install push ("app_install") wire payload.
  *
@@ -69,8 +71,26 @@ data class AppInstallPayload(
         /** Command discriminator for this flow (frozen contract). */
         const val TYPE = "app_install"
 
-        /** Hard cap on downloaded APK bytes (100 MB, frozen contract). */
-        const val MAX_APK_BYTES: Long = 100L * 1024L * 1024L
+        /**
+         * No fixed byte ceiling: an APK may be as large as the device can
+         * hold. The real limit is free space on the cache volume, computed
+         * per download by [downloadBudget]; the reserve keeps the phone
+         * usable (and the install itself able to stage a copy) instead of
+         * filling the disk to the last byte.
+         */
+        const val DOWNLOAD_RESERVE_BYTES: Long = 256L * 1024L * 1024L
+        private const val MIN_BUDGET_BYTES: Long = 64L * 1024L * 1024L
+
+        /** Bytes this download may use: free space minus the reserve. */
+        fun downloadBudget(dir: File?): Long {
+            val usable = try {
+                dir?.usableSpace ?: 0L
+            } catch (_: Exception) {
+                0L
+            }
+            if (usable <= 0L) return Long.MAX_VALUE
+            return (usable - DOWNLOAD_RESERVE_BYTES).coerceAtLeast(MIN_BUDGET_BYTES)
+        }
 
         /** Intent/Bundle keys carrying a validated push across components. */
         const val EXTRA_COMMAND_ID = "pc_app_command_id"

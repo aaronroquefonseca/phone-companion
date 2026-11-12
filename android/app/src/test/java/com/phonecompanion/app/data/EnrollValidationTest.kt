@@ -2,6 +2,7 @@ package com.phonecompanion.app.data
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
@@ -30,6 +31,18 @@ class EnrollValidationTest {
     }
 
     private class FakeApi(private val code: Int) : ApiService {
+        override suspend fun deviceLink(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun postLinkResult(
+            opId: String,
+            contentType: String,
+            status: Int,
+            body: RequestBody,
+        ): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+
         var sawName: String? = null
         override suspend fun enroll(request: EnrollRequest): Response<EnrollResponse> {
             sawName = request.deviceName

@@ -98,7 +98,8 @@ object AppInstallDownloader {
                         return Result.Failed
                     }
                     val declared = res.header("Content-Length")?.toLongOrNull()
-                    if (declared != null && declared > AppInstallPayload.MAX_APK_BYTES) {
+                    val budget = AppInstallPayload.downloadBudget(dest.parentFile)
+                    if (declared != null && declared > budget) {
                         Log.w(TAG, "app_install over cap for ${payload.packageName}")
                         return Result.TooLarge
                     }
@@ -111,6 +112,7 @@ object AppInstallDownloader {
                             AppInstallTransfer.copyCapped(
                                 input = input,
                                 output = counting,
+                                maxBytes = budget,
                                 isCancelled = { AppInstallSessions.isCancelled(payload.pushId) },
                             )
                         }

@@ -3,6 +3,7 @@ package com.phonecompanion.app.data
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
@@ -27,6 +28,18 @@ class FcmTokenBackfillTest {
     private class FakeApi(
         private val updateFn: suspend (FcmTokenUpdateRequest) -> Response<FcmTokenUpdateResponse>,
     ) : ApiService {
+        override suspend fun deviceLink(): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+        override suspend fun postLinkResult(
+            opId: String,
+            contentType: String,
+            status: Int,
+            body: RequestBody,
+        ): Response<ResponseBody> =
+            throw UnsupportedOperationException("not under test")
+
+
         var updateCalls = 0
         var sawToken: String? = null
 

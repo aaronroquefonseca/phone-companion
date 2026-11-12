@@ -121,6 +121,12 @@ class CompanionMessagingService : FirebaseMessagingService() {
         // killed the service (the update broadcast itself is not allowed
         // to start one).
         runCatching { InstantMode.revive(this) }
+        // Agent session start: hold the link for the requested window even
+        // when the user's always-on toggle is off.
+        val lease = message.data["pc_link_ttl"]?.toLongOrNull()
+        if (lease != null && lease > 0) {
+            runCatching { InstantMode.startWithLease(this, lease) }
+        }
         // Silent app-push wake FIRST: never render anything.
         //
         // Enqueue the durable backstop FIRST (survives a slow or failed

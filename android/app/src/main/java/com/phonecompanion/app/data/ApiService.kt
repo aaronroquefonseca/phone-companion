@@ -1,10 +1,14 @@
 package com.phonecompanion.app.data
 
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.POST
+import retrofit2.http.Path
+import retrofit2.http.Streaming
 
 /**
  * Backend API surface per docs/api-contract.md v1.
@@ -91,4 +95,27 @@ interface ApiService {
      */
     @POST("api/v1/shell/result")
     suspend fun postShellResult(@Body request: ShellResultRequest): Response<ResponseBody>
+
+    /**
+     * Hold the fast link open. The server streams one NDJSON command per
+     * line and expects the answer as a raw-body POST to [postLinkResult].
+     * 404 means the backend predates the link and the caller should fall
+     * back to the outbox long poll.
+     */
+    @Streaming
+    @GET("api/v1/device/link")
+    suspend fun deviceLink(): Response<ResponseBody>
+
+    /**
+     * Return one link command's result. The body is the payload itself
+     * (image, file, text), not JSON, so nothing is base64'd or capped at
+     * the outbox's 64 KB.
+     */
+    @POST("api/v1/device/result/{opId}")
+    suspend fun postLinkResult(
+        @Path("opId") opId: String,
+        @Header("X-Result-Type") contentType: String,
+        @Header("X-Result-Status") status: Int,
+        @Body body: RequestBody,
+    ): Response<ResponseBody>
 }

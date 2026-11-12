@@ -12,6 +12,12 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.phonecompanion.app.data.ApiService
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
+import org.json.JSONObject
 import com.phonecompanion.app.R
 import com.phonecompanion.app.data.ApiClient
 import com.phonecompanion.app.data.SecureStorage
@@ -49,6 +55,17 @@ class InstantModeService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_PROJECTION) {
+            // Order matters: the service must already be foreground with
+            // the mediaProjection type when getMediaProjection runs, or
+            // the call throws SecurityException.
+            isActive = true
+            startInForeground()
+            val code = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
+            val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
+            if (data != null) ScreenProjection.start(this, code, data)
+            return START_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             InstantMode.disable(this)
             stopSelf()
@@ -58,6 +75,10 @@ class InstantModeService : Service() {
         startInForeground()
         if (work?.isActive != true) {
             work = scope.launch { loop() }
+        }
+        if (!InstantMode.isEnabled(this)) {
+            // Session lease: stop by itself when the agent's window ends.
+            scope.launch { watchLease() }
         }
         return START_STICKY
     }
@@ -73,11 +94,12 @@ class InstantModeService : Service() {
 
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
+            var types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            if (ScreenProjection.isReady || ScreenProjection.pending) {
+                types = types or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            startForeground(NOTIFICATION_ID, notification, types)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -134,9 +156,16 @@ class InstantModeService : Service() {
                 break
             }
             try {
-                val api = ApiClient.createLongPoll(baseUrl) { storage.deviceToken }
-                val response = api.waitForEventsRaw()
+                val api = ApiClient.createStreaming(baseUrl) { storage.deviceToken }
+                val response = api.deviceLink()
                 when {
+                    response.code() == 404 -> {
+                        // Backend predates the fast link: keep the old
+                        // long-poll behaviour so instant mode still works
+                        // during a rolling upgrade.
+                        legacyPoll(app, baseUrl)
+                        delay(RETRY_MS)
+                    }
                     response.code() == 401 || response.code() == 403 -> {
                         // Revoked or unpaired: stop silently; the widget
                         // poll owns the revocation UX.
@@ -145,9 +174,13 @@ class InstantModeService : Service() {
                         break
                     }
                     response.isSuccessful -> {
-                        // Wake (or 300 s idle timeout): a poll is cheap and
-                        // also drains any queued install/shell command.
-                        AppInstallCommandPoll.pollOnce(app)
+                        val body = response.body()
+                        if (body == null) {
+                            delay(RETRY_MS)
+                        } else {
+                            body.use { readLink(app, api, it) }
+                            delay(RETRY_MS)
+                        }
                     }
                     else -> delay(RETRY_MS)
                 }
@@ -158,6 +191,101 @@ class InstantModeService : Service() {
             }
         }
         stopSelf()
+    }
+
+
+    private suspend fun watchLease() {
+        while (isActive) {
+            delay(20_000)
+            if (InstantMode.isEnabled(this)) return
+            if (!InstantMode.hasLease(this)) {
+                Log.i(TAG, "session lease ended; stopping")
+                stopSelf()
+                return
+            }
+        }
+    }
+
+    /** One command off the fast link: run it, ship the bytes back. */
+    private suspend fun readLink(app: Context, api: ApiService, body: ResponseBody) {
+        // One binder for the whole link lifetime: per-command binds cost
+        // more than the command itself.
+        val shell = ShizukuRemoteShell.Session(app)
+        LinkOps.session = shell
+        try {
+            readLinkLoop(app, api, body)
+        } finally {
+            LinkOps.session = null
+            shell.close()
+        }
+    }
+
+    private suspend fun readLinkLoop(app: Context, api: ApiService, body: ResponseBody) {
+        val source = body.source()
+        // The link replaces the outbox long-poll, so it also has to drain
+        // the outbox (installs, legacy shell). Every ping is a cheap
+        // reminder; 30 s is enough for installs and never competes with
+        // link commands.
+        var lastOutboxPoll = 0L
+        while (isActive) {
+            val line = source.readUtf8Line() ?: return
+            if (line.isBlank()) continue
+            val obj = try {
+                JSONObject(line)
+            } catch (_: Exception) {
+                continue
+            }
+            if (obj.optString("t") == "ping") {
+                if (System.currentTimeMillis() - lastOutboxPoll > 30_000L) {
+                    lastOutboxPoll = System.currentTimeMillis()
+                    runCatching { AppInstallCommandPoll.pollOnce(app) }
+                }
+                continue
+            }
+            val opId = obj.optString("op_id")
+            if (opId.isEmpty()) continue
+            val kind = obj.optString("kind")
+            val args = obj.optJSONObject("args") ?: JSONObject()
+            val t0 = System.currentTimeMillis()
+            val result = try {
+                LinkOps.execute(app, kind, args)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "link op '$kind' failed [${e.javaClass.simpleName}]")
+                LinkOps.Result(
+                    "application/json",
+                    JSONObject().put("error", e.message ?: "failed").toString().toByteArray(),
+                    502,
+                )
+            }
+            val t1 = System.currentTimeMillis()
+            try {
+                val media = result.contentType.toMediaTypeOrNull()
+                    ?: "application/octet-stream".toMediaType()
+                api.postLinkResult(
+                    opId,
+                    result.contentType,
+                    result.status,
+                    result.bytes.toRequestBody(media),
+                ).body()?.close()
+                Log.i(TAG, "link op $kind exec=${t1 - t0}ms upload=${System.currentTimeMillis() - t1}ms bytes=${result.bytes.size}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The server drops unknown/expired ops, so a failed upload
+                // only matters for the next command, not this one.
+            }
+        }
+    }
+
+    /** Pre-link fallback: the old 300 s outbox long poll. */
+    private suspend fun legacyPoll(app: Context, baseUrl: String) {
+        val api = ApiClient.createLongPoll(baseUrl) {
+            SecureStorage.getInstance(app).deviceToken
+        }
+        val response = api.waitForEventsRaw()
+        if (response.isSuccessful) AppInstallCommandPoll.pollOnce(app)
     }
 
     override fun onDestroy() {
@@ -172,6 +300,9 @@ class InstantModeService : Service() {
         private const val NOTIFICATION_ID = 0x5043_0002
         private const val RETRY_MS = 5_000L
         const val ACTION_STOP = "pc_instant_stop"
+        const val ACTION_PROJECTION = "pc_projection"
+        const val EXTRA_RESULT_CODE = "pc_projection_code"
+        const val EXTRA_RESULT_DATA = "pc_projection_data"
 
         @Volatile
         var isActive: Boolean = false
@@ -239,4 +370,41 @@ object InstantMode {
         if (InstantModeService.isActive) return
         runCatching { InstantModeService.start(context) }
     }
+
+    private const val KEY_LEASE = "instant_lease_until"
+
+    /**
+     * Agent-driven session: hold the link for [ttlSeconds] even when the
+     * user's persistent toggle is off, then let it lapse on its own. This
+     * is the battery-friendly mode — no always-on service, but a warm
+     * connection for as long as an agent is actually working.
+     */
+    fun startWithLease(context: Context, ttlSeconds: Long) {
+        val until = System.currentTimeMillis() + ttlSeconds.coerceIn(30, 3600) * 1000
+        try {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putLong(KEY_LEASE, until).apply()
+        } catch (_: Exception) {
+            return
+        }
+        runCatching { InstantModeService.start(context) }
+    }
+
+    fun leaseUntil(context: Context): Long = try {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_LEASE, 0L)
+    } catch (_: Exception) {
+        0L
+    }
+
+    fun clearLease(context: Context) {
+        try {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_LEASE).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** True while a session lease is still running. */
+    fun hasLease(context: Context): Boolean = leaseUntil(context) > System.currentTimeMillis()
 }
