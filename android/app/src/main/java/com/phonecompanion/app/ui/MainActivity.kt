@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var notifAllowButton: Button
     private lateinit var notifSettingsButton: Button
     private lateinit var secretRefreshNote: TextView
+    private lateinit var batteryButton: Button
 
     private lateinit var denialTracker: NotificationDenialTracker
     private var consumedNotificationExtras = false
@@ -115,6 +116,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.widgetsButton).setOnClickListener {
             startActivity(Intent(this, WidgetsActivity::class.java))
         }
+        batteryButton = findViewById(R.id.batteryButton)
+        batteryButton.setOnClickListener { requestBatteryExemption() }
         findViewById<Button>(R.id.continueButton).setOnClickListener {
             intent.removeExtra(EXTRA_JUST_PAIRED)
             renderStatus()
@@ -258,6 +261,11 @@ class MainActivity : AppCompatActivity() {
         renderNotificationPrompt(paired)
         renderNotificationExtras()
         secretRefreshNote.visibility = if (paired) View.VISIBLE else View.GONE
+        // The exemption is the difference between "wake arrives but the
+        // fetch is throttled while idle" and hands-free installs. Offer it
+        // only while paired and actually missing.
+        batteryButton.visibility =
+            if (paired && !BatteryExemption.isExempt(this)) View.VISIBLE else View.GONE
     }
 
     /**
