@@ -13,6 +13,7 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
 
 /**
@@ -37,12 +38,14 @@ class AppInstallWakeWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        // Best-effort: pollOnce never throws except on cancellation
-        // (which propagates); a failed poll still succeeds the work —
-        // the next scheduled poll is the backstop, never a retry storm
-        // off a server outage.
+        // Bounded in-worker retries (see pollWithRetries): a transient
+        // network blip at wake time must not silently kill instant
+        // delivery. pollWithRetries only throws on cancellation
+        // (rethrown below); any other failure returns normally after the
+        // final attempt — the scheduled poll stays the backstop, never a
+        // retry storm off a server outage.
         try {
-            AppInstallCommandPoll.pollOnce(applicationContext)
+            pollWithRetries({ AppInstallCommandPoll.pollOnce(applicationContext) })
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -54,6 +57,63 @@ class AppInstallWakeWorker(
     companion object {
         internal const val TAG = "AppInstallWake"
         private const val UNIQUE_WAKE = "app-install-wake"
+
+        /**
+         * Bounded wake-poll attempts: one initial poll plus in-worker
+         * retries, then give up and let the scheduled poll be the
+         * backstop. Never unbounded, never on cancellation (rethrown).
+         */
+        internal const val MAX_POLL_ATTEMPTS = 3
+
+        /**
+         * In-worker retry delays reuse the enqueue backoff shape
+         * (exponential from the same 1-minute base as [wakeRequest]'s
+         * `setBackoffCriteria`): a blip costs minutes, not the next
+         * hourly poll.
+         */
+        internal const val RETRY_BACKOFF_BASE = 1L
+        internal val RETRY_BACKOFF_UNIT: TimeUnit = TimeUnit.MINUTES
+
+        /** Exponential retry delay after [failures] failed polls (1-based). */
+        internal fun retryDelayMs(failures: Int): Long =
+            RETRY_BACKOFF_UNIT.toMillis(RETRY_BACKOFF_BASE) * (1L shl (failures - 1))
+
+        /**
+         * Runs one wake poll with bounded retries: transport/auth
+         * failures (any [Exception]) retry the same poll until
+         * [MAX_POLL_ATTEMPTS] total attempts, sleeping the exponential
+         * [retryDelayMs] between attempts; then returns normally (the
+         * caller still succeeds the work — the scheduled poll is the
+         * backstop). Success returns after one attempt with no sleep;
+         * [CancellationException] always propagates without retrying.
+         *
+         * [poll]/[sleeper]/[logInfo] are injectable so unit tests drive
+         * the retry loop without a device: production wires the real
+         * poll, [delay], and shape-only logging.
+         */
+        internal suspend fun pollWithRetries(
+            poll: suspend () -> Unit,
+            sleeper: suspend (Long) -> Unit = { delay(it) },
+            logInfo: (String) -> Unit = { Log.i(TAG, it) },
+        ) {
+            var failures = 0
+            while (true) {
+                try {
+                    poll()
+                    return
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failures++
+                    if (failures >= MAX_POLL_ATTEMPTS) {
+                        logInfo("wake poll aborted error=${e.javaClass.simpleName} attempts=$failures")
+                        return
+                    }
+                    logInfo("wake poll retry failures=$failures error=${e.javaClass.simpleName}")
+                    sleeper(retryDelayMs(failures))
+                }
+            }
+        }
 
         /**
          * The wake request, split out for unit tests: expedited must
@@ -68,7 +128,7 @@ class AppInstallWakeWorker(
                         .build(),
                 )
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, RETRY_BACKOFF_BASE, RETRY_BACKOFF_UNIT)
                 .build()
 
         /**

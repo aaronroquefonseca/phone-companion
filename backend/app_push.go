@@ -364,6 +364,12 @@ func handleAppPush(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 				if strings.TrimSpace(d.FCMToken) == "" {
 					continue
 				}
+				// Attempt line first (INFO, metadata only): success is
+				// otherwise silent, which makes "sent but dropped"
+				// indistinguishable from "never attempted". Never tokens,
+				// bodies, or URLs here — device hash + push_id only, same
+				// discipline as the accepted/enqueued lines.
+				log.Printf("app-push: wake attempt device=%s push_id=%s", deviceLogID(d.ID), pushID)
 				wake := map[string]string{"type": appPushWakeType, "push_id": pushID}
 				if sendErr := sender.Send(ctx, d, wake); sendErr != nil {
 					if notify.NeedsReRegistration(sendErr) {

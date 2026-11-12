@@ -10,8 +10,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -119,6 +121,87 @@ func TestAppPushWakeSkippedForEmptyToken(t *testing.T) {
 	}
 	if got := outboxStatuses(t, db, pushID, "dev-1"); len(got) != 1 || got[0] != outboxStatusPending {
 		t.Fatalf("outbox rows %v, want 1 pending", got)
+	}
+}
+
+// captureAppPushLogs diverts the std logger for one test (restored on
+// cleanup). Backend tests never run parallel, so the global logger swap
+// is hermetic per-test.
+func captureAppPushLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &buf
+}
+
+// Every wake ATTEMPT is logged exactly once per tokened FCM device,
+// before the send: success is otherwise silent, which makes "sent but
+// dropped" indistinguishable from "never attempted". The line carries
+// metadata only (device hash + push_id) — never the FCM token.
+func TestAppPushWakeAttemptLoggedOncePerTokenDevice(t *testing.T) {
+	db := openNotifyTestDB(t)
+	notifyDeviceWithToken(t, db, "dev-fcm", "fake-live-token")
+	posts := 0
+	var bodies []map[string]string
+	sender := fcmFanoutSender(t, appPushWakeBodies(t, &posts, &bodies))
+
+	buf := captureAppPushLogs(t)
+	w := postAppPush(t, db, sender, validAppPushBody("dev-1", "dev-fcm"))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	pushID, accepted := pushAcceptedOf(t, w)
+	if accepted != 2 || pushID == "" {
+		t.Fatalf("accepted=%v id=%q, want 2 + id", accepted, pushID)
+	}
+	want := "app-push: wake attempt device=" + deviceLogID("dev-fcm") + " push_id=" + pushID
+	if got := strings.Count(buf.String(), want); got != 1 {
+		t.Fatalf("wake attempt line %q logged %d times, want exactly 1 (logs: %q)", want, got, buf.String())
+	}
+	// Tokenless dev-1 is skipped: exactly one attempt line total.
+	if got := strings.Count(buf.String(), "wake attempt"); got != 1 {
+		t.Fatalf("wake attempt lines = %d, want exactly 1 (tokenless device must skip)", got)
+	}
+	if strings.Contains(buf.String(), "fake-live-token") {
+		t.Fatalf("attempt log must never carry the FCM token (logs: %q)", buf.String())
+	}
+}
+
+// Skipped wakes log no attempt: an empty-token device behind the real
+// FCM driver never reaches the send.
+func TestAppPushWakeNoAttemptForEmptyToken(t *testing.T) {
+	db := openNotifyTestDB(t)
+	posts := 0
+	var bodies []map[string]string
+	sender := fcmFanoutSender(t, appPushWakeBodies(t, &posts, &bodies))
+
+	buf := captureAppPushLogs(t)
+	w := postAppPush(t, db, sender, validAppPushBody("dev-1"))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202 (%s)", w.Code, w.Body.String())
+	}
+	if got := strings.Count(buf.String(), "wake attempt"); got != 0 {
+		t.Fatalf("wake attempt lines = %d, want 0 (empty token must skip before Send)", got)
+	}
+}
+
+// Skipped wakes log no attempt: non-FCM drivers never enter the wake
+// block at all.
+func TestAppPushWakeNoAttemptForNonFCMDrivers(t *testing.T) {
+	for _, sender := range []notify.Sender{notify.NoopSender{}, notify.LogSender{}, &captureSender{}} {
+		db := openNotifyTestDB(t)
+		notifyDeviceWithToken(t, db, "dev-fcm", "fake-live-token")
+
+		buf := captureAppPushLogs(t)
+		w := postAppPush(t, db, sender, validAppPushBody("dev-fcm"))
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("%T: status %d, want 202 (%s)", sender, w.Code, w.Body.String())
+		}
+		if got := strings.Count(buf.String(), "wake attempt"); got != 0 {
+			t.Fatalf("%T: wake attempt lines = %d, want 0 (non-FCM driver never wakes)", sender, got)
+		}
 	}
 }
 
