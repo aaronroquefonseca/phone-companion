@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.phonecompanion.app.R
 import com.phonecompanion.app.notify.AppInstallCrypto
+import com.phonecompanion.app.notify.AppInstallDownloadLocks
 import com.phonecompanion.app.notify.AppInstallDownloader
 import com.phonecompanion.app.notify.AppInstallFallback
 import com.phonecompanion.app.notify.AppInstallFiles
@@ -11,7 +12,9 @@ import com.phonecompanion.app.notify.AppInstallFlow
 import com.phonecompanion.app.notify.AppInstallInstaller
 import com.phonecompanion.app.notify.AppInstallNotifications
 import com.phonecompanion.app.notify.AppInstallPayload
+import com.phonecompanion.app.notify.AppInstallProgress
 import com.phonecompanion.app.notify.AppInstallSessions
+import com.phonecompanion.app.notify.PrefsAppInstallLockStore
 import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import com.phonecompanion.app.notify.ShizukuSilentInstall
 import kotlinx.coroutines.CancellationException
@@ -93,10 +96,22 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         val shizukuSilent = ShizukuPrivilegedInstall.statusNow() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED
         if (!app.packageManager.canRequestPackageInstalls() && !shizukuSilent) return
+        // Single-writer per command: when the receipt-triggered
+        // auto-download already holds the lock, this explicit tap is
+        // refused (the auto flow's progress notification/registry is the
+        // source of truth) — never a second writer to the same file.
+        val store = PrefsAppInstallLockStore(app)
+        when (AppInstallDownloadLocks.acquire(payload.commandId, payload.pushId, store)) {
+            AppInstallDownloadLocks.Acquire.IN_FLIGHT -> return
+            AppInstallDownloadLocks.Acquire.RECOVERED,
+            AppInstallDownloadLocks.Acquire.ACQUIRED,
+            -> Unit
+        }
         val attempt = AppInstallSessions.startAttempt(payload.pushId)
         currentPushId = payload.pushId
         val dest = AppInstallFiles.apkFile(app, payload)
         _uiState.value = InstallUiState.Downloading(0)
+        AppInstallProgress.set(payload.pushId, payload.packageName, payload.label, 0)
         val host = RealHost(app, payload.pushId, attempt) { phase ->
             _uiState.value = when (phase) {
                 Phase.VERIFYING -> InstallUiState.Verifying
@@ -105,20 +120,26 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         activeJob = flowScope.launch {
-            val outcome = try {
-                AppInstallFlow.runResume(payload, dest, host) { read, total ->
-                    val pct = total?.takeIf { it > 0 }?.let {
-                        ((read * 100) / it).toInt().coerceIn(0, 100)
+            try {
+                val outcome = try {
+                    AppInstallFlow.runResume(payload, dest, host) { read, total ->
+                        val pct = total?.takeIf { it > 0 }?.let {
+                            ((read * 100) / it).toInt().coerceIn(0, 100)
+                        }
+                        _uiState.value = InstallUiState.Downloading(pct)
+                        AppInstallProgress.set(payload.pushId, payload.packageName, payload.label, pct)
+                        AppInstallNotifications.notifyProgress(app, payload, attempt, read, total)
                     }
-                    _uiState.value = InstallUiState.Downloading(pct)
-                    AppInstallNotifications.notifyProgress(app, payload, attempt, read, total)
+                } catch (e: CancellationException) {
+                    // Scope died mid-flow (VM cleared): still close the attempt
+                    // exactly once through the funnel — never silently.
+                    AppInstallFlow.Outcome.Cancelled
                 }
-            } catch (e: CancellationException) {
-                // Scope died mid-flow (VM cleared): still close the attempt
-                // exactly once through the funnel — never silently.
-                AppInstallFlow.Outcome.Cancelled
+                finishOutcome(payload, attempt, outcome)
+            } finally {
+                AppInstallProgress.clear(payload.pushId)
+                AppInstallDownloadLocks.release(payload.commandId, store)
             }
-            finishOutcome(payload, attempt, outcome)
         }
     }
 

@@ -69,36 +69,62 @@ object AppInstallFiles {
      * Android entry point: purges stale APKs around [currentPushId] in the
      * app cache dir. Call on prompt post and on activity create so an
      * abandoned or superseded download never sits next to (or is mistaken
-     * for) the current one.
+     * for) the current one. Files a live flow still references (in-flight
+     * downloads) are always skipped — never deleted mid-flow.
      */
     fun purgeStaleCache(context: Context, currentPushId: String) {
-        runCatching { purgeStale(File(context.cacheDir, DIR), currentPushId) }
+        runCatching {
+            purgeStale(
+                File(context.cacheDir, DIR),
+                currentPushId,
+                protectedFileNames = protectedFileNames(),
+            )
+        }
     }
 
     /**
      * Android entry point: purges stale staged APKs around [currentPushId]
      * in the external staged dir (same 24 h rule as the cache).
      * Call wherever [purgeStaleCache] is called so an abandoned staged copy
-     * never lingers on shared storage.
+     * never lingers on shared storage; in-flight files are skipped.
      */
     fun purgeStaleStaged(context: Context, currentPushId: String) {
         runCatching {
             val root = context.getExternalFilesDir(STAGED_DIR) ?: return
-            purgeStale(root, currentPushId)
+            purgeStale(root, currentPushId, protectedFileNames = protectedFileNames())
+        }
+    }
+
+    /**
+     * Bounded retention sweep: deletes every entry older than the 24 h
+     * retention in the cache dir and the staged dir, never an in-flight
+     * (protected) file. Call on the poll path so abandoned files age out
+     * even when no new command arrives (the purge above only runs around a
+     * new command or an activity open).
+     */
+    fun sweepStale(context: Context) {
+        val protected = protectedFileNames()
+        runCatching { sweepDir(File(context.cacheDir, DIR), protected) }
+        runCatching {
+            val root = context.getExternalFilesDir(STAGED_DIR) ?: return@runCatching
+            sweepDir(root, protected)
         }
     }
 
     /**
      * Deletes every file in [dir] that does not match [currentPushId]'s
      * cache name, plus the current entry itself when it is older than
-     * [maxAgeMs]. Returns the deleted count. Pure JVM (dir-injected) so
-     * the purge rule is unit-testable; [nowMs] is injectable for tests.
+     * [maxAgeMs] — except files named in [protectedFileNames] (in-flight
+     * downloads a live flow still references). Returns the deleted count.
+     * Pure JVM (dir-injected) so the purge rule is unit-testable; [nowMs]
+     * is injectable for tests.
      */
     internal fun purgeStale(
         dir: File,
         currentPushId: String,
         nowMs: Long = System.currentTimeMillis(),
         maxAgeMs: Long = STALE_APK_MAX_AGE_MS,
+        protectedFileNames: Set<String> = emptySet(),
     ): Int {
         val keep = AppInstallPayload.cacheFileNameFor(currentPushId)
         val files = try {
@@ -109,9 +135,40 @@ object AppInstallFiles {
         var deleted = 0
         for (f in files) {
             if (!f.isFile) continue
+            if (f.name in protectedFileNames) continue
             val stale = f.name != keep || nowMs - f.lastModified() > maxAgeMs
             if (stale && f.delete()) deleted++
         }
         return deleted
     }
+
+    /**
+     * Deletes every file in [dir] older than [maxAgeMs], except files named
+     * in [protectedFileNames]. Pure JVM (dir-injected) so the sweep rule is
+     * unit-testable; [nowMs] is injectable for tests.
+     */
+    internal fun sweepDir(
+        dir: File,
+        protectedFileNames: Set<String> = emptySet(),
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = STALE_APK_MAX_AGE_MS,
+    ): Int {
+        val files = try {
+            dir.listFiles() ?: return 0
+        } catch (_: Exception) {
+            return 0
+        }
+        var deleted = 0
+        for (f in files) {
+            if (!f.isFile) continue
+            if (f.name in protectedFileNames) continue
+            if (nowMs - f.lastModified() > maxAgeMs && f.delete()) deleted++
+        }
+        return deleted
+    }
+
+    /** Sanitized cache names of every push id currently held by a live lock. */
+    private fun protectedFileNames(): Set<String> =
+        AppInstallDownloadLocks.inFlightPushIds()
+            .mapTo(HashSet()) { AppInstallPayload.cacheFileNameFor(it) }
 }

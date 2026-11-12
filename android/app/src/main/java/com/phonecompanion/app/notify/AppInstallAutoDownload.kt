@@ -44,19 +44,43 @@ object AppInstallAutoDownload {
 
     /**
      * Starts the auto-download for one fresh [payload] under [attempt].
+     * Single-writer per command id: the per-command download lock is
+     * acquired here and released at the terminal; a concurrent starter is
+     * refused with a logged line (never a second writer to the same file).
      * Never throws: launch failures (only from a dead VM, in practice
      * never) are logged shape-only.
      */
     fun begin(appContext: Context, payload: AppInstallPayload, attempt: String) {
         val app = appContext.applicationContext
-        try {
-            AppInstallNotifications.notifyProgress(app, payload, attempt, 0, null)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            // Best-effort first post: the flow still runs and later posts
-            // replace-or-create the same id.
+        val store = PrefsAppInstallLockStore(app)
+        when (AppInstallDownloadLocks.acquire(payload.commandId, payload.pushId, store)) {
+            AppInstallDownloadLocks.Acquire.IN_FLIGHT -> {
+                Log.i(TAG, "auto download already in flight for ${payload.packageName}")
+                return
+            }
+            AppInstallDownloadLocks.Acquire.RECOVERED ->
+                Log.i(TAG, "auto download recovered orphaned lock for ${payload.packageName}")
+            AppInstallDownloadLocks.Acquire.ACQUIRED -> Unit
         }
+        // The flow's first and only pre-terminal post: progress at zero
+        // bytes, BEFORE the first byte is written. When the notification
+        // cannot show (permission denied / channel blocked) the progress
+        // is surfaced in-app via the progress registry instead, so there is
+        // always exactly one visible source of truth.
+        val canNotify = AppInstallVisibility.canPostNotifications(app)
+        if (canNotify) {
+            try {
+                AppInstallNotifications.notifyProgress(app, payload, attempt, 0, null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Best-effort first post: the flow still runs and later posts
+                // replace-or-create the same id.
+            }
+        } else {
+            Log.i(TAG, "notifications unavailable; progress for ${payload.packageName} surfaces in-app")
+        }
+        AppInstallProgress.set(payload.pushId, payload.packageName, payload.label, 0)
         try {
             AppInstallEvents.emit(payload)
         } catch (e: CancellationException) {
@@ -68,28 +92,46 @@ object AppInstallAutoDownload {
         val host = AutoHost(app, payload.pushId, attempt)
         try {
             scope.launch {
-                val outcome = try {
-                    AppInstallFlow.runFlow(
-                        payload,
-                        dest,
-                        host,
-                        onProgress = { read, total ->
-                            runCatching {
-                                AppInstallNotifications.notifyProgress(app, payload, attempt, read, total)
-                            }
-                        },
-                        keepVerifiedOnRevoked = true,
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    Log.i(TAG, "auto download aborted for ${payload.packageName}")
-                    return@launch
+                try {
+                    val outcome = try {
+                        AppInstallFlow.runFlow(
+                            payload,
+                            dest,
+                            host,
+                            onProgress = { read, total ->
+                                val pct = total?.takeIf { it > 0 }?.let {
+                                    ((read * 100) / it).toInt().coerceIn(0, 100)
+                                }
+                                AppInstallProgress.set(
+                                    payload.pushId,
+                                    payload.packageName,
+                                    payload.label,
+                                    pct,
+                                )
+                                if (canNotify) {
+                                    runCatching {
+                                        AppInstallNotifications.notifyProgress(app, payload, attempt, read, total)
+                                    }
+                                }
+                            },
+                            keepVerifiedOnRevoked = true,
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        Log.i(TAG, "auto download aborted for ${payload.packageName}")
+                        return@launch
+                    }
+                    finishOutcome(app, payload, attempt, outcome)
+                } finally {
+                    AppInstallProgress.clear(payload.pushId)
+                    AppInstallDownloadLocks.release(payload.commandId, store)
                 }
-                finishOutcome(app, payload, attempt, outcome)
             }
         } catch (_: Exception) {
             Log.i(TAG, "auto download launch failed for ${payload.packageName}")
+            AppInstallProgress.clear(payload.pushId)
+            AppInstallDownloadLocks.release(payload.commandId, store)
         }
     }
 
