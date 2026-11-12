@@ -17,6 +17,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 /**
  * FCM receiver: renders data messages per [NotificationPayload] — one
@@ -114,14 +116,21 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     private fun onMessageReceivedInternal(message: RemoteMessage) {
-        // Silent app-push wake FIRST: never render anything — enqueue the
-        // expedited wake poll (a Service has no goAsync; WorkManager owns
-        // the wakelock and the backstop). Enqueue never throws out; a
-        // failed wake stays silent because the next scheduled poll
-        // retries. All other types fall through to the existing render
+        // Silent app-push wake FIRST: never render anything.
+        //
+        // Enqueue the durable backstop FIRST (survives a slow or failed
+        // inline fetch, and covers process death mid-poll), then poll the
+        // outbox INLINE inside this FCM-held window. This is the whole
+        // point of the wake: WorkManager expedited work can be deferred
+        // minutes-to-hours by Doze/Samsung App Standby, and FCM only
+        // holds the service alive for the duration of onMessageReceived —
+        // so the fetch must happen HERE or not at all. The posted-set and
+        // the per-command download lock dedupe the race when the worker
+        // also runs. All other message types fall through to the render
         // path untouched.
         if (AppInstallCommandPoll.isWake(message.data)) {
             runCatching { AppInstallWakeWorker.enqueue(this) }
+            handleWakeInline(this)
             return
         }
         val payload = NotificationPayload.from(message)
@@ -268,6 +277,38 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     companion object {
+        /**
+         * Hard cap for the inline outbox fetch on an FCM wake. FCM holds
+         * this service alive for roughly 10 s per message and the
+         * messaging service's own budget is ~20 s; staying under the
+         * wakelock avoids being killed mid-fetch with neither the inline
+         * poll nor the backstop finished. Past this budget the fetch is
+         * abandoned and the already-enqueued wake worker takes over.
+         */
+        internal const val INLINE_POLL_TIMEOUT_MS = 8_000L
+
+        /**
+         * Runs one outbox poll inline on the FCM delivery thread, bounded
+         * by [INLINE_POLL_TIMEOUT_MS]. Never throws: a timeout or failure
+         * is swallowed because [AppInstallWakeWorker] was enqueued first
+         * as the durable backstop.
+         */
+        private fun handleWakeInline(context: android.content.Context) {
+            runCatching {
+                runBlocking {
+                    try {
+                        withTimeout(INLINE_POLL_TIMEOUT_MS) {
+                            AppInstallCommandPoll.pollOnce(context.applicationContext)
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // Backstop worker owns the retry.
+                    }
+                }
+            }
+        }
+
         /**
          * Stable, collision-resistant request codes (finding 26).
          *
