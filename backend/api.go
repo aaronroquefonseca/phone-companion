@@ -93,7 +93,16 @@ func newBaseMux(reg *WidgetRegistry, sessions webui.SessionStore, csrf *webui.CS
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	// build identifies the running binary; wake names the instant-delivery
+	// capability. Both are boring strings, safe to expose, and let an
+	// operator (or a deploy script) verify that what is running is what
+	// was shipped — the exact gap that let pushes silently queue without
+	// any wake hint for days.
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status": "ok",
+		"build":  buildSHA,
+		"wake":   appPushWakeType,
+	})
 }
 
 // authNoStore reports whether a path carries credentials or single-use

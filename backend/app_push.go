@@ -49,17 +49,24 @@ type appPushRequestJSON struct {
 	Package string           `json:"package"`
 	Version string           `json:"version"`
 	Label   string           `json:"label"`
+	// RequireWake makes instant delivery a precondition: when true and any
+	// resolved target cannot be woken (non-FCM driver, or missing FCM
+	// token), the request is rejected BEFORE anything is queued. Without
+	// this, a degraded deployment answered 202 identically to a healthy
+	// one and the push silently waited for the next poll.
+	RequireWake bool `json:"require_wake"`
 }
 
 // appPushRequest is a validated app-push enqueue request. Version "" means
 // absent (stored as an empty flat string, FCM-data compatible).
 type appPushRequest struct {
-	Target  notify.Target
-	APKURL  string
-	SHA256  string
-	Package string
-	Version string
-	Label   string
+	Target      notify.Target
+	APKURL      string
+	SHA256      string
+	Package     string
+	Version     string
+	Label       string
+	RequireWake bool
 }
 
 // Limits for the app-push fields (contract: max sizes, https-only URL,
@@ -146,6 +153,7 @@ func validateAppPushRequest(req appPushRequestJSON) (appPushRequest, error) {
 		return fail("invalid_label", "label must be at most 100 characters")
 	}
 	out.Label = label
+	out.RequireWake = req.RequireWake
 
 	if err := checkAppPushPayloadSize(out); err != nil {
 		return appPushRequest{}, err
@@ -273,6 +281,25 @@ func handleAppPush(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 			writeAPIError(w, http.StatusInternalServerError, "target_lookup_failed")
 			return
 		}
+		// Instant-delivery precondition, checked BEFORE anything is queued:
+		// with require_wake the caller gets a loud 422 instead of a 202 that
+		// silently waits for the next poll. This is the guard against a
+		// degraded deployment (non-FCM driver) or a device that lost its
+		// token — previously indistinguishable from a healthy push.
+		if req.RequireWake {
+			if _, isFCM := sender.(*notify.FCMSender); !isFCM {
+				log.Printf("app-push: require_wake rejected (driver is not FCM)")
+				writeAPIError(w, http.StatusUnprocessableEntity, "wake_unavailable")
+				return
+			}
+			for _, d := range devices {
+				if strings.TrimSpace(d.FCMToken) == "" {
+					log.Printf("app-push: require_wake rejected device=%s (no FCM token)", deviceLogID(d.ID))
+					writeAPIError(w, http.StatusUnprocessableEntity, "wake_unavailable")
+					return
+				}
+			}
+		}
 		pushID, err := newNotificationID()
 		if err != nil {
 			log.Printf("app-push: new id: %v", err)
@@ -359,9 +386,16 @@ func handleAppPush(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 		// tells the app to poll now; failures are logged, never fail
 		// the request, and write no history rows. Devices without a
 		// token poll on their normal cadence.
+		//
+		// wake_sent/poll_only are reported back so the caller can tell
+		// "instant delivery attempted" from "this will wait for a poll".
+		// That distinction used to be invisible: the API answered 202
+		// identically whether or not any wake could be sent.
+		wakeSent, pollOnly := 0, 0
 		if _, isFCM := sender.(*notify.FCMSender); isFCM {
 			for _, d := range devices {
 				if strings.TrimSpace(d.FCMToken) == "" {
+					pollOnly++
 					continue
 				}
 				wake := map[string]string{"type": appPushWakeType, "push_id": pushID}
@@ -371,15 +405,22 @@ func handleAppPush(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 					} else {
 						log.Printf("app-push: hint failed device=%s push_id=%s: %v", deviceLogID(d.ID), pushID, sendErr)
 					}
+					pollOnly++
+				} else {
+					wakeSent++
 				}
 			}
+		} else {
+			pollOnly = len(devices)
 		}
-		log.Printf("app-push: push_id=%s accepted=%d/%d", pushID, len(devices), len(devices))
+		log.Printf("app-push: push_id=%s accepted=%d/%d wake_sent=%d poll_only=%d", pushID, len(devices), len(devices), wakeSent, pollOnly)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"push_id":  pushID,
-			"accepted": len(devices),
+			"push_id":   pushID,
+			"accepted":  len(devices),
+			"wake_sent": wakeSent,
+			"poll_only": pollOnly,
 		})
 	}
 }

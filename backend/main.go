@@ -17,6 +17,12 @@ import (
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
+// buildSHA is the git commit this binary was built from. Set at build
+// time via -ldflags "-X main.buildSHA=<sha>"; "dev" when built without it.
+// Exposed by GET /healthz so a stale deployment is visible immediately
+// instead of being discovered days later from a missing feature.
+var buildSHA = "dev"
+
 func main() {
 	cfg := LoadConfig()
 	if err := cfg.Validate(); err != nil {
