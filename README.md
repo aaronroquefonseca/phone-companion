@@ -177,6 +177,21 @@ the backend refuses to boot on weak/missing secrets.
 | `FCM_PROJECT_ID` | — | Needed only for `fcm` driver |
 | `FCM_CREDENTIALS_FILE` | — | Path to mounted service-account JSON; never committed or baked into the image |
 
+## Agent skill
+
+`skills/phone/SKILL.md` is a ready-made agent skill for operating paired
+devices: notifications, app pushes, the shell channel, screenshots, files,
+logs and UI control, plus the wake/unlock rules those need. It is
+depersonalised — set `PC`, `TOKEN` and `ADMIN` in section 0 before use.
+
+Phone work arrives from any directory, so install it system-wide rather than
+per-project:
+
+```sh
+ln -s "$PWD/skills/phone" ~/.agents/skills/phone
+ln -s ../../.agents/skills/phone ~/.claude/skills/phone   # Claude Code
+```
+
 ## Security notes
 
 - Login-gated WebUI, per-device revocable tokens, per-device payload
