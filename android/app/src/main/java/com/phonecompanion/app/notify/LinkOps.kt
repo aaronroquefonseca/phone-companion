@@ -33,6 +33,11 @@ object LinkOps {
         "file" -> file(app, args)
         "logs" -> logs(app, args)
         "shell" -> shell(app, args)
+        "link_stop" -> {
+            InstantMode.clearLease(app)
+            InstantModeService.stop(app)
+            Result("application/json", "{\"ok\":true}".toByteArray())
+        }
         else -> error("unknown kind")
     }
 

@@ -93,7 +93,7 @@ func main() {
 	base.Handle("POST /api/v1/notify", operatorAdminChain(sessionStore, csrf, handleNotify(db, sender)))
 	registerPushOutboxRoutes(base, db, sessionStore, csrf, sender)
 	registerShellRoutes(base, db, sessionStore, csrf, sender)
-	registerLinkRoutes(base, db, sessionStore, csrf, newLinkHub())
+	registerLinkRoutes(base, db, sessionStore, csrf, sender, newLinkHub())
 	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,

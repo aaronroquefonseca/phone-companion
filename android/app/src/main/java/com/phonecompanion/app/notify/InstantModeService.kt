@@ -76,6 +76,10 @@ class InstantModeService : Service() {
         if (work?.isActive != true) {
             work = scope.launch { loop() }
         }
+        if (!InstantMode.isEnabled(this)) {
+            // Session lease: stop by itself when the agent's window ends.
+            scope.launch { watchLease() }
+        }
         return START_STICKY
     }
 
@@ -189,6 +193,18 @@ class InstantModeService : Service() {
         stopSelf()
     }
 
+
+    private suspend fun watchLease() {
+        while (isActive) {
+            delay(20_000)
+            if (InstantMode.isEnabled(this)) return
+            if (!InstantMode.hasLease(this)) {
+                Log.i(TAG, "session lease ended; stopping")
+                stopSelf()
+                return
+            }
+        }
+    }
 
     /** One command off the fast link: run it, ship the bytes back. */
     private suspend fun readLink(app: Context, api: ApiService, body: ResponseBody) {
@@ -354,4 +370,41 @@ object InstantMode {
         if (InstantModeService.isActive) return
         runCatching { InstantModeService.start(context) }
     }
+
+    private const val KEY_LEASE = "instant_lease_until"
+
+    /**
+     * Agent-driven session: hold the link for [ttlSeconds] even when the
+     * user's persistent toggle is off, then let it lapse on its own. This
+     * is the battery-friendly mode — no always-on service, but a warm
+     * connection for as long as an agent is actually working.
+     */
+    fun startWithLease(context: Context, ttlSeconds: Long) {
+        val until = System.currentTimeMillis() + ttlSeconds.coerceIn(30, 3600) * 1000
+        try {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putLong(KEY_LEASE, until).apply()
+        } catch (_: Exception) {
+            return
+        }
+        runCatching { InstantModeService.start(context) }
+    }
+
+    fun leaseUntil(context: Context): Long = try {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_LEASE, 0L)
+    } catch (_: Exception) {
+        0L
+    }
+
+    fun clearLease(context: Context) {
+        try {
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_LEASE).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** True while a session lease is still running. */
+    fun hasLease(context: Context): Boolean = leaseUntil(context) > System.currentTimeMillis()
 }

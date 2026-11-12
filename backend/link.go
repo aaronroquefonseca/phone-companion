@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
@@ -162,10 +164,109 @@ func (h *linkHub) dropPending(opID string) {
 
 // registerLinkRoutes wires the device stream/result endpoints (device
 // bearer) and the operator-side exec call (operator gate).
-func registerLinkRoutes(mux *http.ServeMux, db *sql.DB, sessions webui.SessionStore, csrf *webui.CSRFProtection, hub *linkHub) {
+func registerLinkRoutes(mux *http.ServeMux, db *sql.DB, sessions webui.SessionStore, csrf *webui.CSRFProtection, sender notify.Sender, hub *linkHub) {
 	mux.HandleFunc("GET /api/v1/device/link", handleDeviceLink(db, hub))
 	mux.HandleFunc("POST /api/v1/device/result/{op_id}", handleDeviceResult(db, hub))
 	mux.Handle("POST /api/v1/exec", operatorAdminChain(sessions, csrf, handleExec(db, hub)))
+	mux.Handle("POST /api/v1/link/start", operatorAdminChain(sessions, csrf, handleLinkStart(db, sender, hub)))
+	mux.Handle("POST /api/v1/link/stop", operatorAdminChain(sessions, csrf, handleLinkStop(db, hub)))
+}
+
+// handleLinkStart opens a session lease: the device holds the fast link
+// for ttl_s seconds even if the user's always-on toggle is off. The only
+// reliable way to reach a sleeping app is the FCM wake, so that is the
+// supported path; no sender means 503, not a silent no-op.
+func handleLinkStart(db *sql.DB, sender notify.Sender, hub *linkHub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DeviceID string `json:"device_id"`
+			TTLS     int    `json:"ttl_s"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_json")
+			return
+		}
+		req.DeviceID = strings.TrimSpace(req.DeviceID)
+		if req.DeviceID == "" {
+			writeAPIError(w, http.StatusUnprocessableEntity, "missing_device_id")
+			return
+		}
+		if _, ok, err := lookupActiveDevice(r, db, req.DeviceID); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "internal")
+			return
+		} else if !ok {
+			writeAPIError(w, http.StatusNotFound, "device_not_found")
+			return
+		}
+		ttl := req.TTLS
+		if ttl <= 0 {
+			ttl = 900
+		}
+		if ttl < 30 {
+			ttl = 30
+		}
+		if ttl > 3600 {
+			ttl = 3600
+		}
+		if hub.isOnline(req.DeviceID) {
+			// Already warm: just extend the lease server-side view.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"online": true, "ttl_s": ttl})
+			return
+		}
+		if _, isFCM := sender.(*notify.FCMSender); !isFCM {
+			writeAPIError(w, http.StatusServiceUnavailable, "wake_unavailable")
+			return
+		}
+		var token string
+		if err := db.QueryRow(`SELECT COALESCE(fcm_token,'') FROM devices WHERE id = ?`, req.DeviceID).Scan(&token); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		if strings.TrimSpace(token) == "" {
+			writeAPIError(w, http.StatusServiceUnavailable, "wake_unavailable")
+			return
+		}
+		payload := map[string]string{"pc_link_ttl": fmt.Sprint(ttl), "type": "link_start"}
+		if err := sender.Send(r.Context(), notify.Device{ID: req.DeviceID, FCMToken: token}, payload); err != nil {
+			log.Printf("link: start wake failed device=%s: %v", deviceLogID(req.DeviceID), err)
+			writeAPIError(w, http.StatusBadGateway, "wake_failed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"online": false, "ttl_s": ttl, "wake_sent": true})
+	}
+}
+
+// handleLinkStop closes the session now instead of waiting for the lease.
+// It goes down the link itself when the device is online.
+func handleLinkStop(db *sql.DB, hub *linkHub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DeviceID string `json:"device_id"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_json")
+			return
+		}
+		req.DeviceID = strings.TrimSpace(req.DeviceID)
+		if req.DeviceID == "" {
+			writeAPIError(w, http.StatusUnprocessableEntity, "missing_device_id")
+			return
+		}
+		if !hub.isOnline(req.DeviceID) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"online": false})
+			return
+		}
+		opID, _ := newOpID()
+		payload, _ := json.Marshal(map[string]any{"op_id": opID, "kind": "link_stop", "args": map[string]any{}})
+		hub.dispatch(req.DeviceID, payload)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"online": true, "stopping": true})
+	}
 }
 
 func handleDeviceLink(db *sql.DB, hub *linkHub) http.HandlerFunc {

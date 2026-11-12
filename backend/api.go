@@ -40,7 +40,7 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf 
 	registerPushOutboxRoutes(mux, db, sessions, csrf, sender)
 	registerShellRoutes(mux, db, sessions, csrf, sender)
 	// Fast path: persistent device stream + one-shot exec. See link.go.
-	registerLinkRoutes(mux, db, sessions, csrf, newLinkHub())
+	registerLinkRoutes(mux, db, sessions, csrf, sender, newLinkHub())
 	// Operator test-notification form (same fan-out pipeline as the API).
 	RegisterNotifyWebUIRoutes(mux, db, sender, sessions, csrf)
 	return withAuthNoStore(mux)
