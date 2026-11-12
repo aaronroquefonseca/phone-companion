@@ -152,9 +152,16 @@ class WakeInstallService : Service() {
 
     private suspend fun mirrorProgress() {
         try {
-            AppInstallProgress.entries.collect {
+            AppInstallProgress.entries.collect { entries ->
                 try {
                     val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    // A poll that ran before this service started (manual
+                    // refresh racing the wake) already posted its own
+                    // progress under the per-push id. This service owns the
+                    // single visible line now, so drop the duplicate.
+                    for (entry in entries.values) {
+                        manager.cancel(AppInstallPayload.notifyIdFor(entry.pushId))
+                    }
                     manager.notify(NOTIFICATION_ID, buildNotification())
                 } catch (_: Exception) {
                     // Mirroring is cosmetic; the transfer is unaffected.
