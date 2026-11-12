@@ -275,6 +275,18 @@ type fcmSendRequest struct {
 type fcmSendMessage struct {
 	Token string            `json:"token"`
 	Data  map[string]string `json:"data"`
+	// HIGH priority: FCM defers NORMAL-priority data messages under Doze
+	// for minutes, which breaks the instant-delivery contract (user-visible
+	// notifies must ping now; silent app-push wakes are pointless late).
+	// Battery cost is one message per operator action, never polling.
+	Android *fcmAndroidConfig `json:"android,omitempty"`
+}
+
+// fcmAndroidConfig is the HTTPv1 Android-specific block. Only priority
+// is set; TTL/collapse semantics stay server defaults (the outbox owns
+// expiry, not FCM).
+type fcmAndroidConfig struct {
+	Priority string `json:"priority,omitempty"`
 }
 
 // fcmErrorBody is the HTTPv1 error shape. Only status/errorCode drive the
@@ -296,7 +308,11 @@ type fcmErrorBody struct {
 // *FCMError. It never logs payload values — only notification_id, device,
 // and kind (metadata-only, matching LogSender).
 func (s *FCMSender) postMessage(ctx context.Context, access, regToken string, payload map[string]string) error {
-	body, err := json.Marshal(fcmSendRequest{Message: fcmSendMessage{Token: regToken, Data: payload}})
+	body, err := json.Marshal(fcmSendRequest{Message: fcmSendMessage{
+		Token:   regToken,
+		Data:    payload,
+		Android: &fcmAndroidConfig{Priority: "high"},
+	}})
 	if err != nil {
 		return &FCMError{Code: FCMCodeSendFailed, msg: "cannot encode FCM request"}
 	}

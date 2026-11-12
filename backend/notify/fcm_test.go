@@ -98,6 +98,12 @@ func TestFCMSendSuccessPostsDataOnly(t *testing.T) {
 	if len(sawBody.Message.Data) != len(payload) {
 		t.Fatalf("data payload mutated in transit: %v", sawBody.Message.Data)
 	}
+	// Instant-delivery contract: Doze defers NORMAL-priority data messages
+	// for minutes; every send (visible notify and silent wake alike) must
+	// request HIGH priority.
+	if sawBody.Message.Android == nil || sawBody.Message.Android.Priority != "high" {
+		t.Fatalf("android.priority = %+v, want high", sawBody.Message.Android)
+	}
 }
 
 func TestFCMSendSecretEnvelopesPassThrough(t *testing.T) {
