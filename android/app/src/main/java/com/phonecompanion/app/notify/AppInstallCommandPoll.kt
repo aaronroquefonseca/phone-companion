@@ -5,6 +5,7 @@ import android.util.Log
 import com.phonecompanion.app.data.ApiClient
 import com.phonecompanion.app.data.CommandsAckRequest
 import com.phonecompanion.app.data.SecureStorage
+import com.phonecompanion.app.data.ShellResultRequest
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -59,6 +60,14 @@ object AppInstallCommandPoll {
         data object TransportFailure : FetchOutcome
     }
 
+    /** One executed shell command (already decoded; bounded by the service). */
+    internal data class ShellExecution(
+        val exitCode: Int,
+        val stdout: String,
+        val stderr: String,
+        val truncated: Boolean,
+    )
+
     /** Collaborators for [pollOnceWith]; the Android [pollOnce] wires the real edges. */
     internal interface Collaborators {
         suspend fun fetch(): FetchOutcome
@@ -69,6 +78,20 @@ object AppInstallCommandPoll {
          * detached transfer).
          */
         suspend fun startDownload(payload: AppInstallPayload)
+
+        /**
+         * Executes one operator shell command through Shizuku. Never
+         * throws: a missing grant or transport failure is reported as a
+         * non-zero exit with a shape-only stderr reason.
+         */
+        suspend fun executeShell(command: AppInstallCommands.ShellCommand): ShellExecution =
+            ShellExecution(-1, "", "shell_unsupported", false)
+
+        /** Uploads one shell result; true when the server accepted it. */
+        suspend fun postShellResult(
+            commandId: String,
+            execution: ShellExecution,
+        ): Boolean = false
 
         /** Acks started command ids; true when the server accepted. */
         suspend fun ack(ids: List<String>): Boolean
@@ -145,6 +168,45 @@ object AppInstallCommandPoll {
                 AppInstallAutoDownload.begin(app, payload, attempt)
             }
 
+            override suspend fun executeShell(
+                command: AppInstallCommands.ShellCommand,
+            ): ShellExecution {
+                return when (val r = ShizukuRemoteShell.runOnce(app, command.command, command.timeoutMs)) {
+                    is ShizukuRemoteShell.Result.Done -> ShellExecution(
+                        r.outcome.exitCode,
+                        r.outcome.stdout,
+                        r.outcome.stderr,
+                        r.outcome.truncated,
+                    )
+                    ShizukuRemoteShell.Result.NotGranted ->
+                        ShellExecution(-1, "", "shizuku_not_granted", false)
+                    ShizukuRemoteShell.Result.TransportFailure ->
+                        ShellExecution(-1, "", "shell_transport_failure", false)
+                }
+            }
+
+            override suspend fun postShellResult(
+                commandId: String,
+                execution: ShellExecution,
+            ): Boolean {
+                return try {
+                    val service = ApiClient.create(baseUrl) { storage.deviceToken }
+                    service.postShellResult(
+                        ShellResultRequest(
+                            commandId = commandId,
+                            exitCode = execution.exitCode,
+                            stdout = execution.stdout,
+                            stderr = execution.stderr,
+                            truncated = execution.truncated,
+                        ),
+                    ).isSuccessful
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    false
+                }
+            }
+
             override suspend fun ack(ids: List<String>): Boolean {
                 return try {
                     val service = ApiClient.create(baseUrl) { storage.deviceToken }
@@ -215,6 +277,35 @@ object AppInstallCommandPoll {
             posted.markPosted(listOf(payload.commandId))
             postedCount++
         }
+        // Remote shell: execute each command once, report its result, and
+        // ack it. The ack is independent of the result upload — a shell
+        // command is not idempotent (`input tap`, `settings put`), so
+        // re-offering it would repeat a side effect. If the upload fails
+        // the operator sees a pending command and can re-issue knowingly.
+        var shellResults = 0
+        for (command in parsed.shell) {
+            if (posted.isPosted(command.commandId)) continue
+            // At-most-once: mark before executing. A shell command is not
+            // idempotent (`rm`, `input tap`), so a process death between
+            // execution and ack must NOT re-run it; the operator sees a
+            // pending command and can re-issue knowingly instead.
+            posted.markPosted(listOf(command.commandId))
+            val execution = try {
+                deps.executeShell(command)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                ShellExecution(-1, "", "shell_exec_failed", false)
+            }
+            val uploaded = try {
+                deps.postShellResult(command.commandId, execution)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (uploaded) shellResults++
+        }
         // Ack every valid offered id already resolved (this round or an
         // earlier one): the ack is idempotent, so failed acks converge
         // on the next poll. Never-resolved ids (download failed to start)
@@ -222,6 +313,7 @@ object AppInstallCommandPoll {
         // acked-and-ignored (never downloaded) so the server stops
         // re-offering them.
         val ackIds = (parsed.valid.map { it.commandId }.filter { posted.isPosted(it) } +
+            parsed.shell.map { it.commandId }.filter { posted.isPosted(it) } +
             parsed.unknownIds).distinct()
         val acked = if (ackIds.isEmpty()) {
             true
@@ -238,6 +330,7 @@ object AppInstallCommandPoll {
             "commands poll result=ok offered=${parsed.valid.size} " +
                 "posted=$postedCount skipped=$skipped " +
                 "unknown=${parsed.unknownKinds} malformed=${parsed.malformed} " +
+                "shell=${parsed.shell.size} shellResults=$shellResults " +
                 "acked=$acked",
         )
         return PollResult(

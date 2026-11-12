@@ -72,4 +72,12 @@ interface ApiService {
      */
     @POST("api/v1/commands/ack")
     suspend fun ackCommands(@Body request: CommandsAckRequest): Response<ResponseBody>
+
+    /**
+     * Report one remote-shell command outcome. Device Bearer only; the
+     * server stores it for the operator to read and ignores unknown or
+     * already-reported ids.
+     */
+    @POST("api/v1/shell/result")
+    suspend fun postShellResult(@Body request: ShellResultRequest): Response<ResponseBody>
 }

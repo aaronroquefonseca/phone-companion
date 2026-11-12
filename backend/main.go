@@ -43,6 +43,9 @@ func main() {
 	if err := MigrateOutbox(db); err != nil {
 		log.Fatalf("migrate outbox: %v", err)
 	}
+	if err := MigrateShell(db); err != nil {
+		log.Fatalf("migrate shell: %v", err)
+	}
 
 	// Notifications (P4): fail fast on unknown NOTIFY_DRIVER so a typo can
 	// never silently become a black hole.
@@ -89,6 +92,7 @@ func main() {
 	// no-store-wrapped handler).
 	base.Handle("POST /api/v1/notify", operatorAdminChain(sessionStore, csrf, handleNotify(db, sender)))
 	registerPushOutboxRoutes(base, db, sessionStore, csrf, sender)
+	registerShellRoutes(base, db, sessionStore, csrf)
 	RegisterNotifyWebUIRoutes(base, db, sender, sessionStore, csrf)
 	webui.RegisterRoutes(base, sessionStore, webui.Credentials{
 		Username:     cfg.AdminUser,

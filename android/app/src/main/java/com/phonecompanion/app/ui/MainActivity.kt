@@ -27,6 +27,7 @@ import com.phonecompanion.app.data.DatabaseHolder
 import com.phonecompanion.app.data.SecureStorage
 import com.phonecompanion.app.notify.AppInstallEvents
 import com.phonecompanion.app.notify.BatteryExemption
+import com.phonecompanion.app.notify.ShizukuPrivilegedInstall
 import com.phonecompanion.app.work.SharedPrefsPollStateStore
 import com.phonecompanion.app.work.WidgetPoller
 import com.phonecompanion.app.work.RefreshWorker
@@ -58,6 +59,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var notifSettingsButton: Button
     private lateinit var secretRefreshNote: TextView
     private lateinit var batteryButton: Button
+    private lateinit var shizukuButton: Button
+    private lateinit var securityBanner: android.widget.LinearLayout
+
+    /**
+     * Shizuku grant result: re-render so the request button disappears the
+     * moment the user allows (or stays hidden after a denial — ask once,
+     * never nag; the manager app can still grant it later).
+     */
+    private val shizukuPermissionListener =
+        rikka.shizuku.Shizuku.OnRequestPermissionResultListener { requestCode, _ ->
+            if (requestCode == SHIZUKU_REQUEST_CODE) runOnUiThread { renderStatus() }
+        }
 
     private lateinit var denialTracker: NotificationDenialTracker
     private var consumedNotificationExtras = false
@@ -118,6 +131,18 @@ class MainActivity : AppCompatActivity() {
         }
         batteryButton = findViewById(R.id.batteryButton)
         batteryButton.setOnClickListener { requestBatteryExemption() }
+        securityBanner = findViewById(R.id.securityBanner)
+        findViewById<Button>(R.id.securityBannerDismiss).setOnClickListener {
+            getSharedPreferences(PREFS_UI, MODE_PRIVATE).edit()
+                .putBoolean(KEY_SECURITY_ACK, true)
+                .apply()
+            securityBanner.visibility = View.GONE
+        }
+        shizukuButton = findViewById(R.id.shizukuButton)
+        shizukuButton.setOnClickListener { requestShizukuPermission() }
+        runCatching {
+            rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
+        }
         findViewById<Button>(R.id.continueButton).setOnClickListener {
             intent.removeExtra(EXTRA_JUST_PAIRED)
             renderStatus()
@@ -217,6 +242,18 @@ class MainActivity : AppCompatActivity() {
      * poll's network, so installs wait until the phone is used. The grant
      * is user-owned; this only opens the system prompt.
      */
+    /**
+     * Foreground-only Shizuku permission request. The grant is what makes
+     * the operator remote-shell channel (and silent installs) possible.
+     */
+    private fun requestShizukuPermission() {
+        try {
+            ShizukuPrivilegedInstall.requestPermission(SHIZUKU_REQUEST_CODE)
+        } catch (_: Exception) {
+            // No binder / already granted: renderStatus reflects it.
+        }
+    }
+
     private fun requestBatteryExemption() {
         try {
             startActivity(BatteryExemption.requestIntent(this))
@@ -266,6 +303,23 @@ class MainActivity : AppCompatActivity() {
         // only while paired and actually missing.
         batteryButton.visibility =
             if (paired && !BatteryExemption.isExempt(this)) View.VISIBLE else View.GONE
+        // One-time warning about what a Shizuku grant enables, dismissed for
+        // good. Shown before the request button so the context is never
+        // skipped.
+        securityBanner.visibility =
+            if (getSharedPreferences(PREFS_UI, MODE_PRIVATE)
+                    .getBoolean(KEY_SECURITY_ACK, false)
+            ) {
+                View.GONE
+            } else {
+                View.VISIBLE
+            }
+        // Offer the Shizuku grant only while it is actually missing and
+        // still askable; once granted (or denied for good) it disappears.
+        val offerShizuku = paired && runCatching {
+            ShizukuPrivilegedInstall.shouldOfferRequest()
+        }.getOrDefault(false)
+        shizukuButton.visibility = if (offerShizuku) View.VISIBLE else View.GONE
     }
 
     /**
@@ -432,5 +486,8 @@ class MainActivity : AppCompatActivity() {
 
         private const val PREFS_NOTIF = "pc_notif_prompts"
         private const val KEY_DENIED_BEFORE = "notif_denied_before"
+        private const val PREFS_UI = "pc_ui"
+        private const val KEY_SECURITY_ACK = "security_ack"
+        private const val SHIZUKU_REQUEST_CODE = 4711
     }
 }

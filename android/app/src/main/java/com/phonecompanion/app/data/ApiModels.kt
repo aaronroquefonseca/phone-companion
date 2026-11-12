@@ -77,6 +77,15 @@ data class CommandsAckRequest(
     @Json(name = "ids") val ids: List<String> = emptyList(),
 )
 
+/** One remote-shell result upload (device -> operator). */
+data class ShellResultRequest(
+    @Json(name = "command_id") val commandId: String,
+    @Json(name = "exit_code") val exitCode: Int,
+    @Json(name = "stdout") val stdout: String,
+    @Json(name = "stderr") val stderr: String,
+    @Json(name = "truncated") val truncated: Boolean,
+)
+
 // --- Error bodies: {"error": "<code>"} ---
 
 data class ErrorBody(
