@@ -38,7 +38,7 @@ func NewMux(db *sql.DB, sender notify.Sender, sessions webui.SessionStore, csrf 
 	// app-push plus the device poll/wait/ack surface. See outbox.go /
 	// app_push.go.
 	registerPushOutboxRoutes(mux, db, sessions, csrf, sender)
-	registerShellRoutes(mux, db, sessions, csrf)
+	registerShellRoutes(mux, db, sessions, csrf, sender)
 	// Operator test-notification form (same fan-out pipeline as the API).
 	RegisterNotifyWebUIRoutes(mux, db, sender, sessions, csrf)
 	return withAuthNoStore(mux)

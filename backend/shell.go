@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aaronroquefonseca/phone-companion/backend/notify"
 	"github.com/aaronroquefonseca/phone-companion/backend/webui"
 )
 
@@ -78,7 +79,7 @@ type shellQueueRequest struct {
 // handleShellQueue serves POST /api/v1/shell (operator-only): validate,
 // resolve the single target, enqueue one `shell` outbox row, and record a
 // pending result row. 202 {"command_id"}.
-func handleShellQueue(db *sql.DB) http.HandlerFunc {
+func handleShellQueue(db *sql.DB, sender notify.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 		var req shellQueueRequest
@@ -159,6 +160,17 @@ func handleShellQueue(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		signalOutboxWaiters(dev)
+		// Best-effort FCM wake so the command runs even when instant mode
+		// is off: same silent hint shape as app-push, failures logged only.
+		if _, isFCM := sender.(*notify.FCMSender); isFCM {
+			var token string
+			if err := db.QueryRow(`SELECT COALESCE(fcm_token,'') FROM devices WHERE id = ?`, dev).Scan(&token); err == nil && strings.TrimSpace(token) != "" {
+				wake := map[string]string{"type": appPushWakeType, "push_id": commandID}
+				if sendErr := sender.Send(r.Context(), notify.Device{ID: dev, FCMToken: token}, wake); sendErr != nil {
+					log.Printf("shell: wake hint failed command_id=%s device=%s: %v", commandID, deviceLogID(dev), sendErr)
+				}
+			}
+		}
 		log.Printf("shell: queued command_id=%s device=%s len=%d timeout_ms=%d",
 			commandID, deviceLogID(dev), len(command), timeout)
 		w.Header().Set("Content-Type", "application/json")
@@ -275,8 +287,8 @@ func boolInt(b bool) int {
 
 // registerShellRoutes wires the operator queue/read endpoints and the
 // device result endpoint. Called from the production router and tests.
-func registerShellRoutes(mux *http.ServeMux, db *sql.DB, sessions webui.SessionStore, csrf *webui.CSRFProtection) {
-	mux.Handle("POST /api/v1/shell", operatorAdminChain(sessions, csrf, handleShellQueue(db)))
+func registerShellRoutes(mux *http.ServeMux, db *sql.DB, sessions webui.SessionStore, csrf *webui.CSRFProtection, sender notify.Sender) {
+	mux.Handle("POST /api/v1/shell", operatorAdminChain(sessions, csrf, handleShellQueue(db, sender)))
 	mux.Handle("GET /api/v1/shell/{command_id}", operatorAdminChain(sessions, csrf, handleShellGet(db)))
 	mux.HandleFunc("POST /api/v1/shell/result", handleShellResult(db))
 }
