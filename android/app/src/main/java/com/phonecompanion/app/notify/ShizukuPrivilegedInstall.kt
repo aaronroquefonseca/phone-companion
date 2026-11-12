@@ -175,27 +175,30 @@ object ShizukuPrivilegedInstall {
         if (!probe.isBinderAlive()) {
             return@withContext ShizukuSilentInstall.PrivilegedOutcome.TransportDied
         }
+        if (!ShizukuSilentInstall.isStagedApkPath(stagedApk.absolutePath)) {
+            Log.w(TAG, "commitPrivileged refused path shape for $packageName")
+            return@withContext ShizukuSilentInstall.PrivilegedOutcome.TransportDied
+        }
+        var sessionId = -1
+        var installer: PrivilegedInstaller? = null
         try {
-            val installer = privilegedInstaller(app)
+            installer = privilegedInstaller(app)
             val params = PackageInstaller.SessionParams(
                 PackageInstaller.SessionParams.MODE_FULL_INSTALL,
             )
             params.setAppPackageName(packageName)
-            // Trust the session like an `adb install`: without
-            // INSTALL_FROM_ADB, PackageManagerService treats this session
-            // as an ordinary app-initiated install and posts the system
-            // confirmation dialog — exactly the production symptom this
-            // fixes. Fail-open (see markSessionInstallFromAdb): when the
-            // hidden field/setter is absent the session proceeds unflagged
-            // exactly as before, and the dialog fallback + read-back
-            // verification decide the outcome.
-            markSessionInstallFromAdb(params, packageName)
-            // ackpine-proven silent shape (originating UID = Shizuku peer,
-            // user-initiated reason, no user action required): without these
-            // the system treats the privileged session as app-initiated and
-            // posts the confirmation dialog. Each attribute fails open
-            // (absent APIs leave the session as before); the dialog fallback
-            // + read-back verification decide the outcome.
+            // INSTALL_REPLACE_EXISTING is REQUIRED: the session is created
+            // by the shell peer, and PMS only auto-adds replace-existing
+            // for app callers — without it every update fails with
+            // INSTALL_FAILED_ALREADY_EXISTS.
+            val flags = ShizukuSilentInstall.applyInstallFlags(params)
+            if (!flags.applied) {
+                Log.w(TAG, "install flags not applied for $packageName [field-absent]")
+            }
+            // Session trust attributes (originating UID, user-initiated
+            // reason, no-user-action). With the wrapped binders below the
+            // session already runs as shell, so these are defense in depth;
+            // each fails open individually.
             val trust = ShizukuSilentInstall.applySessionTrust(
                 params,
                 peerUid(),
@@ -203,32 +206,30 @@ object ShizukuPrivilegedInstall {
                 ShizukuSilentInstall.resolveInstallReasonUser(PackageManager::class.java),
                 ShizukuSilentInstall.resolveUserActionNotRequired(params.javaClass),
             )
-            Log.i(TAG, "commitPrivileged trust ou=${trust.originatingUid} reason=${trust.installReason} action=${trust.userAction} for $packageName")
-            if (!ShizukuSilentInstall.isStagedApkPath(stagedApk.absolutePath)) {
-                Log.w(TAG, "commitPrivileged refused path shape for $packageName")
-                return@withContext ShizukuSilentInstall.PrivilegedOutcome.TransportDied
-            }
-            var sessionId = -1
-            try {
-                sessionId = installer.createSession(params)
-                installer.openSession(sessionId).use { session ->
-                    session.openWrite("apk", 0, -1).use { out ->
-                        stagedApk.inputStream().use { input -> input.copyTo(out) }
-                        session.fsync(out)
-                    }
-                    val status = awaitCommitStatus(app, session, packageName, attempt, statusTimeoutMs)
-                    Log.i(TAG, "commitPrivileged status=$status for $packageName")
-                    ShizukuSilentInstall.PrivilegedOutcome.Committed(status)
+            Log.i(
+                TAG,
+                "commitPrivileged trust ou=${trust.originatingUid} " +
+                    "reason=${trust.installReason} action=${trust.userAction} for $packageName",
+            )
+            val userId = Context::class.java.getMethod("getUserId").invoke(app) as Int
+            sessionId = installer.createSession(params, userId)
+            Log.i(TAG, "commitPrivileged session=$sessionId created for $packageName")
+            installer.openSession(sessionId).use { session ->
+                session.openWrite("apk", 0, -1).use { out ->
+                    stagedApk.inputStream().use { input -> input.copyTo(out) }
+                    session.fsync(out)
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                if (sessionId >= 0) runCatching { installer.abandonSession(sessionId) }
-                ShizukuSilentInstall.PrivilegedOutcome.TransportDied
+                val status = awaitCommitStatus(app, session, packageName, attempt, statusTimeoutMs)
+                Log.i(TAG, "commitPrivileged status=$status for $packageName")
+                ShizukuSilentInstall.PrivilegedOutcome.Committed(status)
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // Log the class (never paths/hashes/URLs) so a failed silent
+            // attempt is diagnosable instead of silently degrading.
+            Log.w(TAG, "commitPrivileged failed for $packageName [${e.javaClass.simpleName}]")
+            if (sessionId >= 0) runCatching { installer?.abandonSession(sessionId) }
             ShizukuSilentInstall.PrivilegedOutcome.TransportDied
         }
     }
@@ -286,44 +287,11 @@ object ShizukuPrivilegedInstall {
         }
 
     /**
-     * Best-effort adb-trust flag for one privileged session (see the
-     * call site in [commitPrivileged] for WHY). Fail-open: a missing
-     * hidden field resolves to the fallback constant, a missing setter
-     * no-ops — either way the session proceeds unflagged exactly as
-     * before (the system may prompt; the dialog fallback + read-back
-     * verification decide the outcome). Never throws, never silently
-     * claims success. Logging discipline: package names and exception
-     * class shapes only.
+     * Shell package name used as installer identity on non-root Shizuku.
+     * Retained for reference/logging only: with the wrapped binder, the
+     * caller UID IS shell, and PackageManagerService nulls the installer
+     * name for shell callers itself.
      */
-    private fun markSessionInstallFromAdb(
-        params: PackageInstaller.SessionParams,
-        packageName: String,
-    ) {
-        try {
-            val flag = ShizukuSilentInstall.resolveInstallFromAdbFlag(PackageManager::class.java)
-            if (!ShizukuSilentInstall.applyInstallFromAdbFlag(params, flag)) {
-                Log.w(TAG, "adb install flag not applied for $packageName [setter-absent]")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "adb install flag skipped for $packageName [${e.javaClass.simpleName}]")
-        }
-    }
-
-    /**
-     * Installer identity for privileged sessions. When Shizuku runs as
-     * shell (UID 2000, the non-root case), the session must be attributed
-     * to the shell package — exactly what ackpine does — or
-     * PackageManagerService treats the session as an ordinary app install
-     * and posts the system confirmation dialog (the production symptom
-     * that survived the adb-install flag). On root/Sui (UID 0) our own
-     * package is correct. Unknown UID (binder died mid-read) fails closed
-     * to our package name: the dialog fallback + read-back verification
-     * decide the outcome, never a mis-attributed session.
-     */
-    fun installerPackageName(appPackageName: String, shizukuUid: Int?): String =
-        if (shizukuUid != null && shizukuUid != 0) SHELL_INSTALLER_PACKAGE else appPackageName
-
-    /** Shell package name used as installer identity on non-root Shizuku. */
     const val SHELL_INSTALLER_PACKAGE = "com.android.shell"
 
     /** Shizuku peer UID, or null when the binder is dead. Root is 0. */
@@ -334,66 +302,105 @@ object ShizukuPrivilegedInstall {
     }
 
     /**
-     * Builds a `PackageInstaller` whose sessions commit with shell
-     * privilege: the `package` system-service binder fetched through
-     * Shizuku, wrapped so calls run as the Shizuku peer (shell/root),
-     * unwrapped to `IPackageManager`, then its `getPackageInstaller()`
-     * backing a `PackageInstaller` for our package on the current user.
-     * Hidden-API access (`IPackageManager`, its nested Stub/Proxy, the
-     * hidden `PackageInstaller` constructor) is opened with
-     * HiddenApiBypass (Apache-2.0, version-pinned) — reflection only,
-     * written originally for this call path. Throws on any edge (the
-     * caller maps it to transport fallback).
+     * Builds the privileged installer. THE LOAD-BEARING PART: every
+     * binder in the chain must be wrapped in [ShizukuBinderWrapper] so
+     * the transacting process is the Shizuku peer (shell/root) — not our
+     * app. Wrapping only the one-time `IPCackageManager` lookup (the
+     * previous implementation) left `createSession`/`openSession`/
+     * `commit` running as our own UID; PackageManagerService then strips
+     * INSTALL_FROM_ADB, rejects the `com.android.shell` installer name
+     * (SecurityException) and requires the confirmation dialog.
+     * Mirrors ackpine's ShizukuPackageInstaller: wrap the
+     * `IPackageInstaller` binder, and wrap each `IPackageInstallerSession`
+     * binder returned by `openSession`. Hidden-API access via
+     * HiddenApiBypass (Apache-2.0, version-pinned) — reflection only.
+     * Throws on any edge (the caller maps it to transport fallback).
      */
-    private fun privilegedInstaller(app: Context): PackageInstaller {
+    private fun privilegedInstaller(app: Context): PrivilegedInstaller {
         // Prefixes without a trailing ';' so nested Stub/Proxy classes
         // (e.g. IPackageManager$Stub$Proxy, which declares the invoked
         // methods) still match the exemption.
         HiddenApiBypass.addHiddenApiExemptions(
             "Landroid/content/pm/IPackageManager",
             "Landroid/content/pm/IPackageInstaller",
+            "Landroid/content/pm/IPackageInstallerSession",
             "Landroid/content/pm/PackageInstaller",
             "Landroid/content/pm/PackageManager",
             "Landroid/content/pm/ParceledListSlice",
             "Landroid/content/Context",
         )
-        val raw: IBinder = SystemServiceHelper.getSystemService("package")
+        val pmBinder: IBinder = SystemServiceHelper.getSystemService("package")
             ?: throw IllegalStateException("no package service binder")
-        val binder = ShizukuBinderWrapper(raw)
-        val stub = Class.forName("android.content.pm.IPackageManager\$Stub")
-        val ipm = stub.getMethod("asInterface", IBinder::class.java).invoke(null, binder)
+        val ipmStub = Class.forName("android.content.pm.IPackageManager\$Stub")
+        val ipm = ipmStub.getMethod("asInterface", IBinder::class.java)
+            .invoke(null, ShizukuBinderWrapper(pmBinder))
             ?: throw IllegalStateException("no IPackageManager")
-        val ipi = ipm.javaClass.getMethod("getPackageInstaller").invoke(ipm)
+        val rawIpi = ipm.javaClass.getMethod("getPackageInstaller").invoke(ipm)
             ?: throw IllegalStateException("no IPackageInstaller")
-        val ipiClass = Class.forName("android.content.pm.IPackageInstaller")
-        // Current user only (Context.getUserId is hidden platform API, so
-        // reflective under the same exemption; work profiles are future
-        // work). Throws on any edge — the caller maps it to transport
-        // fallback, never to a wrong-user install.
-        val userId = Context::class.java.getMethod("getUserId").invoke(app) as Int
-        // Attribute the session to the shell peer (non-root) or to us
-        // (root/Sui): the installer identity decides whether the system
-        // trusts the commit silently. See installerPackageName.
-        val installerName = installerPackageName(app.packageName, peerUid())
-        return try {
-            val ctor = PackageInstaller::class.java.getDeclaredConstructor(
-                ipiClass,
-                String::class.java,
-                String::class.java,
-                Int::class.javaPrimitiveType,
+        val ipiBinder = rawIpi.javaClass.getMethod("asBinder").invoke(rawIpi) as IBinder
+        val ipiStub = Class.forName("android.content.pm.IPackageInstaller\$Stub")
+        val ipi = ipiStub.getMethod("asInterface", IBinder::class.java)
+            .invoke(null, ShizukuBinderWrapper(ipiBinder))
+            ?: throw IllegalStateException("no wrapped IPackageInstaller")
+        return PrivilegedInstaller(ipi)
+    }
+
+    /**
+     * `IPackageInstaller` proxy whose binder is Shizuku-wrapped, plus
+     * wrapped sessions. Reflective calls only (hidden AIDL surfaces):
+     * `createSession(params, installerName, [attributionTag,] userId)`,
+     * `openSession(id)`, `abandonSession(id)`. `openSession` additionally
+     * wraps the returned `IPackageInstallerSession` binder and rebuilds a
+     * `PackageInstaller.Session` over it through the hidden
+     * `Session(IPackageInstallerSession)` constructor — the only way to
+     * make `openWrite`/`fsync`/`commit` transact as the Shizuku peer.
+     */
+    private class PrivilegedInstaller(private val ipi: Any) {
+
+        fun createSession(params: PackageInstaller.SessionParams, userId: Int): Int {
+            // Installer name null: PMS derives it from the (shell) caller.
+            val args: Array<Any?> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                arrayOf(params, null, null, userId)
+            } else {
+                arrayOf(params, null, userId)
+            }
+            val types: Array<Class<*>> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                arrayOf(
+                    PackageInstaller.SessionParams::class.java,
+                    String::class.java,
+                    String::class.java,
+                    Int::class.javaPrimitiveType!!,
+                )
+            } else {
+                arrayOf(
+                    PackageInstaller.SessionParams::class.java,
+                    String::class.java,
+                    Int::class.javaPrimitiveType!!,
+                )
+            }
+            val method = ipi.javaClass.getMethod("createSession", *types)
+            return method.invoke(ipi, *args) as Int
+        }
+
+        fun openSession(sessionId: Int): PackageInstaller.Session {
+            val open = ipi.javaClass.getMethod("openSession", Int::class.javaPrimitiveType)
+            val proxy = open.invoke(ipi, sessionId)
+                ?: throw IllegalStateException("null session proxy")
+            val sessionBinder = proxy.javaClass.getMethod("asBinder").invoke(proxy) as IBinder
+            val sessionStub = Class.forName("android.content.pm.IPackageInstallerSession\$Stub")
+            val wrapped = sessionStub.getMethod("asInterface", IBinder::class.java)
+                .invoke(null, ShizukuBinderWrapper(sessionBinder))
+                ?: throw IllegalStateException("null wrapped session")
+            val ctor = PackageInstaller.Session::class.java.getDeclaredConstructor(
+                Class.forName("android.content.pm.IPackageInstallerSession"),
             )
             ctor.isAccessible = true
-            val tag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) app.attributionTag else null
-            ctor.newInstance(ipi, installerName, tag, userId) as PackageInstaller
-        } catch (_: NoSuchMethodException) {
-            // Pre-R (API < 30): no attribution-tag parameter.
-            val ctor = PackageInstaller::class.java.getDeclaredConstructor(
-                ipiClass,
-                String::class.java,
-                Int::class.javaPrimitiveType,
-            )
-            ctor.isAccessible = true
-            ctor.newInstance(ipi, installerName, userId) as PackageInstaller
+            return ctor.newInstance(wrapped) as PackageInstaller.Session
+        }
+
+        fun abandonSession(sessionId: Int) {
+            ipi.javaClass.getMethod("abandonSession", Int::class.javaPrimitiveType)
+                .invoke(ipi, sessionId)
         }
     }
 
