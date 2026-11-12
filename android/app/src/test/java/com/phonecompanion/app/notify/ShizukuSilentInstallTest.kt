@@ -152,4 +152,71 @@ class ShizukuSilentInstallTest {
         assertFalse(ShizukuSilentInstall.isStagedApkPath("/x/app.apk\npm install -r /evil.apk"))
         assertFalse(ShizukuSilentInstall.isStagedApkPath("/x/app.apk\u0000"))
     }
+
+    // Fakes for the adb-trust flag helpers: the real Android
+    // PackageManager/SessionParams are unavailable in pure-JVM unit
+    // tests, so these stand in with the same reflective shapes (a
+    // static INSTALL_FROM_ADB field; get/setInstallFlags methods).
+
+    object FakePmWithFlag {
+        const val INSTALL_FROM_ADB = 0x00000020
+    }
+
+    object FakePmCustomFlag {
+        const val INSTALL_FROM_ADB = 0x00000040
+    }
+
+    object FakePmWithoutFlag
+
+    class FakeSessionParams {
+        var storedFlags: Int = 0
+        fun getInstallFlags(): Int = storedFlags
+        fun setInstallFlags(flags: Int) {
+            storedFlags = flags
+        }
+    }
+
+    class FakeSessionParamsNoSetter {
+        var storedFlags: Int = 0
+    }
+
+    @Test
+    fun `adb flag resolves to the platform value when the field exists`() {
+        assertEquals(
+            0x00000020,
+            ShizukuSilentInstall.resolveInstallFromAdbFlag(FakePmWithFlag::class.java),
+        )
+    }
+
+    @Test
+    fun `adb flag reads the platform value reflectively, not hardcoded`() {
+        assertEquals(
+            0x00000040,
+            ShizukuSilentInstall.resolveInstallFromAdbFlag(FakePmCustomFlag::class.java),
+        )
+    }
+
+    @Test
+    fun `adb flag falls back to 0x20 when the field is absent`() {
+        assertEquals(0x00000020, ShizukuSilentInstall.INSTALL_FROM_ADB_FALLBACK)
+        assertEquals(
+            ShizukuSilentInstall.INSTALL_FROM_ADB_FALLBACK,
+            ShizukuSilentInstall.resolveInstallFromAdbFlag(FakePmWithoutFlag::class.java),
+        )
+    }
+
+    @Test
+    fun `adb flag setter ors into existing flags`() {
+        val params = FakeSessionParams()
+        params.storedFlags = 0x00000002
+        assertTrue(ShizukuSilentInstall.applyInstallFromAdbFlag(params, 0x00000020))
+        assertEquals(0x00000002 or 0x00000020, params.storedFlags)
+    }
+
+    @Test
+    fun `adb flag setter helper no-ops safely when the method is missing`() {
+        val params = FakeSessionParamsNoSetter()
+        assertFalse(ShizukuSilentInstall.applyInstallFromAdbFlag(params, 0x00000020))
+        assertEquals(0, params.storedFlags)
+    }
 }

@@ -123,6 +123,58 @@ object ShizukuSilentInstall {
     const val VERIFY_POLL_MS = 500L
 
     /**
+     * Fallback for the hidden `PackageManager.INSTALL_FROM_ADB` flag
+     * (AOSP value `0x00000020`) when the field is absent on some API
+     * level. The privileged session carries this flag so the system
+     * trusts it like an `adb install` and skips the user-confirmation
+     * dialog for the shell caller.
+     */
+    const val INSTALL_FROM_ADB_FALLBACK = 0x00000020
+
+    /**
+     * Resolves the hidden `PackageManager.INSTALL_FROM_ADB` install
+     * flag reflectively from [packageManagerClass] (the hidden field is
+     * not in the compile-SDK surface). Falls back to
+     * [INSTALL_FROM_ADB_FALLBACK] when the field is absent — never
+     * throws. Pure ([Class]-in) so it is unit-testable without a
+     * device.
+     */
+    fun resolveInstallFromAdbFlag(packageManagerClass: Class<*>): Int {
+        return try {
+            packageManagerClass.getField("INSTALL_FROM_ADB").getInt(null)
+        } catch (_: Exception) {
+            INSTALL_FROM_ADB_FALLBACK
+        }
+    }
+
+    /**
+     * ORs [installFromAdbFlag] into a `SessionParams` via the hidden
+     * `getInstallFlags`/`setInstallFlags` methods (invoked
+     * reflectively under the caller's HiddenApiBypass exemptions).
+     * Returns true when the flag was applied, false when the hidden
+     * setter is absent — the caller then proceeds with the session
+     * exactly as before (the system may prompt; the dialog fallback +
+     * read-back verification decide the outcome). Never throws. Takes
+     * [sessionParams] as [Any] so it is unit-testable without a
+     * device.
+     */
+    fun applyInstallFromAdbFlag(sessionParams: Any, installFromAdbFlag: Int): Boolean {
+        return try {
+            val cls = sessionParams.javaClass
+            val current = try {
+                (cls.getMethod("getInstallFlags").invoke(sessionParams) as? Int) ?: 0
+            } catch (_: NoSuchMethodException) {
+                0
+            }
+            cls.getMethod("setInstallFlags", Int::class.javaPrimitiveType)
+                .invoke(sessionParams, current or installFromAdbFlag)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
      * Classifies one attempt. Order matters: an unsupported server or a
      * dead binder is UNAVAILABLE even if a stale grant flag lingers.
      */

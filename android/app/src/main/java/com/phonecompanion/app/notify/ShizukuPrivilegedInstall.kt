@@ -181,6 +181,15 @@ object ShizukuPrivilegedInstall {
                 PackageInstaller.SessionParams.MODE_FULL_INSTALL,
             )
             params.setAppPackageName(packageName)
+            // Trust the session like an `adb install`: without
+            // INSTALL_FROM_ADB, PackageManagerService treats this session
+            // as an ordinary app-initiated install and posts the system
+            // confirmation dialog — exactly the production symptom this
+            // fixes. Fail-open (see markSessionInstallFromAdb): when the
+            // hidden field/setter is absent the session proceeds unflagged
+            // exactly as before, and the dialog fallback + read-back
+            // verification decide the outcome.
+            markSessionInstallFromAdb(params, packageName)
             if (!ShizukuSilentInstall.isStagedApkPath(stagedApk.absolutePath)) {
                 Log.w(TAG, "commitPrivileged refused path shape for $packageName")
                 return@withContext ShizukuSilentInstall.PrivilegedOutcome.TransportDied
@@ -263,6 +272,30 @@ object ShizukuPrivilegedInstall {
         }
 
     /**
+     * Best-effort adb-trust flag for one privileged session (see the
+     * call site in [commitPrivileged] for WHY). Fail-open: a missing
+     * hidden field resolves to the fallback constant, a missing setter
+     * no-ops — either way the session proceeds unflagged exactly as
+     * before (the system may prompt; the dialog fallback + read-back
+     * verification decide the outcome). Never throws, never silently
+     * claims success. Logging discipline: package names and exception
+     * class shapes only.
+     */
+    private fun markSessionInstallFromAdb(
+        params: PackageInstaller.SessionParams,
+        packageName: String,
+    ) {
+        try {
+            val flag = ShizukuSilentInstall.resolveInstallFromAdbFlag(PackageManager::class.java)
+            if (!ShizukuSilentInstall.applyInstallFromAdbFlag(params, flag)) {
+                Log.w(TAG, "adb install flag not applied for $packageName [setter-absent]")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "adb install flag skipped for $packageName [${e.javaClass.simpleName}]")
+        }
+    }
+
+    /**
      * Builds a `PackageInstaller` whose sessions commit with shell
      * privilege: the `package` system-service binder fetched through
      * Shizuku, wrapped so calls run as the Shizuku peer (shell/root),
@@ -282,6 +315,7 @@ object ShizukuPrivilegedInstall {
             "Landroid/content/pm/IPackageManager",
             "Landroid/content/pm/IPackageInstaller",
             "Landroid/content/pm/PackageInstaller",
+            "Landroid/content/pm/PackageManager",
             "Landroid/content/pm/ParceledListSlice",
             "Landroid/content/Context",
         )

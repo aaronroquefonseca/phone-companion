@@ -258,7 +258,7 @@ held `package` system-service binder (hidden-API access via the
 Apache-2.0 HiddenApiBypass lib, version-pinned — reflection only,
 written for this call path), creates a MODE_FULL_INSTALL session
 (replace-existing semantics) for the verified staged APK, writes the
-APK bytes into the session from our own storage, and commits. The commit
+APK bytes into the session from our own storage, and commits. The session carries the adb-install trust flag (`INSTALL_FROM_ADB`, resolved reflectively with a `0x20` fallback) so the system treats it like an `adb install` and skips the confirmation dialog — without Shizuku or a granted binder the dialog path is unchanged. The commit
 carries a status receiver that is only ever observed — a user-
 confirmation intent is never launched on this path, ever. The commit
 call alone is never trusted: the installed package's versionCode is read
