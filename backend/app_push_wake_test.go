@@ -152,3 +152,51 @@ func TestAppPushWakeSendFailureStill202(t *testing.T) {
 		t.Fatalf("202 body %s must carry the push_id", w.Body.String())
 	}
 }
+
+// require_wake turns silent degradation into a loud, pre-queue rejection:
+// a tokenless target cannot be woken, so nothing is queued at all.
+func TestAppPushRequireWakeRejectsTokenlessDevice(t *testing.T) {
+	db := openNotifyTestDB(t)
+	notifyDeviceWithToken(t, db, "dev-fcm", "fake-live-token")
+	// dev-1 exists in the registry without an FCM token.
+	posts := 0
+	var bodies []map[string]string
+	sender := fcmFanoutSender(t, appPushWakeBodies(t, &posts, &bodies))
+	body := strings.Replace(validAppPushBody("dev-1", "dev-fcm"),
+		`"apk_url"`, `"require_wake":true,"apk_url"`, 1)
+
+	w := postAppPush(t, db, sender, body)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422 (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "wake_unavailable") {
+		t.Fatalf("body %q missing wake_unavailable", w.Body.String())
+	}
+	// Pre-queue rejection: no outbox rows, no wake attempts, no push row.
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM outbox`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("queued %d outbox rows despite require_wake rejection", rows)
+	}
+	if posts != 0 {
+		t.Fatalf("sent %d wake(s) despite rejection", posts)
+	}
+}
+
+// require_wake under a non-FCM driver is equally rejected before queueing.
+func TestAppPushRequireWakeRejectsNonFCMDriver(t *testing.T) {
+	db := openNotifyTestDB(t)
+	notifyDeviceWithToken(t, db, "dev-fcm", "fake-live-token")
+	body := strings.Replace(validAppPushBody("dev-fcm"),
+		`"apk_url"`, `"require_wake":true,"apk_url"`, 1)
+
+	w := postAppPush(t, db, notify.NoopSender{}, body)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422 (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "wake_unavailable") {
+		t.Fatalf("body %q missing wake_unavailable", w.Body.String())
+	}
+}

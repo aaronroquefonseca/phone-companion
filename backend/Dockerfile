@@ -5,6 +5,10 @@
 
 FROM golang:1.26-bookworm AS builder
 
+# Commit SHA baked into the binary (reported by GET /healthz) so a stale
+# deployment is visible immediately. The deploy script passes the real SHA.
+ARG GIT_SHA=dev
+
 WORKDIR /src
 
 # Module deps first for layer caching.
@@ -13,7 +17,7 @@ RUN go mod download
 
 COPY . .
 # Static binary (CGO off; sqlite driver is pure Go).
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/phone-companion .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.buildSHA=${GIT_SHA}" -o /out/phone-companion .
 # Writable state dirs. Copied --chown below so the non-root runtime user can
 # write; named volumes inherit this ownership on first mount.
 RUN mkdir -p /out/data /out/widgets
