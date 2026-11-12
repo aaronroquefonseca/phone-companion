@@ -137,6 +137,36 @@ object AppInstallNotifications {
     }
 
     /**
+     * Commit-phase post: replaces the progress bar with an indeterminate
+     * "Installing…" state at the same notification id. Without it the
+     * progress notification sat at 100% through the whole install phase
+     * (status wait + version read-back), which reads as a stalled
+     * download; if the process is killed mid-install the user still sees
+     * an accurate "Installing" rather than a frozen bar. The terminal
+     * post replaces this; it is ongoing, action-less and silent.
+     */
+    fun notifyInstalling(
+        context: Context,
+        payload: AppInstallPayload,
+    ) {
+        val manager = context.notificationManager()
+        NotificationChannels.ensureInstalls(manager)
+        manager.notify(
+            payload.notifyId(),
+            NotificationCompat.Builder(context, NotificationChannels.INSTALL_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(context.getString(R.string.app_install_progress_title, payload.label))
+                .setContentText(context.getString(R.string.app_install_installing))
+                .setProgress(0, 0, true)
+                .setContentIntent(detailIntent(context, payload))
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setOnlyAlertOnce(true)
+                .build(),
+        )
+    }
+
+    /**
      * Grant gate after a verified auto-download: the unknown-sources
      * grant was missing at commit time, so nothing committed and the
      * verified APK stays cached. Tap opens the pre-install UI (the

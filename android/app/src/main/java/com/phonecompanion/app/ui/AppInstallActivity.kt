@@ -156,7 +156,18 @@ class AppInstallActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                vm.uiState.collect { render(it) }
+                launch {
+                    vm.uiState.collect { render(it) }
+                }
+                // The receipt-triggered auto-download runs detached from
+                // this screen's ViewModel; its registry is a StateFlow so
+                // the in-app percentage tracks it live instead of freezing
+                // at whatever value was present on the first render.
+                launch {
+                    AppInstallProgress.entries.collect {
+                        render(vm.uiState.value)
+                    }
+                }
             }
         }
     }

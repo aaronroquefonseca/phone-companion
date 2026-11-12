@@ -89,7 +89,7 @@ object AppInstallAutoDownload {
             // Foreground surfacing is additive: never fail the download.
         }
         val dest = AppInstallFiles.apkFile(app, payload)
-        val host = AutoHost(app, payload.pushId, attempt)
+        val host = AutoHost(app, payload, attempt)
         try {
             scope.launch {
                 try {
@@ -193,9 +193,10 @@ object AppInstallAutoDownload {
      */
     private class AutoHost(
         private val app: Context,
-        private val pushId: String,
+        private val payload: AppInstallPayload,
         private val attempt: String,
     ) : AppInstallFlow.Host {
+        private val pushId: String = payload.pushId
         override suspend fun download(
             payload: AppInstallPayload,
             dest: File,
@@ -227,6 +228,7 @@ object AppInstallAutoDownload {
         override suspend fun commit(payload: AppInstallPayload, apkFile: File): Boolean =
             withContext(Dispatchers.IO) {
                 if (AppInstallSessions.isCancelled(payload.pushId)) return@withContext false
+                runCatching { AppInstallNotifications.notifyInstalling(app, payload) }
                 AppInstallInstaller.commit(app, payload, apkFile, attempt)
             }
 
@@ -255,8 +257,14 @@ object AppInstallAutoDownload {
         override suspend fun privilegedCommit(
             stagedApk: File,
             packageName: String,
-        ): ShizukuSilentInstall.PrivilegedOutcome =
-            ShizukuPrivilegedInstall.commitPrivileged(app, stagedApk, packageName, attempt)
+        ): ShizukuSilentInstall.PrivilegedOutcome {
+            // Same commit-phase visibility as the dialog path: the bar
+            // must not sit at 100% while the privileged session runs.
+            runCatching {
+                AppInstallNotifications.notifyInstalling(app, payload)
+            }
+            return ShizukuPrivilegedInstall.commitPrivileged(app, stagedApk, packageName, attempt)
+        }
 
         override suspend fun awaitInstalledVersion(
             packageName: String,
