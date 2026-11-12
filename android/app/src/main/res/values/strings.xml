@@ -98,6 +98,7 @@
     <string name="app_install_error_install">Install could not start. Nothing was installed.</string>
     <string name="app_install_error_cancelled">Download cancelled. Nothing was installed.</string>
     <string name="app_install_error_unknown_sources">Permission to install unknown apps was revoked before install could start. Nothing was installed — re-allow it and try again.</string>
+    <string name="app_install_error_in_progress">%1$s is already downloading in the background — watch the progress notification, or open the Widgets screen to see it.</string>
     <string name="app_install_close">Close</string>
     <!-- ACTION_VIEW commit-failure fallback: the system installer UI opened,
          so this informational note (not a failure) is the attempt's single

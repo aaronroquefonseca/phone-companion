@@ -153,95 +153,45 @@ class ShizukuSilentInstallTest {
         assertFalse(ShizukuSilentInstall.isStagedApkPath("/x/app.apk\u0000"))
     }
 
-    // Fakes for the adb-trust flag helpers: the real Android
-    // PackageManager/SessionParams are unavailable in pure-JVM unit
-    // tests, so these stand in with the same reflective shapes (a
-    // static INSTALL_FROM_ADB field; get/setInstallFlags methods).
-
-    object FakePmWithFlag {
-        const val INSTALL_FROM_ADB = 0x00000020
-    }
-
-    object FakePmCustomFlag {
-        const val INSTALL_FROM_ADB = 0x00000040
-    }
-
-    object FakePmWithoutFlag
+    // Fakes for the install-flags helper: the real SessionParams exposes a
+    // public `installFlags` FIELD (there is no get/setInstallFlags on
+    // SessionParams at all), so the fake mirrors that exact shape.
 
     class FakeSessionParams {
-        var storedFlags: Int = 0
-        fun getInstallFlags(): Int = storedFlags
-        fun setInstallFlags(flags: Int) {
-            storedFlags = flags
-        }
+        @JvmField
+        var installFlags: Int = 0
     }
 
-    class FakeSessionParamsNoSetter {
+    class FakeSessionParamsNoField {
         var storedFlags: Int = 0
     }
 
     @Test
-    fun `adb flag resolves to the platform value when the field exists`() {
-        assertEquals(
-            0x00000020,
-            ShizukuSilentInstall.resolveInstallFromAdbFlag(FakePmWithFlag::class.java),
-        )
-    }
-
-    @Test
-    fun `adb flag reads the platform value reflectively, not hardcoded`() {
-        assertEquals(
-            0x00000040,
-            ShizukuSilentInstall.resolveInstallFromAdbFlag(FakePmCustomFlag::class.java),
-        )
-    }
-
-    @Test
-    fun `adb flag falls back to 0x20 when the field is absent`() {
-        assertEquals(0x00000020, ShizukuSilentInstall.INSTALL_FROM_ADB_FALLBACK)
-        assertEquals(
-            ShizukuSilentInstall.INSTALL_FROM_ADB_FALLBACK,
-            ShizukuSilentInstall.resolveInstallFromAdbFlag(FakePmWithoutFlag::class.java),
-        )
-    }
-
-    @Test
-    fun `adb flag setter ors into existing flags`() {
+    fun `install flags or adb and replace-existing into the public field`() {
         val params = FakeSessionParams()
-        params.storedFlags = 0x00000002
-        assertTrue(ShizukuSilentInstall.applyInstallFromAdbFlag(params, 0x00000020))
-        assertEquals(0x00000002 or 0x00000020, params.storedFlags)
-    }
-
-    @Test
-    fun `adb flag setter helper no-ops safely when the method is missing`() {
-        val params = FakeSessionParamsNoSetter()
-        assertFalse(ShizukuSilentInstall.applyInstallFromAdbFlag(params, 0x00000020))
-        assertEquals(0, params.storedFlags)
-    }
-
-    @Test
-    fun `shell peer attributes the session to the shell package`() {
+        params.installFlags = 0x00000010 // unrelated flag preserved
+        val applied = ShizukuSilentInstall.applyInstallFlags(params)
+        assertTrue(applied.applied)
+        assertTrue(applied.installFromAdb)
+        assertTrue(applied.replaceExisting)
         assertEquals(
-            "com.android.shell",
-            ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", 2000),
+            0x00000010 or ShizukuSilentInstall.INSTALL_FROM_ADB_FALLBACK or
+                ShizukuSilentInstall.INSTALL_REPLACE_EXISTING_FALLBACK,
+            params.installFlags,
         )
     }
 
     @Test
-    fun `root peer keeps our own package as installer`() {
-        assertEquals(
-            "com.phonecompanion.app",
-            ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", 0),
-        )
+    fun `replace-existing fallback is the platform 0x2`() {
+        assertEquals(0x00000002, ShizukuSilentInstall.INSTALL_REPLACE_EXISTING_FALLBACK)
     }
 
     @Test
-    fun `unknown peer fails closed to our own package`() {
-        assertEquals(
-            "com.phonecompanion.app",
-            ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", null),
-        )
+    fun `install flags helper fails open when the field is absent`() {
+        val applied = ShizukuSilentInstall.applyInstallFlags(FakeSessionParamsNoField())
+        assertFalse(applied.applied)
+        assertFalse(applied.installFromAdb)
+        assertFalse(applied.replaceExisting)
     }
 
     // Fakes for the session-trust helpers: same reflective shapes as the

@@ -148,29 +148,44 @@ object ShizukuSilentInstall {
     }
 
     /**
-     * ORs [installFromAdbFlag] into a `SessionParams` via the hidden
-     * `getInstallFlags`/`setInstallFlags` methods (invoked
-     * reflectively under the caller's HiddenApiBypass exemptions).
-     * Returns true when the flag was applied, false when the hidden
-     * setter is absent — the caller then proceeds with the session
-     * exactly as before (the system may prompt; the dialog fallback +
-     * read-back verification decide the outcome). Never throws. Takes
-     * [sessionParams] as [Any] so it is unit-testable without a
-     * device.
+     * Fallback for `PackageManager.INSTALL_REPLACE_EXISTING`
+     * (AOSP value `0x00000002`). A shell-created session does NOT get
+     * this flag for free (PackageManagerService adds it only for app
+     * callers), and every real push in this product is an update — so
+     * without it the commit fails with INSTALL_FAILED_ALREADY_EXISTS
+     * even once the session itself is privileged.
      */
-    fun applyInstallFromAdbFlag(sessionParams: Any, installFromAdbFlag: Int): Boolean {
+    const val INSTALL_REPLACE_EXISTING_FALLBACK = 0x00000002
+
+    /** What [applyInstallFlags] actually set on one `SessionParams`. */
+    data class InstallFlagsApplied(
+        val applied: Boolean = false,
+        val installFromAdb: Boolean = false,
+        val replaceExisting: Boolean = false,
+    )
+
+    /**
+     * ORs INSTALL_FROM_ADB and INSTALL_REPLACE_EXISTING into a
+     * `SessionParams` through its PUBLIC `installFlags` field. The field
+     * (not a get/setInstallFlags method pair — those live on `SessionInfo`
+     * and `Session`, never on `SessionParams`) is the only real surface on
+     * API 26+. Reflectively read+written under the caller's HiddenApiBypass
+     * exemptions. Never throws: a missing field returns
+     * [InstallFlagsApplied] with `applied=false` and the caller proceeds
+     * exactly as before (dialog fallback + read-back verification decide).
+     * Takes [sessionParams] as [Any] so it is unit-testable without a device.
+     */
+    fun applyInstallFlags(sessionParams: Any): InstallFlagsApplied {
         return try {
-            val cls = sessionParams.javaClass
-            val current = try {
-                (cls.getMethod("getInstallFlags").invoke(sessionParams) as? Int) ?: 0
-            } catch (_: NoSuchMethodException) {
-                0
-            }
-            cls.getMethod("setInstallFlags", Int::class.javaPrimitiveType)
-                .invoke(sessionParams, current or installFromAdbFlag)
-            true
+            val field = sessionParams.javaClass.getField("installFlags")
+            val current = field.getInt(sessionParams)
+            field.setInt(
+                sessionParams,
+                current or INSTALL_FROM_ADB_FALLBACK or INSTALL_REPLACE_EXISTING_FALLBACK,
+            )
+            InstallFlagsApplied(applied = true, installFromAdb = true, replaceExisting = true)
         } catch (_: Exception) {
-            false
+            InstallFlagsApplied()
         }
     }
 

@@ -103,7 +103,7 @@ object AppInstallNotifications {
         totalBytes: Long?,
     ) {
         val manager = context.notificationManager()
-        NotificationChannels.ensureGeneral(manager)
+        NotificationChannels.ensureInstalls(manager)
         val cancel = PendingIntent.getBroadcast(
             context,
             CompanionMessagingService.actionRequestCode(payload.notifyId(), ACTION_CANCEL_DOWNLOAD),
@@ -118,7 +118,7 @@ object AppInstallNotifications {
         val determinate = totalBytes != null && totalBytes > 0
         manager.notify(
             payload.notifyId(),
-            NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
+            NotificationCompat.Builder(context, NotificationChannels.INSTALL_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle(context.getString(R.string.app_install_progress_title, payload.label))
                 .setContentText("${payload.packageName} • ${payload.displayVersion()}")
@@ -152,11 +152,11 @@ object AppInstallNotifications {
     ): Boolean {
         if (!AppInstallSessions.claimTerminal(payload.pushId, attempt)) return false
         val manager = context.notificationManager()
-        NotificationChannels.ensureGeneral(manager)
+        NotificationChannels.ensureInstalls(manager)
         val display = payload.label
         manager.notify(
             payload.notifyId(),
-            NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
+            NotificationCompat.Builder(context, NotificationChannels.INSTALL_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle(context.getString(R.string.app_install_grant_title, display))
                 .setContentText(context.getString(R.string.app_install_grant_body, display))
@@ -389,10 +389,10 @@ object AppInstallNotifications {
         actions: List<Pair<String, PendingIntent>>,
     ) {
         val manager = context.notificationManager()
-        NotificationChannels.ensureGeneral(manager)
+        NotificationChannels.ensureInstalls(manager)
         // The single notifyId owner is the payload ([AppInstallPayload.notifyIdFor]):
         // the terminal replaces the progress rather than stacking.
-        val builder = NotificationCompat.Builder(context, NotificationChannels.GENERAL_CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, NotificationChannels.INSTALL_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(content)

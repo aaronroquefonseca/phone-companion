@@ -95,14 +95,28 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
         if (isFlowActive) return
         val app = getApplication<Application>()
         val shizukuSilent = ShizukuPrivilegedInstall.statusNow() == ShizukuSilentInstall.Status.AVAILABLE_GRANTED
-        if (!app.packageManager.canRequestPackageInstalls() && !shizukuSilent) return
+        if (!app.packageManager.canRequestPackageInstalls() && !shizukuSilent) {
+            // Fail visibly, never with a dead button: the unknown-sources
+            // gate is the caller's one-time onboarding step.
+            _uiState.value = InstallUiState.Finished(
+                app.getString(R.string.app_install_error_unknown_sources),
+            )
+            return
+        }
         // Single-writer per command: when the receipt-triggered
         // auto-download already holds the lock, this explicit tap is
         // refused (the auto flow's progress notification/registry is the
-        // source of truth) — never a second writer to the same file.
+        // source of truth) — never a second writer to the same file. The
+        // refusal is surfaced: a silent return here is the "I tapped
+        // Install and nothing happened" dead end.
         val store = PrefsAppInstallLockStore(app)
         when (AppInstallDownloadLocks.acquire(payload.commandId, payload.pushId, store)) {
-            AppInstallDownloadLocks.Acquire.IN_FLIGHT -> return
+            AppInstallDownloadLocks.Acquire.IN_FLIGHT -> {
+                _uiState.value = InstallUiState.Finished(
+                    app.getString(R.string.app_install_error_in_progress, payload.label),
+                )
+                return
+            }
             AppInstallDownloadLocks.Acquire.RECOVERED,
             AppInstallDownloadLocks.Acquire.ACQUIRED,
             -> Unit
