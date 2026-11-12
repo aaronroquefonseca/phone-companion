@@ -87,6 +87,18 @@
             android:name=".notify.AppInstallCancelReceiver"
             android:exported="false" />
 
+        <!-- Shizuku binder entry (silent installs): mandatory — without
+             this provider the Shizuku binder is never delivered and every
+             install stays on the dialog path. The manager app itself is a
+             separate user install (never bundled). -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
         <!-- Single Glance widget receiver. One picker entry ("Widget");
               placement and tap-to-configure choose any cached row. -->
         <receiver

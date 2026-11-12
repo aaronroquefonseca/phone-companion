@@ -160,6 +160,7 @@ android {
     }
     buildFeatures {
         buildConfig = true
+        aidl = true
         // Glance uses Compose's compiler ABI even though activities use Views.
         compose = true
     }
@@ -235,6 +236,13 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1'
     implementation 'com.squareup.moshi:moshi-kotlin:1.15.2'
+
+    // --- Silent installs via Shizuku (optional, user-enabled) ---
+    // Apache-2.0 client lib; the Shizuku manager app itself stays a
+    // separate user install (never bundled). The provider entry below
+    // (see AndroidManifest.xml) is mandatory or binder acquisition fails.
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
 
     // --- Tests ---
     testImplementation 'junit:junit:4.13.2'

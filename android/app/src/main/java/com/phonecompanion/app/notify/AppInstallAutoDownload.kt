@@ -105,6 +105,28 @@ object AppInstallAutoDownload {
                 // Install phase terminal state belongs to the result
                 // receiver (system confirmation → follow-up result).
             }
+            is AppInstallFlow.Outcome.SilentInstalled -> {
+                // Staged + cache copies are already deleted by the flow.
+                AppInstallNotifications.notifyTerminal(
+                    app,
+                    AppInstallFlow.TerminalKind.SUCCESS,
+                    AppInstallNotifications.TerminalTarget.from(payload),
+                    attempt,
+                )
+            }
+            is AppInstallFlow.Outcome.SilentFailed -> {
+                // Raw pm output as detail: the existing cause-aware
+                // mapping renders it (signature → App-info, else Retry
+                // from the kept verified cache).
+                AppInstallNotifications.notifyTerminal(
+                    app,
+                    AppInstallFlow.TerminalKind.FAILED,
+                    AppInstallNotifications.TerminalTarget.from(payload),
+                    attempt,
+                    outcome.detail,
+                    payload,
+                )
+            }
             is AppInstallFlow.Outcome.UnknownSourcesRevoked -> {
                 // Verified APK stays cached; route to the one-time grant
                 // flow instead of committing behind the user's back.
@@ -169,5 +191,32 @@ object AppInstallAutoDownload {
                 if (AppInstallSessions.isCancelled(payload.pushId)) return@withContext false
                 AppInstallInstaller.commit(app, payload, apkFile, attempt)
             }
+
+        /**
+         * Silent branch (Shizuku): availability is probed at commit time —
+         * a command arriving while backgrounded goes silent only when the
+         * grant is already in place; permission is never requested here
+         * (foreground-only). Staging copies the verified APK where the
+         * shell UID can read it (app-private dirs are unreadable to
+         * shell); the flow deletes the staged copy after every silent
+         * terminal, and the 24 h purge bounds abandoned copies.
+         */
+        override fun silentStatus(): ShizukuSilentInstall.Status =
+            ShizukuShell.statusNow()
+
+        override suspend fun stageForShell(verifiedApk: File): File? =
+            withContext(Dispatchers.IO) {
+                try {
+                    val staged = AppInstallFiles.stagedApkFile(app, pushId) ?: return@withContext null
+                    staged.parentFile?.mkdirs()
+                    verifiedApk.copyTo(staged, overwrite = true)
+                    staged.takeIf { it.isFile }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+
+        override suspend fun shellCommit(stagedApk: File): ShizukuSilentInstall.ShellOutcome =
+            ShizukuShell.installOnce(app, stagedApk.absolutePath)
     }
 }

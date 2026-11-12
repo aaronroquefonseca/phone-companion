@@ -83,6 +83,10 @@
     <string name="app_install_downloading">Downloading… %1$d%%</string>
     <string name="app_install_verifying">Verifying download…</string>
     <string name="app_install_installing">Installing… check the system install dialog.</string>
+    <string name="app_install_silent_installing">Installing silently… no confirmation needed.</string>
+    <string name="app_install_silent_done">%1$s installed silently.</string>
+    <string name="app_install_shizuku_body">Shizuku is running — enable silent installs to skip the system confirmation for verified updates. You can still install normally without it.</string>
+    <string name="app_install_shizuku_allow">Enable silent install</string>
     <string name="app_install_error_invalid">Invalid install request — nothing was downloaded.</string>
     <string name="app_install_error_download">Download failed. Nothing was installed — tap Install to try once more.</string>
     <string name="app_install_error_too_large">That file is over the 100 MB limit. Nothing was installed.</string>

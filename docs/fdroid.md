@@ -11,7 +11,10 @@ day. This note records exactly what remains so enabling later is trivial.
   `x/crypto`, `modernc.org/sqlite` + indirect). Moot for F-Droid anyway —
   the backend ships as server-side Docker, never as an on-device APK.
 - Android: mostly OSS (AndroidX, Retrofit/OkHttp/Moshi, Room, Glance,
-  `security-crypto` — all Apache 2.0), BUT three proprietary Google Play
+  `security-crypto` — all Apache 2.0), plus the Shizuku silent-install
+  client lib (`dev.rikka.shizuku:api/provider:13.1.5`, Apache-2.0 — the
+  Shizuku manager app itself stays a separate user install, never
+  bundled), BUT three proprietary Google Play
   services deps remain in `android/app/build.gradle`:
   - `com.google.firebase:firebase-messaging` (via BoM `33.2.0`)
   - `com.google.android.gms:play-services-mlkit-barcode-scanning`
