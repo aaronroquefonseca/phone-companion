@@ -93,6 +93,15 @@ object AppInstallCommandPoll {
             execution: ShellExecution,
         ): Boolean = false
 
+        /** Persists an executed result until its upload succeeds. */
+        suspend fun queueShellResult(commandId: String, execution: ShellExecution) = Unit
+
+        /** Reads back a persisted, not-yet-uploaded result. */
+        suspend fun takeQueuedShellResult(commandId: String): ShellExecution? = null
+
+        /** Drops a persisted result after a successful upload. */
+        suspend fun dropQueuedShellResult(commandId: String) = Unit
+
         /** Acks started command ids; true when the server accepted. */
         suspend fun ack(ids: List<String>): Boolean
     }
@@ -207,6 +216,31 @@ object AppInstallCommandPoll {
                 }
             }
 
+            override suspend fun queueShellResult(
+                commandId: String,
+                execution: ShellExecution,
+            ) {
+                ShellResultQueue.put(
+                    PrefsShellResultStore(app),
+                    ShellResultQueue.Entry(
+                        commandId,
+                        execution.exitCode,
+                        execution.stdout,
+                        execution.stderr,
+                        execution.truncated,
+                    ),
+                )
+            }
+
+            override suspend fun takeQueuedShellResult(commandId: String): ShellExecution? {
+                val e = ShellResultQueue.peek(PrefsShellResultStore(app), commandId) ?: return null
+                return ShellExecution(e.exitCode, e.stdout, e.stderr, e.truncated)
+            }
+
+            override suspend fun dropQueuedShellResult(commandId: String) {
+                ShellResultQueue.remove(PrefsShellResultStore(app), commandId)
+            }
+
             override suspend fun ack(ids: List<String>): Boolean {
                 return try {
                     val service = ApiClient.create(baseUrl) { storage.deviceToken }
@@ -283,19 +317,37 @@ object AppInstallCommandPoll {
         // re-offering it would repeat a side effect. If the upload fails
         // the operator sees a pending command and can re-issue knowingly.
         var shellResults = 0
+        val shellUploaded = ArrayList<String>()
         for (command in parsed.shell) {
-            if (posted.isPosted(command.commandId)) continue
-            // At-most-once: mark before executing. A shell command is not
-            // idempotent (`rm`, `input tap`), so a process death between
-            // execution and ack must NOT re-run it; the operator sees a
-            // pending command and can re-issue knowingly instead.
-            posted.markPosted(listOf(command.commandId))
-            val execution = try {
-                deps.executeShell(command)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                ShellExecution(-1, "", "shell_exec_failed", false)
+            // Result-first: a previous attempt may have executed but failed
+            // to upload (that is why the command is still being offered).
+            // Upload the persisted result instead of running the command
+            // again.
+            val queued = deps.takeQueuedShellResult(command.commandId)
+            val execution: ShellExecution = if (queued != null) {
+                queued
+            } else {
+                if (posted.isPosted(command.commandId)) {
+                    // Executed on a build that predates the result queue:
+                    // the output is unrecoverable, but the command must not
+                    // stay pending forever.
+                    logInfo("shell outcome lost command=${command.commandId.take(8)} [no-queued-result]")
+                    shellUploaded.add(command.commandId)
+                    continue
+                }
+                // At-most-once: mark before executing. A shell command is
+                // not idempotent (`rm`, `input tap`), so a process death
+                // between execution and ack must NOT re-run it.
+                posted.markPosted(listOf(command.commandId))
+                val fresh = try {
+                    deps.executeShell(command)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    ShellExecution(-1, "", "shell_exec_failed", false)
+                }
+                deps.queueShellResult(command.commandId, fresh)
+                fresh
             }
             val uploaded = try {
                 deps.postShellResult(command.commandId, execution)
@@ -304,7 +356,13 @@ object AppInstallCommandPoll {
             } catch (_: Exception) {
                 false
             }
-            if (uploaded) shellResults++
+            if (uploaded) {
+                deps.dropQueuedShellResult(command.commandId)
+                shellUploaded.add(command.commandId)
+                shellResults++
+            }
+            // Not uploaded: leave the outbox row unacked so the server
+            // re-offers it and the queued result is retried next poll.
         }
         // Ack every valid offered id already resolved (this round or an
         // earlier one): the ack is idempotent, so failed acks converge
@@ -313,7 +371,7 @@ object AppInstallCommandPoll {
         // acked-and-ignored (never downloaded) so the server stops
         // re-offering them.
         val ackIds = (parsed.valid.map { it.commandId }.filter { posted.isPosted(it) } +
-            parsed.shell.map { it.commandId }.filter { posted.isPosted(it) } +
+            shellUploaded +
             parsed.unknownIds).distinct()
         val acked = if (ackIds.isEmpty()) {
             true
