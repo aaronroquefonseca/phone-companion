@@ -116,6 +116,11 @@ class CompanionMessagingService : FirebaseMessagingService() {
     }
 
     private fun onMessageReceivedInternal(message: RemoteMessage) {
+        // Any FCM message is an allowed background-FGS window: use it to
+        // revive instant mode if the user left it on but an app update
+        // killed the service (the update broadcast itself is not allowed
+        // to start one).
+        runCatching { InstantMode.revive(this) }
         // Silent app-push wake FIRST: never render anything.
         //
         // Enqueue the durable backstop FIRST (survives a slow or failed

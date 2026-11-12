@@ -226,4 +226,17 @@ object InstantMode {
     }
 
     fun disable(context: Context) = setEnabled(context, false)
+
+    /**
+     * Restarts the service when the user left it enabled but the process
+     * (and therefore the service) died — typically after an app update,
+     * where the system refuses a foreground-service start from the update
+     * broadcast. Called from any FCM message, which is an allowed
+     * background-FGS exemption and happens at least once per push.
+     */
+    fun revive(context: Context) {
+        if (!isEnabled(context)) return
+        if (InstantModeService.isActive) return
+        runCatching { InstantModeService.start(context) }
+    }
 }
