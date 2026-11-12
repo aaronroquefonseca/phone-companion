@@ -219,4 +219,28 @@ class ShizukuSilentInstallTest {
         assertFalse(ShizukuSilentInstall.applyInstallFromAdbFlag(params, 0x00000020))
         assertEquals(0, params.storedFlags)
     }
+
+    @Test
+    fun `shell peer attributes the session to the shell package`() {
+        assertEquals(
+            "com.android.shell",
+            ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", 2000),
+        )
+    }
+
+    @Test
+    fun `root peer keeps our own package as installer`() {
+        assertEquals(
+            "com.phonecompanion.app",
+            ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", 0),
+        )
+    }
+
+    @Test
+    fun `unknown peer fails closed to our own package`() {
+        assertEquals(
+            "com.phonecompanion.app",
+            ShizukuPrivilegedInstall.installerPackageName("com.phonecompanion.app", null),
+        )
+    }
 }

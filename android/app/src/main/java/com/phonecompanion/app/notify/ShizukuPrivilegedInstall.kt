@@ -296,6 +296,30 @@ object ShizukuPrivilegedInstall {
     }
 
     /**
+     * Installer identity for privileged sessions. When Shizuku runs as
+     * shell (UID 2000, the non-root case), the session must be attributed
+     * to the shell package — exactly what ackpine does — or
+     * PackageManagerService treats the session as an ordinary app install
+     * and posts the system confirmation dialog (the production symptom
+     * that survived the adb-install flag). On root/Sui (UID 0) our own
+     * package is correct. Unknown UID (binder died mid-read) fails closed
+     * to our package name: the dialog fallback + read-back verification
+     * decide the outcome, never a mis-attributed session.
+     */
+    fun installerPackageName(appPackageName: String, shizukuUid: Int?): String =
+        if (shizukuUid != null && shizukuUid != 0) SHELL_INSTALLER_PACKAGE else appPackageName
+
+    /** Shell package name used as installer identity on non-root Shizuku. */
+    const val SHELL_INSTALLER_PACKAGE = "com.android.shell"
+
+    /** Shizuku peer UID, or null when the binder is dead. Root is 0. */
+    fun peerUid(): Int? = try {
+        Shizuku.getUid()
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
      * Builds a `PackageInstaller` whose sessions commit with shell
      * privilege: the `package` system-service binder fetched through
      * Shizuku, wrapped so calls run as the Shizuku peer (shell/root),
@@ -333,6 +357,10 @@ object ShizukuPrivilegedInstall {
         // work). Throws on any edge — the caller maps it to transport
         // fallback, never to a wrong-user install.
         val userId = Context::class.java.getMethod("getUserId").invoke(app) as Int
+        // Attribute the session to the shell peer (non-root) or to us
+        // (root/Sui): the installer identity decides whether the system
+        // trusts the commit silently. See installerPackageName.
+        val installerName = installerPackageName(app.packageName, peerUid())
         return try {
             val ctor = PackageInstaller::class.java.getDeclaredConstructor(
                 ipiClass,
@@ -342,7 +370,7 @@ object ShizukuPrivilegedInstall {
             )
             ctor.isAccessible = true
             val tag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) app.attributionTag else null
-            ctor.newInstance(ipi, app.packageName, tag, userId) as PackageInstaller
+            ctor.newInstance(ipi, installerName, tag, userId) as PackageInstaller
         } catch (_: NoSuchMethodException) {
             // Pre-R (API < 30): no attribution-tag parameter.
             val ctor = PackageInstaller::class.java.getDeclaredConstructor(
@@ -351,7 +379,7 @@ object ShizukuPrivilegedInstall {
                 Int::class.javaPrimitiveType,
             )
             ctor.isAccessible = true
-            ctor.newInstance(ipi, app.packageName, userId) as PackageInstaller
+            ctor.newInstance(ipi, installerName, userId) as PackageInstaller
         }
     }
 
