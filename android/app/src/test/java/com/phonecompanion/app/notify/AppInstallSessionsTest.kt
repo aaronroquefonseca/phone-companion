@@ -150,6 +150,31 @@ class AppInstallSessionsTest {
     }
 
     @Test
+    fun `isTerminalClaimed reads without claiming`() {
+        // The result watchdog must observe the claim state without
+        // stealing the exactly-once claim from a real terminal.
+        val pushId = "test-push-claimed-read"
+        val attempt = AppInstallSessions.startAttempt(pushId)
+        try {
+            assertFalse(AppInstallSessions.isTerminalClaimed(pushId, attempt))
+            // Read before claim changes nothing: the first real claimant
+            // still wins afterwards.
+            assertFalse(AppInstallSessions.isTerminalClaimed(pushId, attempt))
+            assertTrue(AppInstallSessions.claimTerminal(pushId, attempt))
+            assertTrue(AppInstallSessions.isTerminalClaimed(pushId, attempt))
+            // Legacy key equivalence with claimTerminal.
+            assertFalse(AppInstallSessions.isTerminalClaimed("test-push-claimed-legacy", null))
+            assertTrue(AppInstallSessions.claimTerminal("test-push-claimed-legacy", null))
+            assertTrue(AppInstallSessions.isTerminalClaimed("test-push-claimed-legacy", ""))
+        } finally {
+            AppInstallSessions.clearForTest(pushId)
+            AppInstallSessions.clearForTest("test-push-claimed-legacy")
+        }
+        // Unknown push id: never claimed.
+        assertFalse(AppInstallSessions.isTerminalClaimed(pushId, attempt))
+    }
+
+    @Test
     fun `idle sessions purge after the stale window`() {
         val pushId = "test-push-purge"
         try {

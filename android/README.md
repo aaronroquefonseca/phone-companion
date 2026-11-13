@@ -176,7 +176,9 @@ The FCM token upload paths stay as-is for the notification feature.
 - On receipt (FCM wake or poll) the app downloads over HTTPS via the
   shared OkHttp stack (redirects followed https-only) to the app cache
   dir with a progress notification + Cancel action (tap opens the
-  pre-install detail), 100 MB hard cap (abort + error
+  pre-install detail; when the wake service owns the progress line —
+  payload-free by design — its tap opens the app instead, never a dead
+  tap), 100 MB hard cap (abort + error
   above it), then verifies SHA-256 BEFORE install (mismatch = hard
   refuse, error notification naming the package, file deleted, no hashes
   in logcat — package + match/mismatch only). The grant is a pre-commit
@@ -191,10 +193,22 @@ The FCM token upload paths stay as-is for the notification feature.
   user-cancelled with NO retry / cause-aware failure: transient offers
   Retry from the cached verified APK, signature/update-incompatible
   offers the target's system App-info screen with NO Retry — raw
-  installer message stays secondary detail). A
+  installer message stays secondary detail). A failed download retries
+  the same way — its post carries Retry and the pre-install tap target,
+  whose Install tap re-runs the transfer (no bytes survived). Every
+  terminal notification is tappable: retryable kinds with a payload open
+  the pre-install screen, everything else opens the app — a status post
+  is never a dead tap. A
   `STATUS_PENDING_USER_ACTION` result launches the system's
   confirmation intent WITHOUT deleting the APK or claiming a terminal
-  — the follow-up result owns the terminal. The download-cancel
+  — the follow-up result owns the terminal. Because some devices
+  (observed: Samsung + signing-key mismatch) refuse the install after
+  confirmation without ever reporting a status back, the pending path
+  also schedules a 2-minute WorkManager watchdog
+  (`AppInstallResultWatchdogWorker`): if no terminal is claimed by
+  then it posts the transient failure note (Retry, cache kept) without
+  taking the claim, so a late real result still replaces it. The
+  download-cancel
   receiver and the activity race to post at most one terminal state per
   Install-tap attempt (fresh nonce per tap, carried through the Cancel
   and installer-result intents — never two, never silent, never a

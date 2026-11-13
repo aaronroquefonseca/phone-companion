@@ -40,6 +40,20 @@ object AppInstallFlow {
         DOWNLOAD_FAILED,
         TOO_LARGE,
         DOWNLOAD_CANCELLED,
+        ;
+
+        /**
+         * True when the pre-install screen is a meaningful tap target:
+         * another attempt can still succeed (a transient download failure
+         * — network/IO, nothing known about the bytes — or a commit
+         * failure whose verified APK is kept for resume). Deterministic
+         * kinds (hash mismatch, too large, user cancelled) get no tap
+         * target beyond opening the app: retrying cannot help. [FAILED]
+         * is included even for its signature-mismatch cause, which keeps
+         * its no-Retry *button* while the screen still shows what failed.
+         */
+        val opensDetailOnTap: Boolean
+            get() = this == FAILED || this == DOWNLOAD_FAILED
     }
 
     /** Android side of the flow (network, PackageManager, installer, files). */

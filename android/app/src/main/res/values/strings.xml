@@ -125,6 +125,11 @@
     <!-- Expanded failure text: plain primary copy first, raw installer
         message as secondary transparency for bug reports (never primary). -->
     <string name="app_install_failed_expanded_body">%1$s\nDetails: %2$s</string>
+    <!-- Watchdog detail (AppInstallResultWatchdogWorker): the installer
+        never reported a status back. Wording must stay clear of the
+        failureKindOf signature phrases so it classifies TRANSIENT (Retry)
+        — the cause is unknown, not proven deterministic. -->
+    <string name="app_install_no_result_detail">The system installer never reported a result — some devices decline without reporting one (for example a different signing key). Check whether the app installed; Retry re-runs the install.</string>
     <!-- Signature/update-incompatible failure: deterministic (retrying the
         same bytes can never succeed), so no Retry — App-info instead. -->
     <string name="app_install_signature_title">Install %1$s failed</string>

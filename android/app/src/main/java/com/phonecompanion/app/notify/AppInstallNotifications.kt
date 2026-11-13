@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.phonecompanion.app.R
 import com.phonecompanion.app.ui.AppInstallActivity
+import com.phonecompanion.app.ui.MainActivity
 
 /**
  * User-visible notifications for the remote APK install flow.
@@ -33,10 +34,17 @@ import com.phonecompanion.app.ui.AppInstallActivity
  * NO Retry; any other commit/install failure keeps the existing copy and
  * adds a Retry action that re-opens the pre-install UI, whose Install tap
  * resumes via the runResume path (verified cache reused, re-download only
- * on a miss). The raw installer message rides along as secondary expanded
- * text only — never the primary explanation. User-cancelled,
- * hash-mismatch, blocked, and too-large posts stay exactly as they were
- * (no actions).
+ * on a miss). A download failure (network/IO) is retryable the same way:
+ * its post carries the Retry action and the same pre-install tap target,
+ * whose Install tap re-runs the full download (no bytes survived). The
+ * raw installer message rides along as secondary expanded text only —
+ * never the primary explanation. User-cancelled, hash-mismatch, blocked,
+ * and too-large posts keep exactly their old copy and no action buttons.
+ *
+ * Every terminal post is tappable: retryable kinds with a payload open
+ * the pre-install UI, everything else opens the app ([appEntryIntent]) —
+ * a status notification is never a dead tap, so "the download failed"
+ * can always be acted on instead of being read and dismissed.
  *
  * Logging discipline: package names and push ids only — never APK URLs,
  * hashes, tokens, or credentials.
@@ -48,6 +56,9 @@ object AppInstallNotifications {
     /** Stable action ids for the failure-notification buttons (request codes). */
     const val ACTION_RETRY = "pc_app_install_retry"
     const val ACTION_APP_INFO = "pc_app_install_app_info"
+
+    /** Stable request-code domain for the plain "opens the app" tap target. */
+    const val ACTION_OPEN_APP = "pc_app_install_open_app"
 
     /** Detail text is truncated to this many chars (operator-influenced). */
     const val MAX_DETAIL_CHARS = 200
@@ -233,7 +244,8 @@ object AppInstallNotifications {
      * stale purge (the install may complete minutes later; no installer
      * result ever returns to clean it). Claimed per attempt like every
      * terminal post, so a racing path stays silent. No actions: nothing
-     * retries — the system installer owns the install now.
+     * retries — the system installer owns the install now — but the tap
+     * opens the app rather than doing nothing.
      */
     fun notifyFallbackOpened(
         context: Context,
@@ -248,7 +260,7 @@ object AppInstallNotifications {
             context.getString(R.string.app_install_fallback_title, display),
             context.getString(R.string.app_install_fallback_body, display),
             context.getString(R.string.app_install_fallback_body, display),
-            contentIntent = null,
+            contentIntent = appEntryIntent(context, target.pushId),
             actions = emptyList(),
         )
         return true
@@ -262,11 +274,20 @@ object AppInstallNotifications {
      * detail?) order. Returns true when this caller won the claim and
      * posted; losers stay silent.
      *
-     * @param payload when non-null and [kind] is FAILED, builds the Retry
-     * tap target (the pre-install UI, whose Install tap resumes via the
+     * @param payload when non-null and [kind] opens the pre-install screen
+     * ([AppInstallFlow.TerminalKind.opensDetailOnTap]), builds that tap
+     * target (the pre-install UI, whose Install tap resumes via the
      * runResume path). Receivers rebuild it from their intent extras; the
-     * activity and auto-download pass what they already hold. A null
-     * payload (or a non-FAILED kind) posts action-less, as before.
+     * activity and auto-download pass what they already hold. Every
+     * terminal post still opens somewhere: without a usable payload the
+     * tap falls back to [appEntryIntent] (the app) instead of doing
+     * nothing.
+     * @param claim when true (every real terminal path) this caller must
+     * win [AppInstallSessions.claimTerminal] to post. The result watchdog
+     * ([AppInstallResultWatchdogWorker]) passes false: its backstop note
+     * posts only while no terminal is claimed yet and never takes the
+     * claim, so a late-arriving real result replaces it at the same
+     * notifyId instead of being silenced by it.
      */
     fun notifyTerminal(
         context: Context,
@@ -275,8 +296,14 @@ object AppInstallNotifications {
         attempt: String?,
         detail: String? = null,
         payload: AppInstallPayload? = null,
+        claim: Boolean = true,
     ): Boolean {
-        if (!AppInstallSessions.claimTerminal(target.pushId, attempt)) return false
+        val won = if (claim) {
+            AppInstallSessions.claimTerminal(target.pushId, attempt)
+        } else {
+            !AppInstallSessions.isTerminalClaimed(target.pushId, attempt)
+        }
+        if (!won) return false
         val display = target.label ?: target.packageName
         val (title, content, expanded) = when (kind) {
             AppInstallFlow.TerminalKind.SUCCESS ->
@@ -319,12 +346,30 @@ object AppInstallNotifications {
                     context.getString(R.string.app_install_cancelled_body, target.packageName),
                 )
         }
-        val contentIntent =
-            if (kind == AppInstallFlow.TerminalKind.FAILED) {
-                payload?.let { retryPendingIntent(context, it) }
-            } else {
-                null
-            }
+        // Tap target: the pre-install screen for retryable kinds that
+        // still carry their payload, otherwise the app itself — a status
+        // notification must never be a dead tap.
+        val detailTap = if (kind.opensDetailOnTap) {
+            payload?.let { retryPendingIntent(context, it) }
+        } else {
+            null
+        }
+        val contentIntent = detailTap ?: appEntryIntent(context, target.pushId)
+        val actions = when (kind) {
+            AppInstallFlow.TerminalKind.FAILED ->
+                failureActions(context, target, payload, detail)
+            AppInstallFlow.TerminalKind.DOWNLOAD_FAILED ->
+                // Nothing survived the failed transfer, so Retry re-runs
+                // the full download from the pre-install screen's Install
+                // tap (runResume falls through to runFlow on a cache miss).
+                payload?.let {
+                    listOf(
+                        context.getString(R.string.app_install_retry) to
+                            retryPendingIntent(context, it),
+                    )
+                }.orEmpty()
+            else -> emptyList()
+        }
         postTerminal(
             context,
             target.pushId,
@@ -332,9 +377,7 @@ object AppInstallNotifications {
             content,
             expanded,
             contentIntent,
-            failureActions(context, target, payload, detail).takeIf {
-                kind == AppInstallFlow.TerminalKind.FAILED
-            }.orEmpty(),
+            actions,
         )
         return true
     }
@@ -406,6 +449,25 @@ object AppInstallNotifications {
             context,
             CompanionMessagingService.actionRequestCode(payload.notifyId(), ACTION_RETRY),
             AppInstallActivity.detailIntent(context, payload),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    /**
+     * Fallback tap target for a terminal post with nothing to act on
+     * (success, cancelled, mismatch, too large, or a failure whose payload
+     * could not be rebuilt): opens the app instead of swallowing the tap.
+     * Distinct request code domain, so it never collides with the
+     * pre-install or action codes above.
+     */
+    private fun appEntryIntent(context: Context, pushId: String): PendingIntent {
+        return PendingIntent.getActivity(
+            context,
+            CompanionMessagingService.actionRequestCode(
+                AppInstallPayload.notifyIdFor(pushId),
+                ACTION_OPEN_APP,
+            ),
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }

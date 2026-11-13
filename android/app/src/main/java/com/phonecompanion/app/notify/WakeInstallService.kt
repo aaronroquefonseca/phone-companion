@@ -3,6 +3,7 @@ package com.phonecompanion.app.notify
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.phonecompanion.app.R
+import com.phonecompanion.app.ui.MainActivity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -94,11 +96,15 @@ class WakeInstallService : Service() {
      * One notification, live: shows the current download percentage (or
      * bytes when the length is unknown) and switches to "Installing…"
      * during the commit phase. Re-posting the same id keeps the service
-     * in the foreground.
+     * in the foreground. Every variant is tappable: the progress registry
+     * is deliberately payload-free (push id, package, label, percent — no
+     * URLs or hashes), so the tap opens the app rather than the
+     * pre-install screen — never a dead tap.
      */
     private fun buildNotification(): Notification {
         val installing = installingLabel
         val entry = AppInstallProgress.entries.value.values.firstOrNull()
+        val openApp = openAppIntent()
         return if (installing != null) {
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
@@ -107,6 +113,7 @@ class WakeInstallService : Service() {
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setSilent(true)
+                .apply { openApp?.let { setContentIntent(it) } }
                 .build()
         } else if (entry != null) {
             val builder = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -115,6 +122,7 @@ class WakeInstallService : Service() {
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setSilent(true)
+                .apply { openApp?.let { setContentIntent(it) } }
             val percent = entry.percent
             if (percent != null) {
                 builder.setProgress(100, percent, false)
@@ -132,8 +140,29 @@ class WakeInstallService : Service() {
                 .setPriority(NotificationCompat.PRIORITY_MIN)
                 .setOngoing(true)
                 .setSilent(true)
+                .apply { openApp?.let { setContentIntent(it) } }
                 .build()
         }
+    }
+
+    /**
+     * Tap target for the foreground notification: opens the app. Built
+     * defensively (a dead PendingIntent must never fail the foreground
+     * start, which the install flow depends on) and null-safe at every
+     * call site.
+     */
+    private fun openAppIntent(): PendingIntent? = try {
+        PendingIntent.getActivity(
+            this,
+            CompanionMessagingService.actionRequestCode(
+                NOTIFICATION_ID,
+                AppInstallNotifications.ACTION_OPEN_APP,
+            ),
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    } catch (_: Exception) {
+        null
     }
 
     private fun ensureChannel() {

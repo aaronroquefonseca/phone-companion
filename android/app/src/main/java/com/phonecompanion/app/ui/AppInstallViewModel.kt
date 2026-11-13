@@ -210,12 +210,12 @@ class AppInstallViewModel(app: Application) : AndroidViewModel(app) {
                 kind,
                 AppInstallNotifications.TerminalTarget.from(payload),
                 attempt,
-                // Retry target for FAILED posts (dialog path only now —
-                // the silent path fails over to the dialog chain instead
-                // of posting FAILED itself): the pre-install UI, whose
-                // Install tap resumes via runResume (re-verified cache,
-                // no re-download when intact).
-                payload = payload.takeIf { kind == AppInstallFlow.TerminalKind.FAILED },
+                // Retry target for the pre-install tap (dialog path only
+                // now — the silent path fails over to the dialog chain
+                // instead of posting FAILED itself): the pre-install UI,
+                // whose Install tap resumes via runResume (re-verified
+                // cache, full re-download after a failed transfer).
+                payload = payload.takeIf { kind.opensDetailOnTap },
             )
         }
         _uiState.value = InstallUiState.Finished(messageFor(payload, outcome))
