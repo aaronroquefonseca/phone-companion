@@ -77,8 +77,8 @@ input keyevent KEYCODE_WAKEUP
 wm dismiss-keyguard                               # non-secure locks only
 ```
 
-A read-only glance measured in seconds needs none of this: no
-`screen_off_timeout` write, no restore obligation.
+A read-only glance measured in seconds needs no settings change: no
+`screen_off_timeout` write, no restore obligation. It still wakes (below).
 
 Before every action, including every read:
 
