@@ -15,14 +15,34 @@ discipline applies everywhere: reference credentials only as
 ## 0. Configure once
 
 ```sh
-PC=https://phone.example.com                  # your deployment
+PC=https://phone.example.com                  # placeholder: another host
 TOKEN=<repo>/secrets/operator-token           # operator credential file
 ADMIN=<repo>/secrets/admin-password.txt       # WebUI password file
 ```
 
+If the backend runs on this machine, ask it instead of searching the disk:
+
+```sh
+# the shipped image is distroless: no shell, no printenv, so read one variable
+PC=$(docker inspect -f '{{range .Config.Env}}{{if eq (index (split . "=") 0) "EXTERNAL_BASE_URL"}}{{index (split . "=") 1}}{{end}}{{end}}' phone-companion-backend)
+# on an image with a shell, this is the same read:
+# PC=$(docker exec phone-companion-backend printenv EXTERNAL_BASE_URL)
+
+REPO=$(docker inspect -f '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' phone-companion-backend |
+  sed -n 's#/backend/widgets$##p')                                     # repo path
+TOKEN=$REPO/secrets/operator-token
+ADMIN=$REPO/secrets/admin-password.txt
+```
+
+Never inspect the container's full env: it prints `OPERATOR_API_TOKEN`,
+`ADMIN_PASSWORD` and `SESSION_SECRET` in plaintext. One variable at a time;
+never print a secret's value.
+
 Every command below uses `$PC` and `$(cat "$TOKEN")`. The backend container is
 `phone-companion-backend` by default, with the database at
-`/data/phone-companion.db`.
+`/data/phone-companion.db`. `GET /api/v1/devices` is admin-session gated
+(`backend/pair_wire.go:54`), so the login + cookie step in §1 is required, not
+a convenience.
 
 ## 1. Resolve the target (never hardcode device ids)
 
@@ -39,11 +59,16 @@ rm -f "$JAR"
 
 Skip `revoked` rows. "Everything" is `{"all":true}` in a target.
 
+The list carries pair timestamps only — `updated_at` moves on a rename, never on
+contact — so with several devices paired, "my phone" is a guess. The backend
+should expose `last_seen_at` or `online`; until it does, ask which device.
+
 ## 2. Wake strategy — before anything on the screen
 
 Identical on charger and battery; nothing depends on being plugged in.
 
-Session start, once:
+Session start, once, for a job that holds the screen or a connection open
+(transfer, install, long poll):
 
 ```sh
 settings get system screen_off_timeout            # save this
@@ -51,6 +76,9 @@ settings put system screen_off_timeout 1800000    # 30 min inactivity
 input keyevent KEYCODE_WAKEUP
 wm dismiss-keyguard                               # non-secure locks only
 ```
+
+A read-only glance measured in seconds needs none of this: no
+`screen_off_timeout` write, no restore obligation.
 
 Before every action, including every read:
 
@@ -66,7 +94,8 @@ while charging, so it is an extra, never the strategy.
 not just at session start: a short timeout cuts it in half and the failure
 looks like a bug in the app.
 
-Session end, always, including on failure: restore the saved timeout.
+Session end for a job that changed it, including on failure: restore the saved
+timeout.
 
 ### Awake is not the same as unlocked
 
@@ -102,7 +131,7 @@ working and close it when you stop, so no socket is held while idle.
 curl -s -X POST "$PC/api/v1/link/start" \
   -H "Authorization: Bearer $(cat "$TOKEN")" -H 'Content-Type: application/json' \
   -d '{"device_id":"<id>","ttl_s":900}'
-# -> {"online":false,"ttl_s":900,"wake_sent":true}   ready in ~2-3 s
+# -> {"online":false,"ttl_s":900,"wake_sent":true}   ready in a few s (FCM wake)
 
 # one blocking call per operation; the body IS the result
 curl -s -X POST "$PC/api/v1/exec" \
@@ -110,7 +139,8 @@ curl -s -X POST "$PC/api/v1/exec" \
   -d '{"device_id":"<id>","kind":"screenshot","args":{"width":540,"quality":60}}' \
   -o shot.jpg
 
-# close it: the device stops the service and drops the link in <1 s
+# close it: {"online":true,"stopping":true} means closed. The next exec may be
+# 503 device_offline or 504 device_timeout — both normal; do not retry the stop.
 curl -s -X POST "$PC/api/v1/link/stop" \
   -H "Authorization: Bearer $(cat "$TOKEN")" -H 'Content-Type: application/json' \
   -d '{"device_id":"<id>"}'
@@ -125,14 +155,19 @@ Kinds and args:
 | `logs` | `{"lines":200,"buffer":"main","filter":"-s TAG"}` | text/plain |
 | `shell` | `{"command":"id -u","timeout_ms":30000}` | `{"exit_code","stdout","stderr","truncated"}` |
 
+`width` snaps down to an integer divisor of the panel: 720 asked on a 2316 px
+capture returns 579, and text is unreadable. Downscaled captures answer "where
+am I"; use `{"full":true}` and crop locally to read anything.
+
 Offline (no session) answers `503 device_offline` immediately, `504
-device_timeout` if the device does not answer within `wait_ms`.
+device_timeout` if the device does not answer within `wait_ms` — a cold link's
+first read can hit this while the FCM wake lands, so retry that read once.
 
 Measured on a Note 20 Ultra over the public endpoint (~75 ms RTT):
 
 | operation | time |
 |---|---|
-| session open | ~2-3 s (FCM wake) |
+| session open | ~2-3 s (longer cold, FCM wake) |
 | screenshot 540 px | **230-350 ms** |
 | shell command | ~280 ms |
 | logs, 200 lines | ~550 ms |
@@ -258,6 +293,32 @@ retry and swept after 24 h.
 
 ## 6. Look at the device
 
+One batched read answers "what is this phone doing right now?":
+
+```sh
+kind=shell {"command":"input keyevent KEYCODE_WAKEUP; dumpsys power | grep -m1 mWakefulness; dumpsys window | grep -m1 mCurrentFocus; dumpsys media_session | grep -E 'description=|state=PlaybackState' | head -4; wm size"}
+```
+
+Then one `{"full":true}` screenshot. Two calls, not a probe per question: batch
+reads because a device call is ~300 ms and an agent turn is 10-20 s. An exit 0
+with broken-pipe notes on stderr is still a complete read.
+
+Read the screen by what is in the foreground:
+
+| foreground | read it with |
+|---|---|
+| video player (YouTube, VLC, Twitch) | `media_session` for title, position and declared speed; the player's progress node for duration; screenshot for the rest |
+| native app or browser | `uiautomator` dump, then tap |
+| remote desktop, DeX, second screen | pixels only; the tell is a `screencap` size that differs from `wm size` |
+
+`media_session` gives position and speed but no duration: a 42-minute video
+reported `position=…, speed=2.0`, and the duration came from a progress-bar
+`content-desc` ("25 minutes 32 seconds of 42 minutes 19 seconds"). A fullscreen
+video of a desktop is indistinguishable from a desktop in pixels — confirm focus
+plus an accessibility tree whose only content is "Video player". `speed=2.0` is
+a declaration, not proof: sample `position` and `updated` twice; `Δposition /
+Δupdated` is the real rate.
+
 ```sh
 # screenshot (fast link)
 …/exec kind=screenshot {"width":540,"quality":60}   # -> image/jpeg
@@ -316,7 +377,7 @@ tokens, no device secrets — ever.
 - Never infer a working screen from a working shell — prove it with a real
   read and a state that changed.
 - Never leave a link session open when you stop working: `link/stop`, and
-  restore the screen timeout.
+  restore the screen timeout only if you changed it.
 - Never re-push blindly after a deterministic failure.
 
 ## Installing this skill
