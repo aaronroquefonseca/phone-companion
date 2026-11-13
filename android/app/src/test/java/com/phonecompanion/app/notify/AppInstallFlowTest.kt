@@ -194,6 +194,19 @@ class AppInstallFlowTest {
     }
 
     @Test
+    fun `detail-on-tap only for the retryable terminal kinds`() {
+        with(AppInstallFlow) {
+            assertTrue(AppInstallFlow.TerminalKind.FAILED.opensDetailOnTap)
+            assertTrue(AppInstallFlow.TerminalKind.DOWNLOAD_FAILED.opensDetailOnTap)
+            assertFalse(AppInstallFlow.TerminalKind.SUCCESS.opensDetailOnTap)
+            assertFalse(AppInstallFlow.TerminalKind.USER_CANCELLED.opensDetailOnTap)
+            assertFalse(AppInstallFlow.TerminalKind.HASH_MISMATCH.opensDetailOnTap)
+            assertFalse(AppInstallFlow.TerminalKind.TOO_LARGE.opensDetailOnTap)
+            assertFalse(AppInstallFlow.TerminalKind.DOWNLOAD_CANCELLED.opensDetailOnTap)
+        }
+    }
+
+    @Test
     fun `keepVerifiedOnRevoked keeps the file for grant-resume`() = runBlocking {
         val host = FakeHost(canInstallResult = false)
         val file = dest()

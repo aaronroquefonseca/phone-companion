@@ -107,12 +107,30 @@ class CompanionMessagingService : FirebaseMessagingService() {
                     NotificationCompat.Builder(this, NotificationPayload.GENERAL_CHANNEL_ID)
                         .setSmallIcon(R.drawable.ic_notification)
                         .setContentTitle(getString(R.string.app_name))
+                        .setContentIntent(blankFallbackTap())
                         .setAutoCancel(true)
                         .build(),
                 )
             } catch (_: Throwable) {
             }
         }
+    }
+
+    /**
+     * Tap target for the last-resort blank post: opens the app. Built
+     * defensively — this runs inside the crash handler, so a failure here
+     * is swallowed by the enclosing catch and the post stays untappable
+     * rather than crashing the receiver.
+     */
+    private fun blankFallbackTap(): PendingIntent? = try {
+        PendingIntent.getActivity(
+            this,
+            actionRequestCode(0, BLANK_FALLBACK_OPEN),
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    } catch (_: Throwable) {
+        null
     }
 
     private fun onMessageReceivedInternal(message: RemoteMessage) {
@@ -306,6 +324,12 @@ class CompanionMessagingService : FirebaseMessagingService() {
          * abandoned and the already-enqueued wake worker takes over.
          */
         internal const val INLINE_POLL_TIMEOUT_MS = 8_000L
+
+        /**
+         * Stable request-code domain for the blank fallback post's tap
+         * target, so it never collides with a real notification's codes.
+         */
+        private const val BLANK_FALLBACK_OPEN = "pc_blank_fallback_open"
 
         /**
          * Runs one outbox poll inline on the FCM delivery thread, bounded

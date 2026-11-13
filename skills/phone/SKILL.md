@@ -286,8 +286,11 @@ later that it waited for a poll.
 On device: silent privileged install when Shizuku is granted (no dialog),
 otherwise progress → verified commit → system Install dialog (one press).
 Missing unknown-sources grant routes to onboarding once. Failures post Retry
-(transient) or App-info (signature) — never re-push blindly on a deterministic
-failure. Downloads live in `cacheDir/app_push/<pushId>.apk`; deleted on
+(transient commit failure, or a failed download — the tap re-runs the
+transfer) or App-info (signature) — never re-push blindly on a deterministic
+failure. Every install notification is tappable (retryable states open the
+install screen, the rest open the app), so a failed push can be retried from
+the phone instead of re-pushed. Downloads live in `cacheDir/app_push/<pushId>.apk`; deleted on
 success, cancel, or failure; a verified APK whose install failed is kept for
 retry and swept after 24 h.
 
