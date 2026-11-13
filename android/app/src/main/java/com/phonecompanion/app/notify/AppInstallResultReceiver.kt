@@ -17,7 +17,11 @@ import android.util.Log
  * signature-mismatch keeps it so uninstall-then-fresh-install needs no
  * re-download. The one exception is `STATUS_PENDING_USER_ACTION`: the
  * system's confirmation intent is launched with the cached APK kept and
- * no terminal claimed — the follow-up result owns the terminal. Failure
+ * no terminal claimed — the follow-up result owns the terminal. That
+ * follow-up is not guaranteed: some devices refuse the install after
+ * confirmation without ever reporting a status back, so the pending
+ * path also schedules [AppInstallResultWatchdogWorker] (posts only when
+ * no terminal is claimed yet, and never claims itself). Failure
  * notifications are cause-aware (App-info for signature mismatch, Retry
  * otherwise); user-cancelled stays plain informational with no retry.
  *
@@ -42,8 +46,16 @@ class AppInstallResultReceiver : BroadcastReceiver() {
         // confirmation intent (carried under Intent.EXTRA_INTENT) and
         // return WITHOUT deleting the cached APK and WITHOUT claiming a
         // terminal — the follow-up result re-enters this receiver and
-        // owns the terminal then.
+        // owns the terminal then. Schedule the swallowed-result watchdog
+        // FIRST: some devices refuse the install after confirmation
+        // without ever reporting a status back (observed: Samsung +
+        // signing-key mismatch), which used to leave total silence.
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            intent.extras?.let { bundle ->
+                val map = HashMap<String, String?>(8)
+                for (key in bundle.keySet()) map[key] = bundle.getString(key)
+                AppInstallResultWatchdogWorker.enqueue(app, map)
+            }
             launchConfirmation(app, intent, packageName)
             return
         }

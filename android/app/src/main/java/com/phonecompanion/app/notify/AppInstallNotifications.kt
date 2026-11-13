@@ -282,6 +282,12 @@ object AppInstallNotifications {
      * terminal post still opens somewhere: without a usable payload the
      * tap falls back to [appEntryIntent] (the app) instead of doing
      * nothing.
+     * @param claim when true (every real terminal path) this caller must
+     * win [AppInstallSessions.claimTerminal] to post. The result watchdog
+     * ([AppInstallResultWatchdogWorker]) passes false: its backstop note
+     * posts only while no terminal is claimed yet and never takes the
+     * claim, so a late-arriving real result replaces it at the same
+     * notifyId instead of being silenced by it.
      */
     fun notifyTerminal(
         context: Context,
@@ -290,8 +296,14 @@ object AppInstallNotifications {
         attempt: String?,
         detail: String? = null,
         payload: AppInstallPayload? = null,
+        claim: Boolean = true,
     ): Boolean {
-        if (!AppInstallSessions.claimTerminal(target.pushId, attempt)) return false
+        val won = if (claim) {
+            AppInstallSessions.claimTerminal(target.pushId, attempt)
+        } else {
+            !AppInstallSessions.isTerminalClaimed(target.pushId, attempt)
+        }
+        if (!won) return false
         val display = target.label ?: target.packageName
         val (title, content, expanded) = when (kind) {
             AppInstallFlow.TerminalKind.SUCCESS ->

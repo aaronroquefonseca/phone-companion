@@ -91,6 +91,20 @@ object AppInstallSessions {
         return session.claimed.putIfAbsent(key, true) == null
     }
 
+    /**
+     * Read-only check: has the terminal post for ([pushId], [attempt])
+     * already been claimed? Never claims — the result-receiver watchdog
+     * ([AppInstallResultWatchdogWorker]) uses it to stay silent when the
+     * installer result arrived in time, without stealing the claim from a
+     * terminal that has not posted yet. Same null/blank [attempt] legacy
+     * key as [claimTerminal].
+     */
+    fun isTerminalClaimed(pushId: String, attempt: String?): Boolean {
+        val session = sessions[pushId] ?: return false
+        val key = if (attempt.isNullOrBlank()) LEGACY_ATTEMPT_KEY else attempt
+        return session.claimed.containsKey(key)
+    }
+
     /** Test-only reset. Production paths never clear (see class kdoc). */
     fun clearForTest(pushId: String) {
         sessions.remove(pushId)

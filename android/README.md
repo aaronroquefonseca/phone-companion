@@ -201,7 +201,14 @@ The FCM token upload paths stay as-is for the notification feature.
   is never a dead tap. A
   `STATUS_PENDING_USER_ACTION` result launches the system's
   confirmation intent WITHOUT deleting the APK or claiming a terminal
-  — the follow-up result owns the terminal. The download-cancel
+  — the follow-up result owns the terminal. Because some devices
+  (observed: Samsung + signing-key mismatch) refuse the install after
+  confirmation without ever reporting a status back, the pending path
+  also schedules a 2-minute WorkManager watchdog
+  (`AppInstallResultWatchdogWorker`): if no terminal is claimed by
+  then it posts the transient failure note (Retry, cache kept) without
+  taking the claim, so a late real result still replaces it. The
+  download-cancel
   receiver and the activity race to post at most one terminal state per
   Install-tap attempt (fresh nonce per tap, carried through the Cancel
   and installer-result intents — never two, never silent, never a
